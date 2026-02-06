@@ -223,6 +223,7 @@ func (v *ClusterCustomValidator) validate(r *apiv1.Cluster) (allErrs field.Error
 		v.validatePluginConfiguration,
 		v.validateLivenessPingerProbe,
 		v.validateExtensions,
+		v.validateAutoResize,
 	}
 
 	for _, validate := range validations {
@@ -2893,4 +2894,134 @@ func (v *ClusterCustomValidator) validateExtensions(r *apiv1.Cluster) field.Erro
 	}
 
 	return result
+}
+
+// validateAutoResize validates the auto-resize configuration for storage
+func (v *ClusterCustomValidator) validateAutoResize(r *apiv1.Cluster) field.ErrorList {
+	var result field.ErrorList
+
+	// Validate data storage auto-resize
+	if r.Spec.StorageConfiguration.AutoResize != nil {
+		result = append(result, validateAutoResizeConfiguration(
+			field.NewPath("spec", "storage", "autoResize"),
+			r.Spec.StorageConfiguration.AutoResize,
+			!r.ShouldCreateWalArchiveVolume(), // isSingleVolume - WAL on same volume as data
+		)...)
+	}
+
+	// Validate WAL storage auto-resize
+	if r.Spec.WalStorage != nil && r.Spec.WalStorage.AutoResize != nil {
+		result = append(result, validateAutoResizeConfiguration(
+			field.NewPath("spec", "walStorage", "autoResize"),
+			r.Spec.WalStorage.AutoResize,
+			false, // WAL volume is separate, no special WAL risk
+		)...)
+	}
+
+	// Validate tablespace storage auto-resize
+	for idx, tablespace := range r.Spec.Tablespaces {
+		if tablespace.Storage.AutoResize != nil {
+			result = append(result, validateAutoResizeConfiguration(
+				field.NewPath("spec", "tablespaces").Index(idx).Child("storage", "autoResize"),
+				tablespace.Storage.AutoResize,
+				false, // tablespaces are separate volumes
+			)...)
+		}
+	}
+
+	return result
+}
+
+// validateAutoResizeConfiguration validates an AutoResizeConfiguration
+func validateAutoResizeConfiguration(
+	basePath *field.Path,
+	config *apiv1.AutoResizeConfiguration,
+	isSingleVolume bool,
+) field.ErrorList {
+	var result field.ErrorList
+
+	if config == nil || !config.Enabled {
+		return nil
+	}
+
+	// Validate threshold is in valid range (1-99)
+	if config.Threshold < 1 || config.Threshold > 99 {
+		result = append(result, field.Invalid(
+			basePath.Child("threshold"),
+			config.Threshold,
+			"threshold must be between 1 and 99"))
+	}
+
+	// Validate increase format
+	if config.Increase != "" {
+		if err := validateIncreaseValue(config.Increase); err != nil {
+			result = append(result, field.Invalid(
+				basePath.Child("increase"),
+				config.Increase,
+				err.Error()))
+		}
+	}
+
+	// Validate maxSize if specified
+	if config.MaxSize != "" {
+		if _, err := resource.ParseQuantity(config.MaxSize); err != nil {
+			result = append(result, field.Invalid(
+				basePath.Child("maxSize"),
+				config.MaxSize,
+				"maxSize must be a valid Kubernetes resource quantity (e.g., '100Gi')"))
+		}
+	}
+
+	// Validate WAL safety policy for single-volume clusters
+	if isSingleVolume {
+		if config.WALSafetyPolicy == nil || !config.WALSafetyPolicy.AcknowledgeWALRisk {
+			result = append(result, field.Required(
+				basePath.Child("walSafetyPolicy", "acknowledgeWALRisk"),
+				"acknowledgeWALRisk must be true for single-volume clusters (no separate WAL storage) "+
+					"to acknowledge that WAL archiving issues may trigger unnecessary resizes"))
+		}
+	}
+
+	// Validate WAL safety policy fields if provided
+	if config.WALSafetyPolicy != nil {
+		if config.WALSafetyPolicy.MaxPendingWALFiles != nil && *config.WALSafetyPolicy.MaxPendingWALFiles < 0 {
+			result = append(result, field.Invalid(
+				basePath.Child("walSafetyPolicy", "maxPendingWALFiles"),
+				*config.WALSafetyPolicy.MaxPendingWALFiles,
+				"maxPendingWALFiles must be non-negative (use 0 to disable)"))
+		}
+
+		if config.WALSafetyPolicy.MaxSlotRetentionBytes != nil && *config.WALSafetyPolicy.MaxSlotRetentionBytes < 0 {
+			result = append(result, field.Invalid(
+				basePath.Child("walSafetyPolicy", "maxSlotRetentionBytes"),
+				*config.WALSafetyPolicy.MaxSlotRetentionBytes,
+				"maxSlotRetentionBytes must be non-negative (use 0 to disable)"))
+		}
+	}
+
+	return result
+}
+
+// validateIncreaseValue checks if the increase value is a valid percentage or quantity
+func validateIncreaseValue(increase string) error {
+	if strings.HasSuffix(increase, "%") {
+		// Parse percentage
+		percentStr := strings.TrimSuffix(increase, "%")
+		percent, err := strconv.ParseFloat(percentStr, 64)
+		if err != nil {
+			return fmt.Errorf("invalid percentage format: %s", increase)
+		}
+		if percent <= 0 || percent > 100 {
+			return fmt.Errorf("percentage must be between 0 and 100: %s", increase)
+		}
+		return nil
+	}
+
+	// Try to parse as Kubernetes quantity
+	if _, err := resource.ParseQuantity(increase); err != nil {
+		return fmt.Errorf(
+			"increase must be a percentage (e.g., '20%%') or a valid resource quantity (e.g., '10Gi')")
+	}
+
+	return nil
 }
