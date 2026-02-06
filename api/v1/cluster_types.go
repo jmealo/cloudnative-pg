@@ -2062,6 +2062,68 @@ type StorageConfiguration struct {
 	PersistentVolumeClaimTemplate *corev1.PersistentVolumeClaimSpec `json:"pvcTemplate,omitempty"`
 }
 
+// AutoResizeConfiguration controls automatic PVC expansion
+type AutoResizeConfiguration struct {
+	// Enabled activates automatic PVC resizing for this volume
+	// +kubebuilder:default:=false
+	Enabled bool `json:"enabled"`
+
+	// Threshold is the disk usage percentage that triggers a resize (1-99)
+	// When usage exceeds this threshold, the PVC will be expanded
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=99
+	// +kubebuilder:default:=80
+	Threshold int `json:"threshold,omitempty"`
+
+	// Increase specifies how much to grow the PVC when resizing
+	// Can be an absolute value (e.g., "10Gi") or percentage (e.g., "20%")
+	// +kubebuilder:default:="20%"
+	Increase string `json:"increase,omitempty"`
+
+	// MaxSize is the maximum size the PVC can grow to
+	// Prevents runaway growth; resize stops when this limit is reached
+	// +optional
+	MaxSize string `json:"maxSize,omitempty"`
+
+	// CooldownPeriod is the minimum time between resize operations
+	// Prevents rapid successive resizes
+	// +kubebuilder:default:="1h"
+	CooldownPeriod *metav1.Duration `json:"cooldownPeriod,omitempty"`
+
+	// WALSafetyPolicy controls WAL-related safety checks
+	// Required for single-volume clusters; optional but recommended for all
+	// +optional
+	WALSafetyPolicy *WALSafetyPolicy `json:"walSafetyPolicy,omitempty"`
+}
+
+// WALSafetyPolicy defines safety checks related to WAL before allowing resize
+type WALSafetyPolicy struct {
+	// AcknowledgeWALRisk must be true for single-volume clusters
+	// Acknowledges that WAL issues may trigger unnecessary resizes
+	// +optional
+	AcknowledgeWALRisk bool `json:"acknowledgeWALRisk,omitempty"`
+
+	// RequireArchiveHealthy blocks resize if WAL archiving is failing
+	// Prevents masking archive failures by growing storage
+	// +kubebuilder:default:=true
+	RequireArchiveHealthy *bool `json:"requireArchiveHealthy,omitempty"`
+
+	// MaxPendingWALFiles blocks resize if too many files await archiving
+	// Set to 0 to disable this check
+	// +kubebuilder:default:=100
+	MaxPendingWALFiles *int `json:"maxPendingWALFiles,omitempty"`
+
+	// MaxSlotRetentionBytes blocks resize if inactive slots retain too much WAL
+	// Set to 0 to disable this check
+	// +optional
+	MaxSlotRetentionBytes *int64 `json:"maxSlotRetentionBytes,omitempty"`
+
+	// AlertOnResize generates a warning event when resize occurs
+	// Useful for tracking WAL-related resizes that may need investigation
+	// +kubebuilder:default:=true
+	AlertOnResize *bool `json:"alertOnResize,omitempty"`
+}
+
 // TablespaceConfiguration is the configuration of a tablespace, and includes
 // the storage specification for the tablespace
 type TablespaceConfiguration struct {
