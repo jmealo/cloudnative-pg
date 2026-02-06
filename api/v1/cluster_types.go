@@ -1058,6 +1058,97 @@ type InstanceReportedState struct {
 	IP string `json:"ip,omitempty"`
 }
 
+// ClusterDiskStatus contains disk usage information for the cluster
+type ClusterDiskStatus struct {
+	// Instances contains per-instance disk status
+	Instances []InstanceDiskStatus `json:"instances,omitempty"`
+
+	// LastAutoResize records the most recent auto-resize operation
+	// +optional
+	LastAutoResize *AutoResizeEvent `json:"lastAutoResize,omitempty"`
+}
+
+// InstanceDiskStatus contains disk usage for a single instance
+type InstanceDiskStatus struct {
+	// PodName is the name of the pod
+	PodName string `json:"podName"`
+
+	// Data volume status
+	// +optional
+	Data *VolumeDiskStatus `json:"data,omitempty"`
+
+	// WAL volume status (nil if using single volume)
+	// +optional
+	WAL *VolumeDiskStatus `json:"wal,omitempty"`
+
+	// Tablespaces volume status (keyed by tablespace name)
+	// +optional
+	Tablespaces map[string]*VolumeDiskStatus `json:"tablespaces,omitempty"`
+
+	// WALHealth contains WAL-specific health information
+	// +optional
+	WALHealth *WALHealthInfo `json:"walHealth,omitempty"`
+
+	// LastUpdated is when this status was last refreshed
+	LastUpdated metav1.Time `json:"lastUpdated"`
+}
+
+// VolumeDiskStatus contains disk usage for a single volume
+type VolumeDiskStatus struct {
+	// TotalBytes is the total capacity of the volume
+	TotalBytes int64 `json:"totalBytes"`
+
+	// UsedBytes is the used space on the volume
+	UsedBytes int64 `json:"usedBytes"`
+
+	// AvailableBytes is the available space on the volume
+	AvailableBytes int64 `json:"availableBytes"`
+
+	// PercentUsed is the percentage of the volume that is used
+	PercentUsed float64 `json:"percentUsed"`
+
+	// AtMaxSize indicates the volume has reached the configured maxSize
+	// +optional
+	AtMaxSize bool `json:"atMaxSize,omitempty"`
+}
+
+// WALHealthInfo contains WAL-specific health information
+type WALHealthInfo struct {
+	// ArchiveHealthy indicates WAL archiving is working
+	ArchiveHealthy bool `json:"archiveHealthy"`
+
+	// PendingArchiveFiles is the count of files awaiting archive
+	PendingArchiveFiles int `json:"pendingArchiveFiles"`
+
+	// InactiveReplicationSlots lists slots that aren't being consumed
+	// +optional
+	InactiveReplicationSlots []string `json:"inactiveReplicationSlots,omitempty"`
+}
+
+// AutoResizeEvent records details of an auto-resize operation
+type AutoResizeEvent struct {
+	// Time when the resize was initiated
+	Time metav1.Time `json:"time"`
+
+	// PodName of the instance whose PVC was resized
+	PodName string `json:"podName"`
+
+	// PVCName that was resized
+	PVCName string `json:"pvcName"`
+
+	// VolumeType is the type of volume (data, wal, tablespace)
+	VolumeType string `json:"volumeType"`
+
+	// OldSize before resize
+	OldSize string `json:"oldSize"`
+
+	// NewSize after resize
+	NewSize string `json:"newSize"`
+
+	// Reason for the resize
+	Reason string `json:"reason"`
+}
+
 // ClusterConditionType defines types of cluster conditions
 type ClusterConditionType string
 
