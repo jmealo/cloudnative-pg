@@ -44,3 +44,22 @@ func TestWALSafetyPolicyDefaults(t *testing.T) {
 		t.Log("RequireArchiveHealthy should default to true via kubebuilder marker")
 	}
 }
+
+func TestStorageConfigurationHasAutoResize(t *testing.T) {
+	storage := StorageConfiguration{
+		Size: "10Gi",
+		AutoResize: &AutoResizeConfiguration{
+			Enabled:   true,
+			Threshold: 80,
+			Increase:  "20%",
+			MaxSize:   "100Gi",
+		},
+	}
+
+	if storage.AutoResize == nil {
+		t.Fatal("AutoResize field should exist on StorageConfiguration")
+	}
+	if !storage.AutoResize.Enabled {
+		t.Fatal("AutoResize.Enabled should be true")
+	}
+}

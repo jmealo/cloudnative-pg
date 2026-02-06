@@ -2060,6 +2060,10 @@ type StorageConfiguration struct {
 	// Template to be used to generate the Persistent Volume Claim
 	// +optional
 	PersistentVolumeClaimTemplate *corev1.PersistentVolumeClaimSpec `json:"pvcTemplate,omitempty"`
+
+	// AutoResize configures automatic PVC expansion based on disk usage
+	// +optional
+	AutoResize *AutoResizeConfiguration `json:"autoResize,omitempty"`
 }
 
 // AutoResizeConfiguration controls automatic PVC expansion
