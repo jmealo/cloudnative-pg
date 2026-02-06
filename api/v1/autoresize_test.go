@@ -73,7 +73,7 @@ func TestClusterDiskStatusTypes(t *testing.T) {
 					TotalBytes:     100 * 1024 * 1024 * 1024, // 100Gi
 					UsedBytes:      80 * 1024 * 1024 * 1024,  // 80Gi
 					AvailableBytes: 20 * 1024 * 1024 * 1024,  // 20Gi
-					PercentUsed:    80.0,
+					PercentUsed:    80,
 				},
 			},
 		},
@@ -82,7 +82,7 @@ func TestClusterDiskStatusTypes(t *testing.T) {
 	if len(status.Instances) != 1 {
 		t.Fatal("Expected 1 instance")
 	}
-	if status.Instances[0].Data.PercentUsed != 80.0 {
+	if status.Instances[0].Data.PercentUsed != 80 {
 		t.Fatal("Expected 80% used")
 	}
 }

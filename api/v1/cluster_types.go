@@ -1108,8 +1108,8 @@ type VolumeDiskStatus struct {
 	// AvailableBytes is the available space on the volume
 	AvailableBytes int64 `json:"availableBytes"`
 
-	// PercentUsed is the percentage of the volume that is used
-	PercentUsed float64 `json:"percentUsed"`
+	// PercentUsed is the percentage of the volume that is used (0-100)
+	PercentUsed int `json:"percentUsed"`
 
 	// AtMaxSize indicates the volume has reached the configured maxSize
 	// +optional
