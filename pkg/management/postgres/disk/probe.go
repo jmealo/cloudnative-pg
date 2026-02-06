@@ -88,7 +88,11 @@ func (p *Probe) getStats(path string) (*VolumeStats, error) {
 	}
 
 	// Calculate bytes - use Bsize for block size
-	blockSize := uint64(stat.Bsize)
+	// Bsize is int64 on some platforms; handle negative values safely
+	var blockSize uint64
+	if stat.Bsize > 0 {
+		blockSize = uint64(stat.Bsize) //nolint:gosec // validated positive above
+	}
 	totalBytes := stat.Blocks * blockSize
 	freeBytes := stat.Bavail * blockSize
 	usedBytes := totalBytes - (stat.Bfree * blockSize)
