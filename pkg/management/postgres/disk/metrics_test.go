@@ -33,9 +33,11 @@ var _ = Describe("Disk Metrics", func() {
 			Expect(err).ToNot(HaveOccurred())
 
 			// Verify we can set values
+			// Note: percent_used can be calculated via PromQL as:
+			// cnpg_disk_used_bytes / cnpg_disk_total_bytes * 100
 			metrics.TotalBytes.WithLabelValues("data", "").Set(100)
 			metrics.UsedBytes.WithLabelValues("data", "").Set(80)
-			metrics.PercentUsed.WithLabelValues("data", "").Set(80.0)
+			metrics.AvailableBytes.WithLabelValues("data", "").Set(20)
 		})
 
 		It("supports multiple volume types", func() {

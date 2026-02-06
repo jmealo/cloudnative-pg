@@ -28,10 +28,11 @@ const (
 // Metrics contains all disk-related Prometheus metrics
 type Metrics struct {
 	// Bytes metrics
+	// Note: percent_used can be calculated via PromQL as:
+	// cnpg_disk_used_bytes / cnpg_disk_total_bytes * 100
 	TotalBytes     *prometheus.GaugeVec
 	UsedBytes      *prometheus.GaugeVec
 	AvailableBytes *prometheus.GaugeVec
-	PercentUsed    *prometheus.GaugeVec
 
 	// Inode metrics
 	InodesTotal *prometheus.GaugeVec
@@ -73,15 +74,6 @@ func NewMetrics() *Metrics {
 				Subsystem: subsystem,
 				Name:      "available_bytes",
 				Help:      "Available space on the volume in bytes",
-			},
-			labels,
-		),
-		PercentUsed: prometheus.NewGaugeVec(
-			prometheus.GaugeOpts{
-				Namespace: namespace,
-				Subsystem: subsystem,
-				Name:      "percent_used",
-				Help:      "Percentage of volume space used",
 			},
 			labels,
 		),
@@ -148,7 +140,6 @@ func (m *Metrics) Register(registry prometheus.Registerer) error {
 		m.TotalBytes,
 		m.UsedBytes,
 		m.AvailableBytes,
-		m.PercentUsed,
 		m.InodesTotal,
 		m.InodesUsed,
 		m.InodesFree,
@@ -173,7 +164,6 @@ func (m *Metrics) SetVolumeStats(volumeType, tablespace string, stats *VolumeSta
 	m.TotalBytes.WithLabelValues(volumeType, tablespace).Set(float64(stats.TotalBytes))
 	m.UsedBytes.WithLabelValues(volumeType, tablespace).Set(float64(stats.UsedBytes))
 	m.AvailableBytes.WithLabelValues(volumeType, tablespace).Set(float64(stats.AvailableBytes))
-	m.PercentUsed.WithLabelValues(volumeType, tablespace).Set(float64(stats.PercentUsed))
 	m.InodesTotal.WithLabelValues(volumeType, tablespace).Set(float64(stats.InodesTotal))
 	m.InodesUsed.WithLabelValues(volumeType, tablespace).Set(float64(stats.InodesUsed))
 	m.InodesFree.WithLabelValues(volumeType, tablespace).Set(float64(stats.InodesFree))

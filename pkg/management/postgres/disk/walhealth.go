@@ -29,7 +29,11 @@ import (
 
 // WALHealthStatus contains WAL health information for auto-resize decisions
 type WALHealthStatus struct {
-	// ArchiveHealthy indicates WAL archiving is working
+	// IsPrimary indicates if this instance is the primary
+	IsPrimary bool
+	// ArchivingEnabled indicates if WAL archiving is configured
+	ArchivingEnabled bool
+	// ArchiveHealthy indicates WAL archiving is working (only meaningful if ArchivingEnabled)
 	ArchiveHealthy bool
 	// PendingArchiveFiles is the count of files awaiting archive
 	PendingArchiveFiles int
@@ -98,25 +102,46 @@ func (h *WALHealthChecker) Check(ctx context.Context, db *sql.DB) (*WALHealthSta
 		ArchiveHealthy: true,
 	}
 
-	// Count pending archive files
-	ready, err := h.CountPendingArchive()
+	if db == nil {
+		return status, nil
+	}
+
+	// Check if this is primary or replica
+	isPrimary, err := h.checkIsPrimary(ctx, db)
 	if err != nil {
 		return nil, err
 	}
-	status.PendingArchiveFiles = ready
+	status.IsPrimary = isPrimary
 
-	// Consider archive unhealthy if too many files pending
-	if ready > 10 {
-		status.ArchiveHealthy = false
+	// Check if archiving is enabled
+	archivingEnabled, err := h.checkArchivingEnabled(ctx, db)
+	if err != nil {
+		return nil, err
 	}
+	status.ArchivingEnabled = archivingEnabled
 
-	// Check archive timestamps from pg_stat_archiver
-	if db != nil {
+	// Only check archive health if archiving is enabled
+	if archivingEnabled {
+		// Count pending archive files
+		ready, err := h.CountPendingArchive()
+		if err != nil {
+			return nil, err
+		}
+		status.PendingArchiveFiles = ready
+
+		// Consider archive unhealthy if too many files pending
+		if ready > 10 {
+			status.ArchiveHealthy = false
+		}
+
+		// Check archive timestamps from pg_stat_archiver
 		if err := h.checkArchiveStats(ctx, db, status); err != nil {
 			return nil, err
 		}
+	}
 
-		// Check replication slots
+	// Only check replication slots on the primary (uses pg_current_wal_lsn())
+	if isPrimary {
 		slots, err := h.checkReplicationSlots(ctx, db)
 		if err != nil {
 			return nil, err
@@ -131,6 +156,29 @@ func (h *WALHealthChecker) Check(ctx context.Context, db *sql.DB) (*WALHealthSta
 	}
 
 	return status, nil
+}
+
+// checkIsPrimary determines if this instance is the primary
+func (h *WALHealthChecker) checkIsPrimary(ctx context.Context, db *sql.DB) (bool, error) {
+	var isInRecovery bool
+	err := db.QueryRowContext(ctx, "SELECT pg_is_in_recovery()").Scan(&isInRecovery)
+	if err != nil {
+		return false, err
+	}
+	// Primary is NOT in recovery mode
+	return !isInRecovery, nil
+}
+
+// checkArchivingEnabled determines if WAL archiving is configured
+func (h *WALHealthChecker) checkArchivingEnabled(ctx context.Context, db *sql.DB) (bool, error) {
+	var archiveMode string
+	err := db.QueryRowContext(ctx,
+		"SELECT setting FROM pg_settings WHERE name = 'archive_mode'").Scan(&archiveMode)
+	if err != nil {
+		return false, err
+	}
+	// archive_mode can be 'off', 'on', or 'always'
+	return archiveMode != "off", nil
 }
 
 func (h *WALHealthChecker) checkArchiveStats(ctx context.Context, db *sql.DB, status *WALHealthStatus) error {
