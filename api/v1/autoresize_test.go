@@ -86,3 +86,19 @@ func TestClusterDiskStatusTypes(t *testing.T) {
 		t.Fatal("Expected 80% used")
 	}
 }
+
+func TestClusterStatusHasDiskStatus(t *testing.T) {
+	cluster := &Cluster{
+		Status: ClusterStatus{
+			DiskStatus: &ClusterDiskStatus{
+				Instances: []InstanceDiskStatus{
+					{PodName: "test-1"},
+				},
+			},
+		},
+	}
+
+	if cluster.Status.DiskStatus == nil {
+		t.Fatal("DiskStatus field should exist on ClusterStatus")
+	}
+}

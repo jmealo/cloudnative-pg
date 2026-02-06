@@ -1030,6 +1030,10 @@ type ClusterStatus struct {
 	// SystemID is the latest detected PostgreSQL SystemID
 	// +optional
 	SystemID string `json:"systemID,omitempty"`
+
+	// DiskStatus reports disk usage for all instances
+	// +optional
+	DiskStatus *ClusterDiskStatus `json:"diskStatus,omitempty"`
 }
 
 // ImageInfo contains the information about a PostgreSQL image
