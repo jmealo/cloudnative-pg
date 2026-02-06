@@ -19,99 +19,78 @@ package disk
 import (
 	"os"
 	"path/filepath"
-	"testing"
+
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
 )
 
-func TestCountPendingArchive(t *testing.T) {
-	// Create temp archive_status directory
-	tmpDir, err := os.MkdirTemp("", "wal-health-test")
-	if err != nil {
-		t.Fatalf("failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
+var _ = Describe("WAL Health Checker", func() {
+	var tmpDir string
 
-	archiveStatusPath := tmpDir
+	BeforeEach(func() {
+		var err error
+		tmpDir, err = os.MkdirTemp("", "wal-health-test")
+		Expect(err).ToNot(HaveOccurred())
+	})
 
-	// Create some .ready files (WAL files awaiting archive)
-	readyFiles := []string{
-		"000000010000000000000001.ready",
-		"000000010000000000000002.ready",
-		"000000010000000000000003.ready",
-		"000000010000000000000004.ready",
-		"000000010000000000000005.ready",
-	}
+	AfterEach(func() {
+		_ = os.RemoveAll(tmpDir)
+	})
 
-	for _, fileName := range readyFiles {
-		filePath := filepath.Join(archiveStatusPath, fileName)
-		if err := os.WriteFile(filePath, []byte{}, 0644); err != nil {
-			t.Fatalf("failed to create ready file: %v", err)
-		}
-	}
+	Describe("CountPendingArchive", func() {
+		It("counts .ready files correctly", func() {
+			readyFiles := []string{
+				"000000010000000000000001.ready",
+				"000000010000000000000002.ready",
+				"000000010000000000000003.ready",
+				"000000010000000000000004.ready",
+				"000000010000000000000005.ready",
+			}
 
-	checker := NewWALHealthCheckerWithPath(archiveStatusPath)
-	count, err := checker.CountPendingArchive()
-	if err != nil {
-		t.Fatalf("CountPendingArchive failed: %v", err)
-	}
+			for _, fileName := range readyFiles {
+				filePath := filepath.Join(tmpDir, fileName)
+				err := os.WriteFile(filePath, []byte{}, 0o600)
+				Expect(err).ToNot(HaveOccurred())
+			}
 
-	if count != 5 {
-		t.Errorf("expected 5 pending files, got %d", count)
-	}
-}
+			checker := NewWALHealthCheckerWithPath(tmpDir)
+			count, err := checker.CountPendingArchive()
+			Expect(err).ToNot(HaveOccurred())
+			Expect(count).To(Equal(5))
+		})
 
-func TestCountPendingArchiveEmptyDir(t *testing.T) {
-	tmpDir, _ := os.MkdirTemp("", "wal-health-test")
-	defer os.RemoveAll(tmpDir)
+		It("returns zero for empty directory", func() {
+			checker := NewWALHealthCheckerWithPath(tmpDir)
+			count, err := checker.CountPendingArchive()
+			Expect(err).ToNot(HaveOccurred())
+			Expect(count).To(Equal(0))
+		})
 
-	checker := NewWALHealthCheckerWithPath(tmpDir)
-	count, err := checker.CountPendingArchive()
-	if err != nil {
-		t.Fatalf("CountPendingArchive failed: %v", err)
-	}
+		It("returns zero for non-existent directory", func() {
+			checker := NewWALHealthCheckerWithPath("/nonexistent/path/archive_status")
+			count, err := checker.CountPendingArchive()
+			Expect(err).ToNot(HaveOccurred())
+			Expect(count).To(Equal(0))
+		})
 
-	if count != 0 {
-		t.Errorf("expected 0 pending files, got %d", count)
-	}
-}
+		It("ignores non-.ready files", func() {
+			files := []string{
+				"000000010000000000000001.ready",
+				"000000010000000000000002.done",
+				"000000010000000000000003.ready",
+				"some_other_file.txt",
+			}
 
-func TestCountPendingArchiveNonExistentDir(t *testing.T) {
-	checker := NewWALHealthCheckerWithPath("/nonexistent/path/archive_status")
-	count, err := checker.CountPendingArchive()
-	if err != nil {
-		t.Fatalf("CountPendingArchive should not error for non-existent dir: %v", err)
-	}
+			for _, fileName := range files {
+				filePath := filepath.Join(tmpDir, fileName)
+				err := os.WriteFile(filePath, []byte{}, 0o600)
+				Expect(err).ToNot(HaveOccurred())
+			}
 
-	if count != 0 {
-		t.Errorf("expected 0 pending files for non-existent dir, got %d", count)
-	}
-}
-
-func TestCountPendingArchiveIgnoresNonReadyFiles(t *testing.T) {
-	tmpDir, _ := os.MkdirTemp("", "wal-health-test")
-	defer os.RemoveAll(tmpDir)
-
-	// Create mixed files
-	files := []string{
-		"000000010000000000000001.ready", // Should count
-		"000000010000000000000002.done",  // Should NOT count
-		"000000010000000000000003.ready", // Should count
-		"some_other_file.txt",            // Should NOT count
-	}
-
-	for _, fileName := range files {
-		filePath := filepath.Join(tmpDir, fileName)
-		if err := os.WriteFile(filePath, []byte{}, 0644); err != nil {
-			t.Fatalf("failed to create file: %v", err)
-		}
-	}
-
-	checker := NewWALHealthCheckerWithPath(tmpDir)
-	count, err := checker.CountPendingArchive()
-	if err != nil {
-		t.Fatalf("CountPendingArchive failed: %v", err)
-	}
-
-	if count != 2 {
-		t.Errorf("expected 2 pending files (only .ready), got %d", count)
-	}
-}
+			checker := NewWALHealthCheckerWithPath(tmpDir)
+			count, err := checker.CountPendingArchive()
+			Expect(err).ToNot(HaveOccurred())
+			Expect(count).To(Equal(2))
+		})
+	})
+})

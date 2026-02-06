@@ -62,13 +62,13 @@ func NewProbeWithPaths(dataPath, walPath, tablespacePath string) *Probe {
 }
 
 // GetDataStats returns filesystem stats for the PGDATA volume
-func (p *Probe) GetDataStats(ctx context.Context) (*VolumeStats, error) {
+func (p *Probe) GetDataStats(_ context.Context) (*VolumeStats, error) {
 	return p.getStats(p.dataPath)
 }
 
 // GetWALStats returns filesystem stats for the WAL volume
 // Returns nil if WAL is on the same volume as PGDATA
-func (p *Probe) GetWALStats(ctx context.Context, separateWAL bool) (*VolumeStats, error) {
+func (p *Probe) GetWALStats(_ context.Context, separateWAL bool) (*VolumeStats, error) {
 	if !separateWAL {
 		return nil, nil
 	}
@@ -76,7 +76,7 @@ func (p *Probe) GetWALStats(ctx context.Context, separateWAL bool) (*VolumeStats
 }
 
 // GetTablespaceStats returns filesystem stats for a tablespace volume
-func (p *Probe) GetTablespaceStats(ctx context.Context, tablespaceName string) (*VolumeStats, error) {
+func (p *Probe) GetTablespaceStats(_ context.Context, tablespaceName string) (*VolumeStats, error) {
 	path := specs.MountForTablespace(tablespaceName)
 	return p.getStats(path)
 }
@@ -95,7 +95,8 @@ func (p *Probe) getStats(path string) (*VolumeStats, error) {
 
 	var percentUsed int
 	if totalBytes > 0 {
-		percentUsed = int((usedBytes * 100) / totalBytes)
+		// Use float64 to avoid potential overflow on multiplication
+		percentUsed = int(float64(usedBytes) / float64(totalBytes) * 100)
 	}
 
 	return &VolumeStats{

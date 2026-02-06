@@ -17,55 +17,61 @@ limitations under the License.
 package disk
 
 import (
-	"testing"
-
 	"github.com/prometheus/client_golang/prometheus"
+
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
 )
 
-func TestMetricsCanBeRegistered(t *testing.T) {
-	registry := prometheus.NewRegistry()
-	metrics := NewMetrics()
+var _ = Describe("Disk Metrics", func() {
+	Describe("NewMetrics", func() {
+		It("can be registered with prometheus", func() {
+			registry := prometheus.NewRegistry()
+			metrics := NewMetrics()
 
-	if err := metrics.Register(registry); err != nil {
-		t.Fatalf("failed to register metrics: %v", err)
-	}
+			err := metrics.Register(registry)
+			Expect(err).ToNot(HaveOccurred())
 
-	// Verify we can set values
-	metrics.TotalBytes.WithLabelValues("data", "").Set(100)
-	metrics.UsedBytes.WithLabelValues("data", "").Set(80)
-	metrics.PercentUsed.WithLabelValues("data", "").Set(80.0)
-}
+			// Verify we can set values
+			metrics.TotalBytes.WithLabelValues("data", "").Set(100)
+			metrics.UsedBytes.WithLabelValues("data", "").Set(80)
+			metrics.PercentUsed.WithLabelValues("data", "").Set(80.0)
+		})
 
-func TestMetricsLabels(t *testing.T) {
-	metrics := NewMetrics()
+		It("supports multiple volume types", func() {
+			metrics := NewMetrics()
 
-	// Should support data, wal, and tablespace volume types
-	metrics.TotalBytes.WithLabelValues("data", "").Set(100)
-	metrics.TotalBytes.WithLabelValues("wal", "").Set(50)
-	metrics.TotalBytes.WithLabelValues("tablespace", "hot_data").Set(200)
-}
+			// Should support data, wal, and tablespace volume types
+			metrics.TotalBytes.WithLabelValues("data", "").Set(100)
+			metrics.TotalBytes.WithLabelValues("wal", "").Set(50)
+			metrics.TotalBytes.WithLabelValues("tablespace", "hot_data").Set(200)
+		})
+	})
 
-func TestSetVolumeStats(t *testing.T) {
-	metrics := NewMetrics()
+	Describe("SetVolumeStats", func() {
+		It("updates metrics from VolumeStats", func() {
+			metrics := NewMetrics()
 
-	stats := &VolumeStats{
-		Path:           "/var/lib/postgresql/data",
-		TotalBytes:     100 * 1024 * 1024 * 1024, // 100Gi
-		UsedBytes:      80 * 1024 * 1024 * 1024,  // 80Gi
-		AvailableBytes: 20 * 1024 * 1024 * 1024,  // 20Gi
-		PercentUsed:    80,
-		InodesTotal:    1000000,
-		InodesUsed:     500000,
-		InodesFree:     500000,
-	}
+			stats := &VolumeStats{
+				Path:           "/var/lib/postgresql/data",
+				TotalBytes:     100 * 1024 * 1024 * 1024,
+				UsedBytes:      80 * 1024 * 1024 * 1024,
+				AvailableBytes: 20 * 1024 * 1024 * 1024,
+				PercentUsed:    80,
+				InodesTotal:    1000000,
+				InodesUsed:     500000,
+				InodesFree:     500000,
+			}
 
-	// Should not panic
-	metrics.SetVolumeStats("data", "", stats)
-}
+			// Should not panic
+			metrics.SetVolumeStats("data", "", stats)
+		})
 
-func TestSetVolumeStatsNil(t *testing.T) {
-	metrics := NewMetrics()
+		It("handles nil stats gracefully", func() {
+			metrics := NewMetrics()
 
-	// Should not panic with nil stats
-	metrics.SetVolumeStats("data", "", nil)
-}
+			// Should not panic with nil stats
+			metrics.SetVolumeStats("data", "", nil)
+		})
+	})
+})

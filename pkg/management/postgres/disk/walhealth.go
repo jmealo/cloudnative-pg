@@ -163,7 +163,7 @@ func (h *WALHealthChecker) checkArchiveStats(ctx context.Context, db *sql.DB, st
 	return nil
 }
 
-func (h *WALHealthChecker) checkReplicationSlots(ctx context.Context, db *sql.DB) ([]SlotInfo, error) {
+func (h *WALHealthChecker) checkReplicationSlots(ctx context.Context, db *sql.DB) (slots []SlotInfo, err error) {
 	rows, err := db.QueryContext(ctx, `
 		SELECT
 			slot_name,
@@ -176,9 +176,12 @@ func (h *WALHealthChecker) checkReplicationSlots(ctx context.Context, db *sql.DB
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() {
+		if closeErr := rows.Close(); closeErr != nil && err == nil {
+			err = closeErr
+		}
+	}()
 
-	var slots []SlotInfo
 	for rows.Next() {
 		var slot SlotInfo
 		var restartLSN sql.NullString

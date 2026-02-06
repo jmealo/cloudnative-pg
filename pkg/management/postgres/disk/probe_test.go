@@ -19,76 +19,57 @@ package disk
 import (
 	"context"
 	"os"
-	"testing"
+
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
 )
 
-func TestGetStatsReturnsValidData(t *testing.T) {
-	// Use temp directory for testing
-	tmpDir, err := os.MkdirTemp("", "disk-probe-test")
-	if err != nil {
-		t.Fatalf("failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
+var _ = Describe("Disk Probe", func() {
+	var tmpDir string
 
-	probe := NewProbeWithPaths(tmpDir, "", "")
-	ctx := context.Background()
+	BeforeEach(func() {
+		var err error
+		tmpDir, err = os.MkdirTemp("", "disk-probe-test")
+		Expect(err).ToNot(HaveOccurred())
+	})
 
-	stats, err := probe.GetDataStats(ctx)
-	if err != nil {
-		t.Fatalf("GetDataStats failed: %v", err)
-	}
+	AfterEach(func() {
+		_ = os.RemoveAll(tmpDir)
+	})
 
-	if stats == nil {
-		t.Fatal("stats should not be nil")
-	}
+	Describe("GetDataStats", func() {
+		It("returns valid filesystem statistics", func() {
+			probe := NewProbeWithPaths(tmpDir, "", "")
+			ctx := context.Background()
 
-	if stats.TotalBytes == 0 {
-		t.Error("TotalBytes should be > 0")
-	}
+			stats, err := probe.GetDataStats(ctx)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(stats).ToNot(BeNil())
+			Expect(stats.TotalBytes).To(BeNumerically(">", 0))
+			Expect(stats.PercentUsed).To(BeNumerically(">=", 0))
+			Expect(stats.PercentUsed).To(BeNumerically("<=", 100))
+			Expect(stats.Path).To(Equal(tmpDir))
+		})
+	})
 
-	if stats.PercentUsed < 0 || stats.PercentUsed > 100 {
-		t.Errorf("PercentUsed should be 0-100, got %d", stats.PercentUsed)
-	}
+	Describe("GetWALStats", func() {
+		It("returns nil for single volume clusters", func() {
+			probe := NewProbeWithPaths("/tmp", "", "")
+			ctx := context.Background()
 
-	if stats.Path != tmpDir {
-		t.Errorf("Path should be %s, got %s", tmpDir, stats.Path)
-	}
-}
+			stats, err := probe.GetWALStats(ctx, false)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(stats).To(BeNil())
+		})
 
-func TestGetWALStatsReturnsNilForSingleVolume(t *testing.T) {
-	probe := NewProbeWithPaths("/tmp", "", "")
-	ctx := context.Background()
+		It("returns data for separate WAL volume", func() {
+			probe := NewProbeWithPaths("/tmp", tmpDir, "")
+			ctx := context.Background()
 
-	stats, err := probe.GetWALStats(ctx, false) // separateWAL = false
-	if err != nil {
-		t.Fatalf("GetWALStats failed: %v", err)
-	}
-
-	if stats != nil {
-		t.Error("WAL stats should be nil for single volume")
-	}
-}
-
-func TestGetWALStatsReturnsDataForSeparateVolume(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "disk-probe-wal-test")
-	if err != nil {
-		t.Fatalf("failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
-
-	probe := NewProbeWithPaths("/tmp", tmpDir, "")
-	ctx := context.Background()
-
-	stats, err := probe.GetWALStats(ctx, true) // separateWAL = true
-	if err != nil {
-		t.Fatalf("GetWALStats failed: %v", err)
-	}
-
-	if stats == nil {
-		t.Fatal("WAL stats should not be nil for separate volume")
-	}
-
-	if stats.TotalBytes == 0 {
-		t.Error("TotalBytes should be > 0")
-	}
-}
+			stats, err := probe.GetWALStats(ctx, true)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(stats).ToNot(BeNil())
+			Expect(stats.TotalBytes).To(BeNumerically(">", 0))
+		})
+	})
+})

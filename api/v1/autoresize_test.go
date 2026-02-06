@@ -17,88 +17,80 @@ limitations under the License.
 package v1
 
 import (
-	"testing"
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
 )
 
-func TestAutoResizeConfigurationDefaults(t *testing.T) {
-	config := &AutoResizeConfiguration{
-		Enabled: true,
-	}
+var _ = Describe("AutoResizeConfiguration", func() {
+	It("can be created with default values", func() {
+		config := &AutoResizeConfiguration{
+			Enabled: true,
+		}
+		Expect(config.Enabled).To(BeTrue())
+		// Threshold defaults to 80 via kubebuilder marker
+		// Increase defaults to "20%" via kubebuilder marker
+	})
+})
 
-	// Test default threshold
-	if config.Threshold == 0 {
-		t.Log("Threshold should default to 80 via kubebuilder marker")
-	}
+var _ = Describe("WALSafetyPolicy", func() {
+	It("can be created with default values", func() {
+		policy := &WALSafetyPolicy{}
+		Expect(policy).ToNot(BeNil())
+		// RequireArchiveHealthy defaults to true via kubebuilder marker
+	})
+})
 
-	// Test default increase
-	if config.Increase == "" {
-		t.Log("Increase should default to 20% via kubebuilder marker")
-	}
-}
+var _ = Describe("StorageConfiguration", func() {
+	It("supports AutoResize field", func() {
+		storage := StorageConfiguration{
+			Size: "10Gi",
+			AutoResize: &AutoResizeConfiguration{
+				Enabled:   true,
+				Threshold: 80,
+				Increase:  "20%",
+				MaxSize:   "100Gi",
+			},
+		}
 
-func TestWALSafetyPolicyDefaults(t *testing.T) {
-	policy := &WALSafetyPolicy{}
+		Expect(storage.AutoResize).ToNot(BeNil())
+		Expect(storage.AutoResize.Enabled).To(BeTrue())
+		Expect(storage.AutoResize.Threshold).To(Equal(80))
+	})
+})
 
-	// RequireArchiveHealthy should default to true
-	if policy.RequireArchiveHealthy == nil {
-		t.Log("RequireArchiveHealthy should default to true via kubebuilder marker")
-	}
-}
-
-func TestStorageConfigurationHasAutoResize(t *testing.T) {
-	storage := StorageConfiguration{
-		Size: "10Gi",
-		AutoResize: &AutoResizeConfiguration{
-			Enabled:   true,
-			Threshold: 80,
-			Increase:  "20%",
-			MaxSize:   "100Gi",
-		},
-	}
-
-	if storage.AutoResize == nil {
-		t.Fatal("AutoResize field should exist on StorageConfiguration")
-	}
-	if !storage.AutoResize.Enabled {
-		t.Fatal("AutoResize.Enabled should be true")
-	}
-}
-
-func TestClusterDiskStatusTypes(t *testing.T) {
-	status := &ClusterDiskStatus{
-		Instances: []InstanceDiskStatus{
-			{
-				PodName: "cluster-1",
-				Data: &VolumeDiskStatus{
-					TotalBytes:     100 * 1024 * 1024 * 1024, // 100Gi
-					UsedBytes:      80 * 1024 * 1024 * 1024,  // 80Gi
-					AvailableBytes: 20 * 1024 * 1024 * 1024,  // 20Gi
-					PercentUsed:    80,
+var _ = Describe("ClusterDiskStatus", func() {
+	It("can hold instance disk status", func() {
+		status := &ClusterDiskStatus{
+			Instances: []InstanceDiskStatus{
+				{
+					PodName: "cluster-1",
+					Data: &VolumeDiskStatus{
+						TotalBytes:     100 * 1024 * 1024 * 1024,
+						UsedBytes:      80 * 1024 * 1024 * 1024,
+						AvailableBytes: 20 * 1024 * 1024 * 1024,
+						PercentUsed:    80,
+					},
 				},
 			},
-		},
-	}
+		}
 
-	if len(status.Instances) != 1 {
-		t.Fatal("Expected 1 instance")
-	}
-	if status.Instances[0].Data.PercentUsed != 80 {
-		t.Fatal("Expected 80% used")
-	}
-}
+		Expect(status.Instances).To(HaveLen(1))
+		Expect(status.Instances[0].Data.PercentUsed).To(Equal(80))
+	})
+})
 
-func TestClusterStatusHasDiskStatus(t *testing.T) {
-	cluster := &Cluster{
-		Status: ClusterStatus{
-			DiskStatus: &ClusterDiskStatus{
-				Instances: []InstanceDiskStatus{
-					{PodName: "test-1"},
+var _ = Describe("ClusterStatus", func() {
+	It("supports DiskStatus field", func() {
+		cluster := &Cluster{
+			Status: ClusterStatus{
+				DiskStatus: &ClusterDiskStatus{
+					Instances: []InstanceDiskStatus{
+						{PodName: "test-1"},
+					},
 				},
 			},
-		},
-	}
+		}
 
-	if cluster.Status.DiskStatus == nil {
-		t.Fatal("DiskStatus field should exist on ClusterStatus")
-	}
-}
+		Expect(cluster.Status.DiskStatus).ToNot(BeNil())
+	})
+})
