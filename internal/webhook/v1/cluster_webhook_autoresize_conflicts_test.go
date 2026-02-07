@@ -342,7 +342,7 @@ var _ = Describe("auto-resize configuration conflicts", func() {
 				"should validate all storage types independently")
 
 			// Verify errors reference different paths
-			var fieldPaths []string
+			fieldPaths := make([]string, 0, len(errs))
 			for _, e := range errs {
 				fieldPaths = append(fieldPaths, e.Field)
 			}
