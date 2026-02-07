@@ -112,6 +112,12 @@ func (h *HealthChecker) Check(db DBQuerier, isPrimary bool) (*HealthStatus, erro
 			contextLogger.Error(err, "failed to query inactive replication slots")
 			// Non-fatal: continue with other checks
 		}
+		contextLogger.Debug("queried inactive replication slots",
+			"isPrimary", isPrimary,
+			"inactiveSlots", len(status.InactiveSlots))
+	} else {
+		contextLogger.Debug("skipping inactive slot query (not primary)",
+			"isPrimary", isPrimary)
 	}
 
 	return status, nil
