@@ -977,13 +977,7 @@ var _ = Describe("PVC Auto-Resize", Label(tests.LabelAutoResize), func() {
 		)
 		var namespace string
 
-		// TODO: This test is flaky. The slot exists in PostgreSQL (verified via psql)
-		// but isn't being detected by the instance manager's WAL health check.
-		// The slot query runs on isPrimary=true, and the cluster IS a primary,
-		// but InactiveSlots remains empty. The unit tests for queryInactiveSlots pass,
-		// so this may be a timing issue with status propagation or connection pooling.
-		// Marking as Pending until the root cause is identified.
-		PIt("should block resize when replication slot retains too much WAL", func(_ SpecContext) {
+		It("should block resize when replication slot retains too much WAL", func(_ SpecContext) {
 			const namespacePrefix = "autoresize-slotblock-e2e"
 			var err error
 
