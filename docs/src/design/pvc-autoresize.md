@@ -1012,6 +1012,11 @@ However, directory-based provisioners like [local-path-provisioner](https://gith
 
 *This RFC was prepared alongside a detailed E2E testing design. I welcome feedback on the approach, API surface, safety mechanisms, and implementation phasing.*
 
+*Companion documents:*
+
+- *[E2E Testing Spec](pvc-autoresize-e2e-testing.md) — original test scenario designs*
+- *[E2E Testing Requirements](pvc-autoresize-e2e-requirements.md) — gap analysis and prioritized requirements list (based on audit of spec vs. implementation)*
+
 ---
 
 ¹ **Design Evolution:** The initial version of this RFC used a flat `AutoResizeConfiguration` struct with `usageThreshold`, `increase`, `minIncrease`, `maxIncrease`, `maxSize`, and `cooldownPeriod`. Community feedback (particularly from @ardentperf) identified that straight percentages are problematic across different volume scales, and that time-based cooldowns don't map to cloud provider rate limits. The redesigned behavior-driven model with `triggers`, `expansion` (with clamping), and `strategy` (with budget-based rate limiting) addresses these concerns while remaining simple for the common case.

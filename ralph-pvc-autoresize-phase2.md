@@ -3,6 +3,7 @@ All code is written and committed. Your job is to make it COMPILE, PASS TESTS,
 BUILD, and RUN E2E on AKS.
 
 Ref: docs/src/design/pvc-autoresize.md
+E2E Requirements: docs/src/design/pvc-autoresize-e2e-requirements.md
 
 ## Project Context
 - Repo: cloudnative-pg/cloudnative-pg (Fork by jmealo)
@@ -471,6 +472,75 @@ If timeouts persist despite sequential execution:
 
 ---
 
+## Phase 5.5: E2E Test Coverage Gaps
+
+AFTER the existing E2E tests pass on AKS, implement the missing test coverage
+documented in `docs/src/design/pvc-autoresize-e2e-requirements.md`.
+
+That file is the authoritative source. Read it in full before starting this phase.
+Below is a summary of what needs to be done.
+
+### P0 — Must implement
+
+- [ ] **REQ-11: MinAvailable trigger**
+      New fixture `cluster-autoresize-minavailable.yaml.template`:
+      - `triggers.minAvailable: "300Mi"` (no usageThreshold or set to 99)
+      - `size: 2Gi`
+      New test: fill disk until <300Mi remain, verify PVC grows.
+      This exercises the OR-logic trigger path that is currently untested.
+
+### P1 — Should implement
+
+- [ ] **REQ-12: AutoResizeEvent recording**
+      Add a `By()` step to the basic resize test (Test #1) that reads
+      `cluster.Status.AutoResizeEvents` after a successful resize and verifies:
+      - Array is non-empty
+      - Latest event has `Result == "success"` and `VolumeType == "data"`
+
+- [ ] **REQ-13: resize_blocked metric**
+      Add a `By()` step to the archive-block test (Test #11) that scrapes the
+      metrics endpoint and verifies `cnpg_disk_resize_blocked` is present.
+
+- [ ] **REQ-14: MaxStep runtime clamping**
+      New fixture `cluster-autoresize-maxstep.yaml.template`:
+      - `size: 10Gi`, `step: "50%"`, `maxStep: "2Gi"`
+      New test: fill disk, verify PVC grows by at most 2Gi (to ≤12Gi).
+
+- [ ] **REQ-15: MaxPendingWALFiles block**
+      May be combined with the archive-block test. Add assertion that WAL health
+      status shows pending files exceeding threshold, or create a dedicated test
+      with `maxPendingWALFiles: 3`.
+
+- [ ] **REQ-16: Multi-instance resize**
+      The basic fixture already has `instances: 2`. After resize triggers,
+      verify PVCs for ALL instances grew (check both `-1` and `-2`).
+
+### P2 — Implement if time allows
+
+- [ ] REQ-18: Metric value sanity (total bytes > 1GiB on 2Gi volume)
+- [ ] REQ-19: Tablespace metrics (`volume_type="tablespace"` label)
+- [ ] REQ-20: WAL health metrics (`cnpg_wal_archive_healthy`, etc.)
+- [ ] REQ-21: Inode metrics (`cnpg_disk_inodes_total/used/free`)
+- [ ] REQ-22: `cnpg_disk_at_limit` metric after expansion limit reached
+- [ ] REQ-23: `cnpg_disk_resizes_total` counter after resize
+- [ ] REQ-24: `cnpg_disk_resize_budget_remaining` after rate-limited resize
+- [ ] REQ-25: AlertOnResize warning event on WAL resize
+- [ ] REQ-26: acknowledgeWALRisk runtime resize (not just webhook acceptance)
+
+### Implementation notes
+
+- Read `docs/src/design/pvc-autoresize-e2e-requirements.md` for code snippets.
+- New fixtures go in `tests/e2e/fixtures/auto_resize/`.
+- Follow the same patterns as existing tests (fill with dd, Eventually poll).
+- Run `make lint && make test` after each new test.
+- Commit each new test or group of tests separately.
+- After all gaps are addressed, rebuild and run the full E2E suite on AKS.
+
+Phase 5.5 gate: All P0 and P1 tests pass on AKS. P2 items addressed or
+documented as follow-up.
+
+---
+
 ## Phase 6: Handle E2E Test Failures
 
 If E2E tests fail for code reasons (not infrastructure), fix and iterate:
@@ -586,6 +656,7 @@ ALL of the following must be true:
 - `make test` exits 0 with all tests passing
 - Multi-arch Docker image (amd64+arm64) built and pushed with unique SHA-based tag
 - ALL E2E tests pass on AKS via `hack/e2e/run-e2e-aks-autoresize.sh`
+- All P0 and P1 requirements from `docs/src/design/pvc-autoresize-e2e-requirements.md` are covered
 - All fix commits have DCO sign-off with Co-Authored-By
 
 When ALL criteria are met, output: <promise>COMPLETE</promise>
