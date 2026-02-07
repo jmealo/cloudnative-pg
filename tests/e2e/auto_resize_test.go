@@ -457,4 +457,106 @@ var _ = Describe("PVC Auto-Resize", Label(tests.LabelAutoResize), func() {
 			})
 		})
 	})
+
+	Context("WAL safety policy - archive health requirement", func() {
+		It("should accept cluster with requireArchiveHealthy configured", func(_ SpecContext) {
+			const namespacePrefix = "autoresize-archivehealth-e2e"
+
+			namespace, err := env.CreateUniqueTestNamespace(env.Ctx, env.Client, namespacePrefix)
+			Expect(err).ToNot(HaveOccurred())
+
+			cluster := &apiv1.Cluster{}
+			cluster.SetName("autoresize-archive-check")
+			cluster.SetNamespace(namespace)
+			cluster.Spec.Instances = 1
+			cluster.Spec.StorageConfiguration = apiv1.StorageConfiguration{
+				Size: "2Gi",
+				Resize: &apiv1.ResizeConfiguration{
+					Enabled: true,
+					Strategy: &apiv1.ResizeStrategy{
+						WALSafetyPolicy: &apiv1.WALSafetyPolicy{
+							AcknowledgeWALRisk:    true,
+							RequireArchiveHealthy: boolPtr(true),
+							MaxPendingWALFiles:    intPtr(50),
+						},
+					},
+				},
+			}
+			cluster.Spec.Bootstrap = &apiv1.BootstrapConfiguration{
+				InitDB: &apiv1.BootstrapInitDB{
+					Database: "app",
+					Owner:    "app",
+				},
+			}
+
+			err = env.Client.Create(env.Ctx, cluster)
+			Expect(err).ToNot(HaveOccurred(),
+				"cluster with archive health check should be created")
+
+			By("verifying WAL safety policy is configured", func() {
+				created, err := clusterutils.Get(env.Ctx, env.Client, namespace, "autoresize-archive-check")
+				Expect(err).ToNot(HaveOccurred())
+				Expect(created.Spec.StorageConfiguration.Resize.Strategy.WALSafetyPolicy).ToNot(BeNil())
+				Expect(*created.Spec.StorageConfiguration.Resize.Strategy.WALSafetyPolicy.RequireArchiveHealthy).To(BeTrue())
+				Expect(*created.Spec.StorageConfiguration.Resize.Strategy.WALSafetyPolicy.MaxPendingWALFiles).To(Equal(50))
+			})
+		})
+	})
+
+	Context("WAL safety policy - slot retention limit", func() {
+		It("should accept cluster with maxSlotRetentionBytes configured", func(_ SpecContext) {
+			const namespacePrefix = "autoresize-slotretention-e2e"
+
+			namespace, err := env.CreateUniqueTestNamespace(env.Ctx, env.Client, namespacePrefix)
+			Expect(err).ToNot(HaveOccurred())
+
+			cluster := &apiv1.Cluster{}
+			cluster.SetName("autoresize-slot-check")
+			cluster.SetNamespace(namespace)
+			cluster.Spec.Instances = 1
+			cluster.Spec.StorageConfiguration = apiv1.StorageConfiguration{
+				Size: "2Gi",
+				Resize: &apiv1.ResizeConfiguration{
+					Enabled: true,
+					Strategy: &apiv1.ResizeStrategy{
+						WALSafetyPolicy: &apiv1.WALSafetyPolicy{
+							AcknowledgeWALRisk:    true,
+							MaxSlotRetentionBytes: int64Ptr(1073741824), // 1Gi
+						},
+					},
+				},
+			}
+			cluster.Spec.Bootstrap = &apiv1.BootstrapConfiguration{
+				InitDB: &apiv1.BootstrapInitDB{
+					Database: "app",
+					Owner:    "app",
+				},
+			}
+
+			err = env.Client.Create(env.Ctx, cluster)
+			Expect(err).ToNot(HaveOccurred(),
+				"cluster with slot retention check should be created")
+
+			By("verifying slot retention limit is configured", func() {
+				created, err := clusterutils.Get(env.Ctx, env.Client, namespace, "autoresize-slot-check")
+				Expect(err).ToNot(HaveOccurred())
+				Expect(created.Spec.StorageConfiguration.Resize.Strategy.WALSafetyPolicy).ToNot(BeNil())
+				slotRetention := *created.Spec.StorageConfiguration.Resize.Strategy.WALSafetyPolicy.MaxSlotRetentionBytes
+				Expect(slotRetention).To(Equal(int64(1073741824)))
+			})
+		})
+	})
 })
+
+// Helper functions for pointer types
+func boolPtr(b bool) *bool {
+	return &b
+}
+
+func intPtr(i int) *int {
+	return &i
+}
+
+func int64Ptr(i int64) *int64 {
+	return &i
+}
