@@ -367,4 +367,48 @@ var _ = Describe("PVC Auto-Resize", Label(tests.LabelAutoResize), func() {
 			})
 		})
 	})
+
+	Context("tablespace resize", func() {
+		const (
+			sampleFile  = fixturesDir + "/auto_resize/cluster-autoresize-tablespace.yaml.template"
+			clusterName = "cluster-autoresize-tablespace"
+		)
+		var namespace string
+
+		It("should create cluster with tablespace resize enabled", func(_ SpecContext) {
+			const namespacePrefix = "autoresize-tbs-e2e"
+			var err error
+
+			namespace, err = env.CreateUniqueTestNamespace(env.Ctx, env.Client, namespacePrefix)
+			Expect(err).ToNot(HaveOccurred())
+
+			AssertCreateCluster(namespace, clusterName, sampleFile, env)
+
+			By("verifying tablespace resize is configured", func() {
+				cluster, err := clusterutils.Get(env.Ctx, env.Client, namespace, clusterName)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(cluster.Spec.Tablespaces).To(HaveLen(1))
+				Expect(cluster.Spec.Tablespaces[0].Name).To(Equal("tbs1"))
+				Expect(cluster.Spec.Tablespaces[0].Storage.Resize).ToNot(BeNil())
+				Expect(cluster.Spec.Tablespaces[0].Storage.Resize.Enabled).To(BeTrue())
+			})
+
+			By("verifying tablespace PVC exists", func() {
+				pvcList, err := storage.GetPVCList(env.Ctx, env.Client, namespace)
+				Expect(err).ToNot(HaveOccurred())
+
+				var tbsCount int
+				for idx := range pvcList.Items {
+					pvc := &pvcList.Items[idx]
+					if pvc.Labels[utils.ClusterLabelName] != clusterName {
+						continue
+					}
+					if pvc.Labels[utils.PvcRoleLabelName] == string(utils.PVCRolePgTablespace) {
+						tbsCount++
+					}
+				}
+				Expect(tbsCount).To(BeNumerically(">", 0), "should have tablespace PVCs")
+			})
+		})
+	})
 })
