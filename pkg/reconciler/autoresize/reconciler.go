@@ -86,8 +86,12 @@ func Reconcile(
 		}
 	}
 
-	_ = resizedAny
-	return ctrl.Result{RequeueAfter: RequeueDelay}, nil
+	// Only requeue with a delay if we actually performed a resize.
+	// Otherwise, let the regular reconciliation loop handle scheduling.
+	if resizedAny {
+		return ctrl.Result{RequeueAfter: RequeueDelay}, nil
+	}
+	return ctrl.Result{}, nil
 }
 
 // isAutoResizeEnabled checks if auto-resize is enabled for any storage in the cluster.
