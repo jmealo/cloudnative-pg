@@ -9,7 +9,8 @@ Ref: docs/src/design/pvc-autoresize.md
 - Stack: Go, Controller Runtime, Kubebuilder, Ginkgo v2
 - Constraints: strict linting, DCO sign-off required
 - Branch: feat/pvc-autoresizing-wal-safety
-- Image: ghcr.io/jmealo/cloudnative-pg-testing:feat-pvc-autoresizing
+- Image base: ghcr.io/jmealo/cloudnative-pg-testing
+- Image tag: feat-pvc-autoresizing-<git-short-sha> (unique per build — see Phase 4)
 - AKS E2E script: `hack/e2e/run-e2e-aks-autoresize.sh`
 
 ## What Already Exists (ALL COMMITTED — DO NOT REWRITE UNLESS BROKEN)
@@ -145,18 +146,55 @@ Phase 3 gate: `make test` exits 0 with all tests passing.
 
 ## Phase 4: Build and Push Docker Image
 
-IMPORTANT: The AKS cluster has MIXED node architectures (amd64 AND arm64).
-You MUST build a multi-arch image. Do NOT use `make docker-build` directly —
-it forces single-arch via `--set=*.platform="linux/${ARCH}"`.
+### CRITICAL: How the operator image propagates to PostgreSQL pods
 
-The E2E script (`hack/e2e/run-e2e-aks-autoresize.sh`) handles multi-arch
-builds automatically. If you need to build manually, here's how:
+Understanding this architecture is essential for debugging E2E failures:
+
+1. The **operator image** (CONTROLLER_IMG) runs as the controller-manager in cnpg-system
+2. The operator sets `OPERATOR_IMAGE_NAME` env var to its own image at startup
+3. When creating PostgreSQL pods, the operator adds an **init container** called
+   `bootstrap-controller` that uses `OPERATOR_IMAGE_NAME` as its image
+   (`pkg/specs/containers.go:37`)
+4. This init container copies the **instance manager binary** (`/manager`) into a
+   shared volume in the PostgreSQL pod
+5. The PostgreSQL container then runs this copied instance manager binary
+
+**This means**: Every PostgreSQL pod runs the SAME code as the operator image.
+Our disk probe, WAL health checker, disk_status, and metrics code all run inside
+the PostgreSQL pods via this mechanism. If the init container pulls a stale image,
+the pods will run OLD code that doesn't have our changes.
+
+### CRITICAL: Use unique image tags to avoid stale cache
+
+The default `imagePullPolicy` in CNPG is `IfNotPresent`. If you reuse the same
+tag across builds, nodes that already pulled the image will use the CACHED version.
+This causes the instance manager to run old code even after rebuilding.
+
+**The E2E script automatically generates a unique tag per build** using the git
+short SHA: `feat-pvc-autoresizing-<sha>`. This ensures every rebuild produces a
+fresh, unique image that Kubernetes will always pull.
+
+Do NOT override `CONTROLLER_IMG` with a static tag like `feat-pvc-autoresizing`
+unless you know the image has never been pulled on any node in the cluster.
+
+### Two requirements for the image
+
+1. **Multi-arch** (amd64 + arm64): The AKS cluster has mixed node pools. Do NOT
+   use `make docker-build` — it forces single-arch via `--set=*.platform`.
+2. **Unique tag per build**: Avoid stale image cache on nodes.
 
 ### Option A: Use the E2E script (RECOMMENDED)
 
-The script's build step handles everything:
+The script handles multi-arch builds AND unique tagging automatically:
 ```
-CONTROLLER_IMG=ghcr.io/jmealo/cloudnative-pg-testing:feat-pvc-autoresizing \
+hack/e2e/run-e2e-aks-autoresize.sh
+```
+It auto-generates the image tag as `feat-pvc-autoresizing-$(git rev-parse --short HEAD)`.
+
+You can override the base or tag if needed:
+```
+CONTROLLER_IMG_BASE=ghcr.io/jmealo/cloudnative-pg-testing \
+CONTROLLER_IMG_TAG=feat-pvc-autoresizing-custom-tag \
   hack/e2e/run-e2e-aks-autoresize.sh
 ```
 
@@ -165,6 +203,10 @@ CONTROLLER_IMG=ghcr.io/jmealo/cloudnative-pg-testing:feat-pvc-autoresizing \
 If you need to build separately from testing:
 
 ```bash
+# Generate a unique tag
+IMG_TAG="feat-pvc-autoresizing-$(git rev-parse --short HEAD)"
+IMG="ghcr.io/jmealo/cloudnative-pg-testing:${IMG_TAG}"
+
 # 1. Install go-releaser
 make go-releaser
 
@@ -179,34 +221,31 @@ docker buildx create --name multiarch-builder --use --platform linux/amd64,linux
 # 4. Build and push multi-arch image (NO --set=*.platform override)
 DOCKER_BUILDKIT=1 buildVersion="" revision=$(git rev-parse HEAD) \
   docker buildx bake \
-  --set distroless.tags="ghcr.io/jmealo/cloudnative-pg-testing:feat-pvc-autoresizing" \
+  --set distroless.tags="${IMG}" \
   --push distroless
 
 # 5. Verify both platforms are in the manifest
-docker buildx imagetools inspect ghcr.io/jmealo/cloudnative-pg-testing:feat-pvc-autoresizing
+docker buildx imagetools inspect "${IMG}"
 ```
-
-### Why multi-arch is needed
-
-The AKS cluster has both `aks-main` (amd64) and `aks-mainarm` (arm64) node pools.
-Kubernetes may schedule the operator pod on either architecture. A single-arch
-image will fail with "no match for platform in manifest" on the wrong node type.
 
 ### Common issues
 
 - **Auth errors**: Run `echo $GHCR_TOKEN | docker login ghcr.io -u jmealo --password-stdin`
 - **"no match for platform"**: You built single-arch. Rebuild using the methods above.
+- **Pods running old code after rebuild**: You reused a static tag. Use a unique
+  tag (git SHA) or delete the pods to force re-pull.
 - **go-releaser binary not found**: Run `make go-releaser` first.
 - **buildx builder doesn't support arm64**: Run `docker buildx create --name multiarch-builder --use --platform linux/amd64,linux/arm64`
 
 ### DO NOT do these things
 
 - Do NOT use `make docker-build` — it forces single-arch
-- Do NOT build separate tagged images and try to merge with `docker buildx imagetools create` — this is fragile and error-prone
+- Do NOT reuse the same image tag across builds — causes stale instance manager
+- Do NOT build separate tagged images and try to merge with `docker buildx imagetools create` — fragile
 - Do NOT set `ARCH=arm64` — this only builds one arch
 
-Phase 4 gate: Multi-arch image built and pushed to GHCR. Verify with:
-`docker buildx imagetools inspect ghcr.io/jmealo/cloudnative-pg-testing:feat-pvc-autoresizing`
+Phase 4 gate: Multi-arch image built and pushed to GHCR with a unique tag. Verify with:
+`docker buildx imagetools inspect <your-image>`
 The output must show BOTH `linux/amd64` AND `linux/arm64` platforms.
 
 ---
@@ -346,6 +385,10 @@ The E2E runner script already mitigates this by:
 - Running tests sequentially (--nodes=1) to avoid parallel cluster creation
 - Using 3h overall Ginkgo timeout
 - Using 5-minute Eventually() timeouts for resize detection
+- **Cleaning up orphaned autoresize-* namespaces** before test runs to free Azure Disks
+- **Setting increased TEST_TIMEOUTS** for AKS: ClusterIsReady=900s, ClusterIsReadySlow=1200s
+  (up from defaults of 600s/800s to account for Azure Disk attach latency)
+- **Detecting stale VolumeAttachments** that may slow new operations
 
 If timeouts persist despite sequential execution:
 - The issue is environmental (AKS cluster health, Azure API throttling)
@@ -471,7 +514,7 @@ ALL of the following must be true:
 - `make fmt` exits 0
 - `make lint` exits 0 with no errors
 - `make test` exits 0 with all tests passing
-- Multi-arch Docker image (amd64+arm64) built and pushed to ghcr.io/jmealo/cloudnative-pg-testing:feat-pvc-autoresizing
+- Multi-arch Docker image (amd64+arm64) built and pushed with unique SHA-based tag
 - ALL E2E tests pass on AKS via `hack/e2e/run-e2e-aks-autoresize.sh`
 - All fix commits have DCO sign-off with Co-Authored-By
 

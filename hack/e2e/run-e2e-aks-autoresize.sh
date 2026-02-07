@@ -45,7 +45,17 @@ fi
 ROOT_DIR=$(realpath "$(dirname "$0")/../../")
 readonly ROOT_DIR
 
-CONTROLLER_IMG=${CONTROLLER_IMG:-ghcr.io/jmealo/cloudnative-pg-testing:feat-pvc-autoresizing}
+# Image tagging strategy:
+# Use a unique tag per build (git short SHA) to avoid stale image cache issues.
+# The init container (bootstrap-controller) copies the instance manager binary
+# from the operator image into each PostgreSQL pod. With imagePullPolicy=IfNotPresent
+# (the CNPG default), reusing the same tag across builds means nodes that already
+# pulled the image will use the stale cached version, causing the instance manager
+# to run old code even after rebuilding. A SHA-based tag ensures every build
+# produces a unique, pullable image.
+CONTROLLER_IMG_BASE=${CONTROLLER_IMG_BASE:-ghcr.io/jmealo/cloudnative-pg-testing}
+CONTROLLER_IMG_TAG=${CONTROLLER_IMG_TAG:-feat-pvc-autoresizing-$(git -C "$(dirname "$0")/../../" rev-parse --short HEAD)}
+CONTROLLER_IMG=${CONTROLLER_IMG:-${CONTROLLER_IMG_BASE}:${CONTROLLER_IMG_TAG}}
 GINKGO_NODES=${GINKGO_NODES:-1}
 GINKGO_TIMEOUT=${GINKGO_TIMEOUT:-3h}
 SKIP_BUILD=${SKIP_BUILD:-false}
@@ -389,11 +399,61 @@ info "Ginkgo nodes: ${GINKGO_NODES}"
 info "Ginkgo timeout: ${GINKGO_TIMEOUT}"
 info "Label filter: auto-resize"
 
+# ────────────────────────────────────────────────────────────
+# Pre-test cleanup: remove orphaned autoresize namespaces and stale VolumeAttachments
+# ────────────────────────────────────────────────────────────
+
+info "=== Pre-test Cleanup ==="
+
+# Delete orphaned namespaces from prior test runs.
+# These leave behind PVCs with Azure Disks attached, which saturate
+# the attach queue and cause timeouts for new tests.
+# Clean up: autoresize-* (test namespaces) and minio (object store for backup tests)
+ORPHAN_NS=$(kubectl get namespaces -o name 2>/dev/null | grep -E 'autoresize-|^namespace/minio$' | cut -d/ -f2 || true)
+if [ -n "${ORPHAN_NS}" ]; then
+  warn "Found orphaned namespaces from prior runs:"
+  echo "${ORPHAN_NS}"
+  info "Deleting orphaned namespaces (this frees their Azure Disks)..."
+  for ns in ${ORPHAN_NS}; do
+    kubectl delete namespace "${ns}" --wait=false 2>/dev/null || true
+  done
+  # Wait briefly for namespace termination to start releasing disks
+  info "Waiting 30s for Azure Disk detach operations to begin..."
+  sleep 30
+else
+  ok "No orphaned test namespaces found"
+fi
+
+# Check for stale VolumeAttachments (attached=false for deleted PVCs)
+STALE_VA=$(kubectl get volumeattachments -o json 2>/dev/null | \
+  jq -r '.items[] | select(.status.attached == false) | .metadata.name' || true)
+if [ -n "${STALE_VA}" ]; then
+  warn "Found $(echo "${STALE_VA}" | wc -l) stale VolumeAttachment(s) (attached=false)"
+  info "These may slow down new volume operations. Kubernetes will garbage-collect them."
+fi
+
+ok "Pre-test cleanup complete"
+echo
+
 # Export required env vars
 export TEST_CLOUD_VENDOR="aks"
 export TEST_SKIP_UPGRADE=true
 export E2E_PRE_ROLLING_UPDATE_IMG=${E2E_PRE_ROLLING_UPDATE_IMG:-${POSTGRES_IMG%.*}}
 export AZURE_STORAGE_ACCOUNT=${AZURE_STORAGE_ACCOUNT:-''}
+
+# Set increased timeouts for AKS.
+# Azure Disk attach/detach is significantly slower than local storage:
+#   - Single disk attach: 30s-5m depending on queue depth
+#   - WAL tests create 2 PVCs × 3 instances = 6 disks
+#   - With attach contention, cluster creation can take 10-15 min
+# Default ClusterIsReady is 600s (10 min) — bump to 900s (15 min)
+# Default ClusterIsReadySlow is 800s (~13 min) — bump to 1200s (20 min)
+if [ -z "${TEST_TIMEOUTS:-}" ]; then
+  export TEST_TIMEOUTS='{"clusterIsReady":900,"clusterIsReadySlow":1200}'
+  info "Using AKS-tuned timeouts: ClusterIsReady=900s, ClusterIsReadySlow=1200s"
+else
+  info "Using user-provided TEST_TIMEOUTS: ${TEST_TIMEOUTS}"
+fi
 
 # Unset DEBUG to prevent k8s client spam
 unset DEBUG 2>/dev/null || true
