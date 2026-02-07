@@ -239,5 +239,132 @@ var _ = Describe("PVC Auto-Resize", Label(tests.LabelAutoResize), func() {
 			Expect(err).To(HaveOccurred(),
 				"cluster creation should fail without acknowledgeWALRisk for single-volume")
 		})
+
+		It("should accept auto-resize for single-volume clusters with acknowledgeWALRisk", func(_ SpecContext) {
+			const namespacePrefix = "autoresize-ack-e2e"
+
+			namespace, err := env.CreateUniqueTestNamespace(env.Ctx, env.Client, namespacePrefix)
+			Expect(err).ToNot(HaveOccurred())
+
+			cluster := &apiv1.Cluster{}
+			cluster.SetName("autoresize-with-ack")
+			cluster.SetNamespace(namespace)
+			cluster.Spec.Instances = 1
+			cluster.Spec.StorageConfiguration = apiv1.StorageConfiguration{
+				Size: "2Gi",
+				Resize: &apiv1.ResizeConfiguration{
+					Enabled: true,
+					Strategy: &apiv1.ResizeStrategy{
+						WALSafetyPolicy: &apiv1.WALSafetyPolicy{
+							AcknowledgeWALRisk: true,
+						},
+					},
+				},
+			}
+			cluster.Spec.Bootstrap = &apiv1.BootstrapConfiguration{
+				InitDB: &apiv1.BootstrapInitDB{
+					Database: "app",
+					Owner:    "app",
+				},
+			}
+
+			err = env.Client.Create(env.Ctx, cluster)
+			Expect(err).ToNot(HaveOccurred(),
+				"cluster creation should succeed with acknowledgeWALRisk for single-volume")
+		})
+	})
+
+	Context("rate-limit enforcement", func() {
+		const (
+			sampleFile  = fixturesDir + "/auto_resize/cluster-autoresize-basic.yaml.template"
+			clusterName = "cluster-autoresize-basic"
+		)
+		var namespace string
+
+		It("should have the configured maxActionsPerDay", func(_ SpecContext) {
+			const namespacePrefix = "autoresize-ratelimit-e2e"
+			var err error
+
+			namespace, err = env.CreateUniqueTestNamespace(env.Ctx, env.Client, namespacePrefix)
+			Expect(err).ToNot(HaveOccurred())
+
+			AssertCreateCluster(namespace, clusterName, sampleFile, env)
+
+			By("verifying maxActionsPerDay is set", func() {
+				cluster, err := clusterutils.Get(env.Ctx, env.Client, namespace, clusterName)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(cluster.Spec.StorageConfiguration.Resize.Strategy).ToNot(BeNil())
+				Expect(cluster.Spec.StorageConfiguration.Resize.Strategy.MaxActionsPerDay).To(Equal(5))
+			})
+		})
+	})
+
+	Context("minStep clamping", func() {
+		const (
+			sampleFile  = fixturesDir + "/auto_resize/cluster-autoresize-basic.yaml.template"
+			clusterName = "cluster-autoresize-basic"
+		)
+		var namespace string
+
+		It("should have the configured minStep", func(_ SpecContext) {
+			const namespacePrefix = "autoresize-minstep-e2e"
+			var err error
+
+			namespace, err = env.CreateUniqueTestNamespace(env.Ctx, env.Client, namespacePrefix)
+			Expect(err).ToNot(HaveOccurred())
+
+			AssertCreateCluster(namespace, clusterName, sampleFile, env)
+
+			By("verifying minStep is configured", func() {
+				cluster, err := clusterutils.Get(env.Ctx, env.Client, namespace, clusterName)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(cluster.Spec.StorageConfiguration.Resize.Expansion).ToNot(BeNil())
+				Expect(cluster.Spec.StorageConfiguration.Resize.Expansion.MinStep).To(Equal("1Gi"))
+			})
+		})
+	})
+
+	Context("metrics exposure", func() {
+		const (
+			sampleFile  = fixturesDir + "/auto_resize/cluster-autoresize-basic.yaml.template"
+			clusterName = "cluster-autoresize-basic"
+		)
+		var namespace string
+
+		It("should expose disk metrics on the metrics endpoint", func(_ SpecContext) {
+			const namespacePrefix = "autoresize-metrics-e2e"
+			var err error
+
+			namespace, err = env.CreateUniqueTestNamespace(env.Ctx, env.Client, namespacePrefix)
+			Expect(err).ToNot(HaveOccurred())
+
+			AssertCreateCluster(namespace, clusterName, sampleFile, env)
+
+			By("verifying disk metrics are exposed", func() {
+				podName := clusterName + "-1"
+				pod := &corev1.Pod{}
+				err := env.Client.Get(env.Ctx, types.NamespacedName{
+					Namespace: namespace,
+					Name:      podName,
+				}, pod)
+				Expect(err).ToNot(HaveOccurred())
+
+				commandTimeout := time.Second * 30
+				stdout, _, err := env.EventuallyExecCommand(
+					env.Ctx, *pod, specs.PostgresContainerName, &commandTimeout,
+					"sh", "-c",
+					"curl -s http://localhost:9187/metrics | grep cnpg_disk",
+				)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(stdout).To(ContainSubstring("cnpg_disk_total_bytes"),
+					"should expose cnpg_disk_total_bytes metric")
+				Expect(stdout).To(ContainSubstring("cnpg_disk_used_bytes"),
+					"should expose cnpg_disk_used_bytes metric")
+				Expect(stdout).To(ContainSubstring("cnpg_disk_available_bytes"),
+					"should expose cnpg_disk_available_bytes metric")
+				Expect(stdout).To(ContainSubstring("cnpg_disk_percent_used"),
+					"should expose cnpg_disk_percent_used metric")
+			})
+		})
 	})
 })
