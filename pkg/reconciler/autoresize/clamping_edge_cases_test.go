@@ -162,10 +162,9 @@ var _ = Describe("CalculateNewSize edge cases", func() {
 			newSize, err := CalculateNewSize(currentSize, policy)
 
 			Expect(err).NotTo(HaveOccurred())
-			expected := resource.NewQuantity(
-				resource.MustParse("10Gi").Value()+resource.MustParse("512Mi").Value(),
-				resource.MustParse("10Gi").Format)
-			Expect(newSize.Cmp(*expected)).To(Equal(0),
+			// 10Gi + 512Mi = 10.5Gi
+			expected := resource.MustParse("10752Mi") // 10Gi = 10240Mi + 512Mi = 10752Mi
+			Expect(newSize.Cmp(expected)).To(Equal(0),
 				"absolute step should not be clamped by minStep")
 		})
 
