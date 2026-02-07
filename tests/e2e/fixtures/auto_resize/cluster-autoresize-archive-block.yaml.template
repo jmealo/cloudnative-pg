@@ -8,9 +8,6 @@ spec:
   postgresql:
     parameters:
       log_checkpoints: "on"
-      archive_mode: "on"
-      # Set archive_command to fail to simulate unhealthy archiving
-      archive_command: "false"
 
   primaryUpdateStrategy: unsupervised
   primaryUpdateMethod: switchover
@@ -19,6 +16,27 @@ spec:
     initdb:
       database: app
       owner: app
+
+  # Configure backup pointing to a non-existent endpoint.
+  # This causes the wal-archive command (managed by CNPG, not user-configurable)
+  # to fail when barman-cloud tries to connect, which makes pg_stat_archiver
+  # record failures and the WAL health checker report unhealthy status.
+  #
+  # NOTE: archive_command is a FIXED parameter in CNPG — you cannot set it
+  # directly. The operator always sets it to "/controller/manager wal-archive ...".
+  # Without a backup config, wal-archive silently succeeds (no-op).
+  # With an invalid backup config, it fails and pg_stat_archiver records it.
+  backup:
+    barmanObjectStore:
+      destinationPath: s3://nonexistent-bucket/archive-block-test/
+      endpointURL: http://nonexistent-archive-endpoint:9000
+      s3Credentials:
+        accessKeyId:
+          name: archive-block-dummy-creds
+          key: ACCESS_KEY_ID
+        secretAccessKey:
+          name: archive-block-dummy-creds
+          key: ACCESS_SECRET_KEY
 
   storage:
     storageClass: ${E2E_DEFAULT_STORAGE_CLASS}

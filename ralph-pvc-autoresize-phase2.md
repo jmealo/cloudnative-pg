@@ -61,6 +61,66 @@ None of this has been verified:
 
 ---
 
+## CRITICAL: Three-Binary Architecture (Read This First)
+
+CNPG builds THREE different binaries from the same repo. Understanding which code
+runs where is essential to avoid wasting time on unnecessary platform-specific
+build tags or cross-compilation fixes.
+
+### 1. Controller Manager (`cmd/manager/main.go`)
+- **Runs**: In the `cnpg-controller-manager` pod in `cnpg-system` namespace
+- **Platform**: Linux only (runs in a container)
+- **Contains**: Reconcilers, webhooks, autoresize logic
+- **Imports**: `pkg/reconciler/autoresize/`, `internal/controller/`, `internal/webhook/`
+
+### 2. Instance Manager (same binary as Controller, different entrypoint)
+- **Runs**: Inside every PostgreSQL pod (copied by the `bootstrap-controller` init container)
+- **Platform**: Linux only (runs in a container)
+- **Contains**: Disk probe (statfs), WAL health checker, metrics server, webserver
+- **Imports**: `pkg/management/postgres/disk/`, `pkg/management/postgres/wal/`,
+  `pkg/management/postgres/webserver/`
+- **How it gets there**: The init container copies `/manager` from the operator image
+  into a shared volume. The PostgreSQL container runs this binary.
+
+### 3. kubectl-cnpg Plugin (`cmd/kubectl-cnpg/main.go`)
+- **Runs**: On the user's workstation (darwin, linux, windows)
+- **Platform**: Cross-platform (darwin/linux/windows, amd64/arm64)
+- **Contains**: CLI commands that call the Kubernetes API
+- **Imports**: `internal/cmd/plugin/`, `api/v1/` (types only)
+- **Does NOT import**: `pkg/management/postgres/disk/`, `pkg/management/postgres/wal/`
+
+### What this means for you
+
+- The `pkg/management/postgres/disk/probe.go` package uses `syscall.Statfs_t` which
+  is Linux-only. This is FINE because it only runs in the instance manager (Linux).
+  The kubectl plugin does NOT import this package — it reads disk status from the
+  Cluster CR via the Kubernetes API. **Do NOT add platform-specific build tags
+  (probe_linux.go / probe_other.go) to make the disk probe compile on darwin/windows.**
+  This is unnecessary.
+
+- **TODO**: The platform-specific split of `pkg/management/postgres/disk/probe.go`
+  into `probe_linux.go` and `probe_other.go` should be reverted. The original
+  single-file `probe.go` was correct because the package is never imported by the
+  cross-platform kubectl plugin.
+
+### Fixed PostgreSQL parameters
+
+CNPG controls certain PostgreSQL parameters internally and does NOT allow users to
+set them. These are listed in `pkg/postgres/configuration.go` in `FixedConfigurationParameters`.
+Key ones include:
+- `archive_command` — controlled by the operator; set to `/controller/manager wal-archive ...`
+- `archive_mode` — always `on`
+- `listen_addresses`, `port`, `log_destination`, etc.
+
+If you try to set a fixed parameter in a Cluster spec, the webhook will reject it with:
+`Can't set fixed configuration parameter`
+
+To make WAL archiving FAIL in E2E tests (for the archive health test), configure a
+`backup.barmanObjectStore` pointing to a non-existent endpoint with dummy credentials.
+Without a backup config, the wal-archive command silently succeeds (no-op).
+
+---
+
 ## The Loop (What you do on every iteration)
 
 1. Run the next Phase step.
@@ -432,10 +492,20 @@ If E2E tests fail for code reasons (not infrastructure), fix and iterate:
   CNPG mounts tablespaces at: `/var/lib/postgresql/tablespaces/<tablespace_name>/data`
 
 * **Archive health test not blocking resize**:
-  Without a backup configuration, the archive may report as healthy (no failures
-  if archiving was never attempted). The fixture `cluster-autoresize-archive-block.yaml.template`
-  needs a `backup` section with an intentionally invalid destination to trigger
-  archive failures. Check that the fixture includes this.
+  Without a backup configuration, the wal-archive command SILENTLY SUCCEEDS (no-op).
+  This means pg_stat_archiver never records failures and ArchiveHealthy stays true.
+  The fixture `cluster-autoresize-archive-block.yaml.template` must have a `backup`
+  section with barmanObjectStore pointing to a non-existent endpoint (e.g.,
+  `http://nonexistent-archive-endpoint:9000`). The test also creates a dummy Secret
+  (`archive-block-dummy-creds`) with fake S3 credentials before the Cluster.
+  Do NOT try to set `archive_command` directly — it's a fixed parameter and the
+  webhook will reject it.
+
+* **Archive health test — webhook rejection**:
+  If the webhook rejects the cluster with `Can't set fixed configuration parameter`,
+  you are trying to set a parameter from `FixedConfigurationParameters` in
+  `pkg/postgres/configuration.go`. Common ones: `archive_command`, `archive_mode`,
+  `listen_addresses`, `port`. Remove these from `spec.postgresql.parameters`.
 
 * **Slot retention test not blocking**:
   pg_switch_wal() creates new WAL segments but if WAL recycling is aggressive,

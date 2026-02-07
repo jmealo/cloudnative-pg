@@ -25,6 +25,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 
@@ -862,6 +863,26 @@ var _ = Describe("PVC Auto-Resize", Label(tests.LabelAutoResize), func() {
 			namespace, err = env.CreateUniqueTestNamespace(env.Ctx, env.Client, namespacePrefix)
 			Expect(err).ToNot(HaveOccurred())
 
+			By("creating dummy S3 credentials for the bogus backup destination", func() {
+				// The fixture configures barmanObjectStore pointing to a non-existent
+				// endpoint. This Secret provides the required credentials so the cluster
+				// can be created. When PostgreSQL tries to archive WAL, barman-cloud
+				// will fail to connect, causing pg_stat_archiver to record failures.
+				secret := &corev1.Secret{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "archive-block-dummy-creds",
+						Namespace: namespace,
+					},
+					Type: corev1.SecretTypeOpaque,
+					StringData: map[string]string{
+						"ACCESS_KEY_ID":     "dummy-access-key",
+						"ACCESS_SECRET_KEY": "dummy-secret-key",
+					},
+				}
+				err := env.Client.Create(env.Ctx, secret)
+				Expect(err).ToNot(HaveOccurred())
+			})
+
 			AssertCreateCluster(namespace, clusterName, sampleFile, env)
 
 			By("verifying requireArchiveHealthy is enabled", func() {
@@ -983,11 +1004,13 @@ var _ = Describe("PVC Auto-Resize", Label(tests.LabelAutoResize), func() {
 				}, pod)
 				Expect(err).ToNot(HaveOccurred())
 
+				// Use immediately_reserve=true so the slot gets a restart_lsn immediately.
+				// Without this, the slot has no restart_lsn and won't retain WAL.
 				commandTimeout := time.Second * 30
 				_, _, err = env.EventuallyExecCommand(
 					env.Ctx, *pod, specs.PostgresContainerName, &commandTimeout,
 					"psql", "-U", "postgres", "-c",
-					"SELECT pg_create_physical_replication_slot('test_inactive_slot')",
+					"SELECT pg_create_physical_replication_slot('test_inactive_slot', true)",
 				)
 				Expect(err).ToNot(HaveOccurred())
 			})
