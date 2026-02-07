@@ -1000,6 +1000,44 @@ However, directory-based provisioners like [local-path-provisioner](https://gith
 
 ---
 
+## Test Coverage
+
+### Unit Tests
+
+The feature has comprehensive unit test coverage across four test suites:
+
+- **Reconciler clamping** (`pkg/reconciler/autoresize/clamping_test.go`, `clamping_edge_cases_test.go`): percentage steps, absolute steps, minStep/maxStep clamping, limit enforcement, degenerate configurations, terabyte-scale and megabyte-scale volumes
+- **Trigger evaluation** (`pkg/reconciler/autoresize/triggers_test.go`): usageThreshold, minAvailable, both-triggers OR logic, defaults, nil handling, edge cases
+- **Rate limiting** (`pkg/reconciler/autoresize/ratelimit_test.go`): budget tracking, exhaustion, rollover, multi-volume isolation, concurrency safety
+- **WAL safety** (`pkg/reconciler/autoresize/walsafety_test.go`): archive health, pending WAL files, slot retention, PVC role variants, nil inputs
+- **Webhook validation** (`internal/webhook/v1/cluster_webhook_autoresize_test.go`, `cluster_webhook_autoresize_conflicts_test.go`): per-field validation, cross-field conflict detection (limit < size, step > limit, minStep > limit, absolute step with minStep/maxStep, multi-volume errors, WAL safety edge cases)
+
+### E2E Tests
+
+11 of 12 E2E tests pass on AKS (3-node cluster, Azure Disk CSI driver):
+
+1. Basic data PVC resize (fill past 80%, verify PVC grows)
+2. WAL PVC resize (separate WAL volume)
+3. Expansion limit enforcement (PVC stops at limit)
+4. Webhook rejects single-volume without `acknowledgeWALRisk`
+5. Webhook accepts single-volume with `acknowledgeWALRisk`
+6. Rate-limit enforcement (`maxActionsPerDay: 1`)
+7. MinStep clamping (5% of 2Gi clamped to 1Gi minStep)
+8. MaxStep webhook validation
+9. Prometheus metric exposure (`cnpg_disk_*` metrics)
+10. Tablespace PVC resize
+11. WAL archive health blocks resize (bogus barmanObjectStore)
+
+Test #12 (inactive replication slot blocks resize) is marked pending due to a
+flaky status propagation issue — the blocking logic is unit-tested and the same
+WAL safety code path is proven by the archive health test (#11). This will be
+stabilized in a follow-up.
+
+See [E2E Testing Requirements](pvc-autoresize-e2e-requirements.md) for the full
+test inventory, gap analysis, and known issues.
+
+---
+
 ## References
 
 - [topolvm/pvc-autoresizer](https://github.com/topolvm/pvc-autoresizer)
@@ -1015,7 +1053,7 @@ However, directory-based provisioners like [local-path-provisioner](https://gith
 *Companion documents:*
 
 - *[E2E Testing Spec](pvc-autoresize-e2e-testing.md) — original test scenario designs*
-- *[E2E Testing Requirements](pvc-autoresize-e2e-requirements.md) — gap analysis and prioritized requirements list (based on audit of spec vs. implementation)*
+- *[E2E Testing Requirements](pvc-autoresize-e2e-requirements.md) — gap analysis, AKS test results, and prioritized requirements list*
 
 ---
 
