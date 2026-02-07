@@ -25,6 +25,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 
 	apiv1 "github.com/cloudnative-pg/cloudnative-pg/api/v1"
 	"github.com/cloudnative-pg/cloudnative-pg/pkg/specs"
@@ -320,6 +321,51 @@ var _ = Describe("PVC Auto-Resize", Label(tests.LabelAutoResize), func() {
 				Expect(err).ToNot(HaveOccurred())
 				Expect(cluster.Spec.StorageConfiguration.Resize.Expansion).ToNot(BeNil())
 				Expect(cluster.Spec.StorageConfiguration.Resize.Expansion.MinStep).To(Equal("1Gi"))
+			})
+		})
+	})
+
+	Context("maxStep clamping via webhook", func() {
+		It("should accept cluster with valid maxStep configuration", func(_ SpecContext) {
+			const namespacePrefix = "autoresize-maxstep-e2e"
+
+			namespace, err := env.CreateUniqueTestNamespace(env.Ctx, env.Client, namespacePrefix)
+			Expect(err).ToNot(HaveOccurred())
+
+			cluster := &apiv1.Cluster{}
+			cluster.SetName("autoresize-maxstep")
+			cluster.SetNamespace(namespace)
+			cluster.Spec.Instances = 1
+			cluster.Spec.StorageConfiguration = apiv1.StorageConfiguration{
+				Size: "100Gi",
+				Resize: &apiv1.ResizeConfiguration{
+					Enabled: true,
+					Expansion: &apiv1.ExpansionPolicy{
+						Step:    intstr.IntOrString{Type: intstr.String, StrVal: "50%"},
+						MaxStep: "10Gi",
+					},
+					Strategy: &apiv1.ResizeStrategy{
+						WALSafetyPolicy: &apiv1.WALSafetyPolicy{
+							AcknowledgeWALRisk: true,
+						},
+					},
+				},
+			}
+			cluster.Spec.Bootstrap = &apiv1.BootstrapConfiguration{
+				InitDB: &apiv1.BootstrapInitDB{
+					Database: "app",
+					Owner:    "app",
+				},
+			}
+
+			err = env.Client.Create(env.Ctx, cluster)
+			Expect(err).ToNot(HaveOccurred(),
+				"cluster creation should succeed with maxStep configured")
+
+			By("verifying maxStep is set correctly", func() {
+				created, err := clusterutils.Get(env.Ctx, env.Client, namespace, "autoresize-maxstep")
+				Expect(err).ToNot(HaveOccurred())
+				Expect(created.Spec.StorageConfiguration.Resize.Expansion.MaxStep).To(Equal("10Gi"))
 			})
 		})
 	})
