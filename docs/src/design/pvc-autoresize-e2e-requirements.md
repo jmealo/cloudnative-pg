@@ -428,6 +428,75 @@ OR create a dedicated fixture and test.
 
 ---
 
+## Unit Test Coverage: Configuration Conflicts
+
+The webhook and reconciler also need unit test coverage for cross-field
+configuration conflicts. These are scenarios where individual field values are
+valid but the **combination** is semantically problematic. CRD schema markers
+(kubebuilder) enforce per-field ranges but cannot express cross-field rules.
+
+Unit tests for these cases live in:
+- `internal/webhook/v1/cluster_webhook_autoresize_conflicts_test.go` — webhook
+- `pkg/reconciler/autoresize/clamping_edge_cases_test.go` — reconciler clamping
+
+### Semantic conflicts the webhook ACCEPTS today (documented, not bugs)
+
+These are accepted because the reconciler handles them safely, but users may be
+surprised:
+
+| Config | Behavior | Risk |
+|--------|----------|------|
+| `limit < size` | Reconciler never resizes (newSize ≤ currentSize) | **Silent no-op** — user thinks they have auto-resize but it will never fire. Consider adding a webhook warning. |
+| `step > limit` | Reconciler caps to limit | Safe but wasteful config. |
+| `minStep > limit` | MinStep clamp overshoots, then limit caps | Safe but confusing. |
+| `minStep`/`maxStep` with absolute step | Silently ignored at runtime | User may expect clamping but gets none. |
+| `minAvailable > volume size` | Trigger fires immediately and perpetually | Could be intentional (force resize on first probe). |
+| `usageThreshold: 1` | Triggers at 1% usage (nearly always) | Could be intentional. |
+
+### Semantic conflicts the webhook REJECTS today
+
+| Config | Rejection |
+|--------|-----------|
+| `minStep > maxStep` | Always rejected, even with absolute step |
+| Single-volume without `acknowledgeWALRisk` | Rejected |
+| `usageThreshold` outside 1-99 | Rejected by CRD schema (kubebuilder) |
+| `maxActionsPerDay` outside 0-10 | Rejected by CRD schema (kubebuilder) |
+
+### Potential future webhook improvements
+
+These are NOT bugs — the current behavior is safe — but could improve UX:
+
+1. **Warn when `limit < size`**: The config will never resize. A webhook
+   warning (not rejection) would help users catch misconfiguration.
+2. **Warn when `minStep`/`maxStep` set with absolute step**: These fields
+   are ignored. A warning would prevent confusion.
+3. **Warn when `maxActionsPerDay: 0`**: This effectively disables resize
+   despite `enabled: true`. A warning would help.
+
+---
+
+## Running Individual E2E Tests
+
+The AKS runner script supports `--focus` to re-run only failing tests during
+iteration, then run the full suite as final verification:
+
+```bash
+# Re-run only the failing archive health test (fast iteration):
+hack/e2e/run-e2e-aks-autoresize.sh --focus "archive health" --skip-build --skip-deploy
+
+# Re-run two specific tests:
+hack/e2e/run-e2e-aks-autoresize.sh --focus "rate-limit|minStep" --skip-build --skip-deploy
+
+# Final verification — run ALL auto-resize tests:
+hack/e2e/run-e2e-aks-autoresize.sh --skip-build --skip-deploy
+```
+
+Test names for `--focus` regex: `basic auto-resize`, `separate WAL volume`,
+`expansion limit`, `webhook`, `rate-limit`, `minStep`, `maxStep`, `metrics`,
+`tablespace`, `archive health`, `inactive slot`.
+
+---
+
 ## Structural Differences from Original Spec
 
 | Aspect | Original Spec | Actual |

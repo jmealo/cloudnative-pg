@@ -26,6 +26,8 @@
 #
 # Usage:
 #   hack/e2e/run-e2e-aks-autoresize.sh [--skip-build] [--skip-deploy] [--diagnose-only]
+#   hack/e2e/run-e2e-aks-autoresize.sh --focus "archive health"
+#   hack/e2e/run-e2e-aks-autoresize.sh --focus "inactive slot" --skip-build --skip-deploy
 #
 # Required environment:
 #   CONTROLLER_IMG  — image tag (default: ghcr.io/jmealo/cloudnative-pg-testing:feat-pvc-autoresizing)
@@ -34,7 +36,34 @@
 #   E2E_DEFAULT_STORAGE_CLASS  — StorageClass to use (auto-detected if unset)
 #   GINKGO_NODES               — parallelism (default: 1, sequential for auto-resize)
 #   GINKGO_TIMEOUT             — overall timeout (default: 3h)
+#   GINKGO_FOCUS               — regex to filter which tests run (e.g., "archive health|inactive slot")
 #   TEST_TIMEOUTS              — JSON override for per-test timeouts
+#
+# Examples — iterating on a single failing test:
+#   # Re-run only the archive health test (skip build/deploy for speed):
+#   hack/e2e/run-e2e-aks-autoresize.sh --focus "archive health" --skip-build --skip-deploy
+#
+#   # Re-run only webhook tests:
+#   hack/e2e/run-e2e-aks-autoresize.sh --focus "webhook" --skip-build --skip-deploy
+#
+#   # Re-run two specific tests:
+#   hack/e2e/run-e2e-aks-autoresize.sh --focus "rate-limit|minStep" --skip-build --skip-deploy
+#
+#   # Final verification — run ALL auto-resize tests:
+#   hack/e2e/run-e2e-aks-autoresize.sh --skip-build --skip-deploy
+#
+# Test names (for --focus regex matching):
+#   "basic auto-resize"          — data PVC resize
+#   "separate WAL volume"        — WAL PVC resize
+#   "expansion limit"            — maxSize/limit enforcement
+#   "webhook"                    — acknowledgeWALRisk validation
+#   "rate-limit"                 — maxActionsPerDay enforcement
+#   "minStep"                    — minimum step clamping
+#   "maxStep"                    — maximum step webhook validation
+#   "metrics"                    — Prometheus metric exposure
+#   "tablespace"                 — tablespace PVC resize
+#   "archive health"             — WAL archive blocks resize
+#   "inactive slot"              — slot retention blocks resize
 
 set -eEuo pipefail
 
@@ -61,13 +90,24 @@ GINKGO_TIMEOUT=${GINKGO_TIMEOUT:-3h}
 SKIP_BUILD=${SKIP_BUILD:-false}
 SKIP_DEPLOY=${SKIP_DEPLOY:-false}
 DIAGNOSE_ONLY=${DIAGNOSE_ONLY:-false}
+GINKGO_FOCUS=${GINKGO_FOCUS:-}
 
 # Parse flags
-for arg in "$@"; do
-  case "$arg" in
-    --skip-build)  SKIP_BUILD=true ;;
-    --skip-deploy) SKIP_DEPLOY=true ;;
-    --diagnose-only) DIAGNOSE_ONLY=true ;;
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --skip-build)  SKIP_BUILD=true; shift ;;
+    --skip-deploy) SKIP_DEPLOY=true; shift ;;
+    --diagnose-only) DIAGNOSE_ONLY=true; shift ;;
+    --focus)
+      if [[ -n "${2:-}" ]]; then
+        GINKGO_FOCUS="$2"; shift 2
+      else
+        fail "--focus requires a regex argument"
+        exit 1
+      fi
+      ;;
+    --focus=*) GINKGO_FOCUS="${1#--focus=}"; shift ;;
+    *) warn "Unknown flag: $1"; shift ;;
   esac
 done
 
@@ -399,6 +439,9 @@ info "StorageClass: ${E2E_DEFAULT_STORAGE_CLASS}"
 info "Ginkgo nodes: ${GINKGO_NODES}"
 info "Ginkgo timeout: ${GINKGO_TIMEOUT}"
 info "Label filter: auto-resize"
+if [ -n "${GINKGO_FOCUS}" ]; then
+  info "Focus filter: ${GINKGO_FOCUS}"
+fi
 
 # ────────────────────────────────────────────────────────────
 # Pre-test cleanup: remove orphaned autoresize namespaces and stale VolumeAttachments
@@ -462,14 +505,32 @@ unset DEBUG 2>/dev/null || true
 mkdir -p "${ROOT_DIR}/tests/e2e/out"
 
 RC_GINKGO=0
-# Run with --nodes=1 (sequential) to avoid resource contention on volume attachments.
-# Auto-resize tests create clusters that need PVCs — running too many in parallel
-# causes Azure Disk attach queue saturation and timeouts.
+# Build ginkgo focus flag if specified.
+# --focus filters specs by regex on their description (Context + It text).
+FOCUS_FLAGS=()
+if [ -n "${GINKGO_FOCUS}" ]; then
+  FOCUS_FLAGS=(--focus "${GINKGO_FOCUS}")
+fi
+
+# Run with --nodes=1 (sequential) by default to avoid resource contention on
+# Azure Disk volume attachments. Each test creates a cluster with PVCs, and
+# Azure Disk can only process a limited number of attach/detach operations
+# concurrently per node. Running tests in parallel saturates this queue and
+# causes timeouts during cluster creation.
+#
+# To run in parallel (faster, but may hit attach timeouts on small clusters):
+#   GINKGO_NODES=3 hack/e2e/run-e2e-aks-autoresize.sh --skip-build --skip-deploy
+#
+# Parallel is safe when:
+#   - The AKS cluster has 3+ nodes (spreads disk operations across nodes)
+#   - Tests are not all creating PVCs simultaneously
+#   - Webhook-only tests (no PVCs) are being run
 ginkgo --nodes="${GINKGO_NODES}" \
        --timeout "${GINKGO_TIMEOUT}" \
        --poll-progress-after=1200s \
        --poll-progress-interval=150s \
        --label-filter "auto-resize" \
+       "${FOCUS_FLAGS[@]+"${FOCUS_FLAGS[@]}"}" \
        --force-newlines \
        --output-dir "${ROOT_DIR}/tests/e2e/out/" \
        --json-report "autoresize_report.json" \

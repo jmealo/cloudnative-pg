@@ -328,21 +328,46 @@ build, ginkgo installation, test execution, and diagnostics on failure.
 
 - [ ] First run (full pipeline — build, deploy, test):
       ```
-      CONTROLLER_IMG=ghcr.io/jmealo/cloudnative-pg-testing:feat-pvc-autoresizing \
-        hack/e2e/run-e2e-aks-autoresize.sh
+      hack/e2e/run-e2e-aks-autoresize.sh
       ```
 
 - [ ] Subsequent runs (skip build, just re-deploy and test):
       ```
-      CONTROLLER_IMG=ghcr.io/jmealo/cloudnative-pg-testing:feat-pvc-autoresizing \
-        hack/e2e/run-e2e-aks-autoresize.sh --skip-build
+      hack/e2e/run-e2e-aks-autoresize.sh --skip-build
       ```
 
 - [ ] Re-run tests only (operator already deployed):
       ```
-      CONTROLLER_IMG=ghcr.io/jmealo/cloudnative-pg-testing:feat-pvc-autoresizing \
-        hack/e2e/run-e2e-aks-autoresize.sh --skip-build --skip-deploy
+      hack/e2e/run-e2e-aks-autoresize.sh --skip-build --skip-deploy
       ```
+
+### Re-running specific failing tests (fast iteration)
+
+Use `--focus` to re-run only failing tests without waiting for the entire suite:
+
+```bash
+# Re-run only the archive health test:
+hack/e2e/run-e2e-aks-autoresize.sh --focus "archive health" --skip-build --skip-deploy
+
+# Re-run two specific tests:
+hack/e2e/run-e2e-aks-autoresize.sh --focus "rate-limit|minStep" --skip-build --skip-deploy
+
+# After fixing, run the FULL suite as final verification:
+hack/e2e/run-e2e-aks-autoresize.sh --skip-build --skip-deploy
+```
+
+Test names for `--focus` regex matching:
+- `"basic auto-resize"` — data PVC resize
+- `"separate WAL volume"` — WAL PVC resize
+- `"expansion limit"` — maxSize/limit enforcement
+- `"webhook"` — acknowledgeWALRisk validation
+- `"rate-limit"` — maxActionsPerDay enforcement
+- `"minStep"` — minimum step clamping
+- `"maxStep"` — maximum step webhook validation
+- `"metrics"` — Prometheus metric exposure
+- `"tablespace"` — tablespace PVC resize
+- `"archive health"` — WAL archive blocks resize
+- `"inactive slot"` — slot retention blocks resize
 
 ### Script features
 
@@ -469,6 +494,32 @@ If timeouts persist despite sequential execution:
    - Scale the cluster
    - Switch node pools
    - Try a different StorageClass
+
+---
+
+## Phase 5.1: Unit Test Coverage for Config Conflicts
+
+AFTER Phase 5 (E2E on AKS), verify the new unit tests compile and pass:
+
+```bash
+go test -v ./internal/webhook/v1/... -run "auto-resize configuration conflicts"
+go test -v ./pkg/reconciler/autoresize/... -run "CalculateNewSize edge cases"
+```
+
+These test files were added to cover cross-field configuration conflicts:
+- `internal/webhook/v1/cluster_webhook_autoresize_conflicts_test.go`
+  Tests: limit < size, step > limit, minStep > limit, minStep/maxStep with
+  absolute step, multiple accumulated errors, WAL safety edge cases, etc.
+- `pkg/reconciler/autoresize/clamping_edge_cases_test.go`
+  Tests: minStep overshoot capped by limit, current size at limit, current
+  size exceeds limit (degenerate), 100% step, absolute step ignoring
+  minStep/maxStep, very small and very large volumes, invalid fallbacks.
+
+If any tests fail, either fix the test or fix the code (the tests document
+current behavior, some of which may be intentional). See the test file
+comments for "CURRENT" vs "EXPECTED" annotations.
+
+Phase 5.1 gate: `make test` passes including all new conflict tests.
 
 ---
 
