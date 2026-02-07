@@ -38,8 +38,13 @@ import (
 )
 
 const (
-	// RequeueDelay is the delay between reconciliation cycles for auto-resize.
+	// RequeueDelay is the delay after a resize operation before the next check.
 	RequeueDelay = 30 * time.Second
+
+	// MonitoringInterval is the interval for routine disk usage monitoring
+	// when auto-resize is enabled but no action was taken. This ensures we
+	// detect disk fills that happen asynchronously.
+	MonitoringInterval = 30 * time.Second
 
 	// DefaultMaxActionsPerDay is the default rate limit for resize operations.
 	DefaultMaxActionsPerDay = 3
@@ -67,8 +72,27 @@ func Reconcile(
 	contextLogger := log.FromContext(ctx).WithName("autoresize")
 
 	// Check if any storage has resize enabled
-	if !isAutoResizeEnabled(cluster) {
+	if !IsAutoResizeEnabled(cluster) {
 		return ctrl.Result{}, nil
+	}
+
+	contextLogger.Debug("auto-resize reconciler running",
+		"pvcCount", len(pvcs),
+		"diskInfoPodCount", len(diskInfoByPod))
+
+	// Log disk info for debugging
+	for podName, info := range diskInfoByPod {
+		if info != nil && info.DiskStatus != nil && info.DiskStatus.DataVolume != nil {
+			contextLogger.Debug("pod disk status",
+				"pod", podName,
+				"percentUsed", info.DiskStatus.DataVolume.PercentUsed,
+				"availableBytes", info.DiskStatus.DataVolume.AvailableBytes)
+		} else {
+			contextLogger.Debug("pod disk status missing",
+				"pod", podName,
+				"hasInfo", info != nil,
+				"hasDiskStatus", info != nil && info.DiskStatus != nil)
+		}
 	}
 
 	var resizedAny bool
@@ -86,16 +110,27 @@ func Reconcile(
 		}
 	}
 
-	// Only requeue with a delay if we actually performed a resize.
-	// Otherwise, let the regular reconciliation loop handle scheduling.
+	// When a resize was performed, request a requeue after a short delay to
+	// verify the resize completed successfully.
+	//
+	// IMPORTANT: We do NOT return MonitoringInterval here, even when diskInfoByPod
+	// has entries. Returning non-zero at this point in the cluster_controller.go
+	// reconciliation (line 815) would cause an early return BEFORE reconcilePods
+	// and RegisterPhase, preventing the cluster from ever reaching healthy status.
+	//
+	// Instead, we rely on the cluster controller to manage the monitoring requeue
+	// at the end of its reconciliation loop, after the cluster is healthy.
 	if resizedAny {
 		return ctrl.Result{RequeueAfter: RequeueDelay}, nil
 	}
+
 	return ctrl.Result{}, nil
 }
 
-// isAutoResizeEnabled checks if auto-resize is enabled for any storage in the cluster.
-func isAutoResizeEnabled(cluster *apiv1.Cluster) bool {
+// IsAutoResizeEnabled checks if auto-resize is enabled for any storage in the cluster.
+// This is exported so the cluster controller can use it to determine if monitoring
+// reconciliation is needed.
+func IsAutoResizeEnabled(cluster *apiv1.Cluster) bool {
 	if cluster.Spec.StorageConfiguration.Resize != nil &&
 		cluster.Spec.StorageConfiguration.Resize.Enabled {
 		return true

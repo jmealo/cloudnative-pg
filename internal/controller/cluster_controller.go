@@ -837,9 +837,12 @@ func (r *ClusterReconciler) reconcileResources(
 	}
 
 	// Reconcile Pods
+	contextLogger.Debug("starting reconcilePods")
 	if res, err := r.reconcilePods(ctx, cluster, resources, instancesStatus); !res.IsZero() || err != nil {
+		contextLogger.Debug("reconcilePods returned early", "result", res, "error", err)
 		return res, err
 	}
+	contextLogger.Debug("reconcilePods completed")
 
 	if len(resources.instances.Items) > 0 && resources.noInstanceIsAlive() {
 		if err := r.RegisterPhase(ctx, cluster, apiv1.PhaseUnrecoverable,
@@ -865,6 +868,14 @@ func (r *ClusterReconciler) reconcileResources(
 	}
 
 	r.cleanupCompletedJobs(ctx, resources.jobs)
+
+	// For clusters with auto-resize enabled, schedule periodic reconciliation
+	// to monitor disk usage and trigger resize when needed. This is done at the
+	// END of reconciliation after RegisterPhase to ensure it doesn't block
+	// the cluster from reaching healthy status.
+	if autoresize.IsAutoResizeEnabled(cluster) {
+		return ctrl.Result{RequeueAfter: autoresize.MonitoringInterval}, nil
+	}
 
 	return ctrl.Result{}, nil
 }
