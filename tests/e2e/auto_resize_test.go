@@ -1025,15 +1025,51 @@ var _ = Describe("PVC Auto-Resize", Label(tests.LabelAutoResize), func() {
 				Expect(err).ToNot(HaveOccurred())
 
 				// Generate enough WAL to exceed maxSlotRetentionBytes (100MB)
-				// Each pg_switch_wal creates a 16MB WAL segment
-				commandTimeout := time.Second * 60
-				for i := 0; i < 10; i++ {
-					_, _, _ = env.EventuallyExecCommand(
-						env.Ctx, *pod, specs.PostgresContainerName, &commandTimeout,
-						"psql", "-U", "postgres", "-c", "SELECT pg_switch_wal()",
-					)
-					time.Sleep(time.Second)
-				}
+				// We need to write actual data to generate real WAL content.
+				// pg_switch_wal alone only creates new segments but retention is
+				// measured by LSN difference (actual bytes written).
+				commandTimeout := time.Second * 120
+				// Insert ~120MB of data to exceed the 100MB threshold
+				_, _, err = env.EventuallyExecCommand(
+					env.Ctx, *pod, specs.PostgresContainerName, &commandTimeout,
+					"psql", "-U", "postgres", "-c",
+					"CREATE TABLE IF NOT EXISTS wal_fill (data TEXT); "+
+						"INSERT INTO wal_fill SELECT repeat('x', 1000) FROM generate_series(1, 120000);",
+				)
+				Expect(err).ToNot(HaveOccurred())
+			})
+
+			By("waiting for WAL health status to be updated with slot retention", func() {
+				// Wait for the cluster status to show the inactive slot with
+				// retention exceeding the threshold. This is necessary because
+				// the WAL health check runs as part of the instance status update,
+				// which happens periodically.
+				Eventually(func(g Gomega) {
+					cluster, err := clusterutils.Get(env.Ctx, env.Client, namespace, clusterName)
+					g.Expect(err).ToNot(HaveOccurred())
+
+					if cluster.Status.DiskStatus == nil ||
+						cluster.Status.DiskStatus.Instances == nil {
+						return
+					}
+
+					podName := clusterName + "-1"
+					instanceStatus, ok := cluster.Status.DiskStatus.Instances[podName]
+					g.Expect(ok).To(BeTrue(), "instance status should exist")
+					g.Expect(instanceStatus.WALHealth).ToNot(BeNil(), "WAL health should be populated")
+					g.Expect(instanceStatus.WALHealth.InactiveSlots).ToNot(BeEmpty(),
+						"inactive slot should be detected")
+
+					// Verify the slot exceeds our threshold (100MB)
+					for _, slot := range instanceStatus.WALHealth.InactiveSlots {
+						if slot.SlotName == "test_inactive_slot" {
+							g.Expect(slot.RetentionBytes).To(BeNumerically(">", 104857600),
+								"slot should retain more than 100MB of WAL")
+							return
+						}
+					}
+					g.Expect(false).To(BeTrue(), "test_inactive_slot not found in WAL health")
+				}, 120*time.Second, 5*time.Second).Should(Succeed())
 			})
 
 			By("filling the disk to trigger auto-resize", func() {
@@ -1093,10 +1129,14 @@ var _ = Describe("PVC Auto-Resize", Label(tests.LabelAutoResize), func() {
 					"psql", "-U", "postgres", "-c",
 					"SELECT pg_drop_replication_slot('test_inactive_slot')",
 				)
-				// Remove fill file
+				// Remove fill file and wal_fill table
 				_, _, _ = env.EventuallyExecCommand(
 					env.Ctx, *pod, specs.PostgresContainerName, &commandTimeout,
 					"rm", "-f", "/var/lib/postgresql/data/pgdata/fill_file",
+				)
+				_, _, _ = env.EventuallyExecCommand(
+					env.Ctx, *pod, specs.PostgresContainerName, &commandTimeout,
+					"psql", "-U", "postgres", "-c", "DROP TABLE IF EXISTS wal_fill",
 				)
 			})
 		})
