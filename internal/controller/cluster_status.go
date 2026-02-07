@@ -793,9 +793,10 @@ func (r *ClusterReconciler) updateClusterStatusThatRequiresInstancesState(
 // updateDiskStatus populates cluster.Status.DiskStatus from instance statuses.
 func updateDiskStatus(cluster *apiv1.Cluster, statuses postgres.PostgresqlStatusList) {
 	if cluster.Status.DiskStatus == nil {
-		cluster.Status.DiskStatus = &apiv1.ClusterDiskStatus{
-			Instances: make(map[string]*apiv1.InstanceDiskStatus),
-		}
+		cluster.Status.DiskStatus = &apiv1.ClusterDiskStatus{}
+	}
+	if cluster.Status.DiskStatus.Instances == nil {
+		cluster.Status.DiskStatus.Instances = make(map[string]*apiv1.InstanceDiskStatus)
 	}
 
 	for _, item := range statuses.Items {
