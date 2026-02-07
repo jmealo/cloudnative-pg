@@ -972,6 +972,86 @@ However, directory-based provisioners like [local-path-provisioner](https://gith
 
 ---
 
+## Pre-Merge Implementation Issues
+
+The following issues were identified during internal review and must be resolved
+before submitting for upstream review.
+
+### Status Persistence Bug (Critical)
+
+`autoresize.Reconcile()` is called from the main reconciliation loop in
+`cluster_controller.go`. When a resize occurs, `Reconcile` returns a non-zero
+`ctrl.Result{RequeueAfter: ...}`, which causes the controller to return early
+at line 822 — **before `RegisterPhase` and any status patch/update occurs**.
+
+This means `AutoResizeEvents` appended to `cluster.Status.AutoResizeEvents`
+during the resize are **never persisted** to the Kubernetes API server. They
+exist only in the in-memory cluster object for that reconciliation cycle.
+
+**Fix:** After `autoresize.Reconcile` returns a non-zero result, patch
+`cluster.Status` before returning. Follow the pattern used by
+`scheduledbackup_controller.go:202` which calls `cli.Status().Patch()`.
+
+### Non-Persistent Rate Limiting (Critical)
+
+The `GlobalBudgetTracker` in `pkg/reconciler/autoresize/ratelimit.go` is an
+in-memory `map[string][]time.Time`. If the operator pod restarts, all resize
+history is lost. A cluster could exceed `maxActionsPerDay` immediately after
+restart because the operator has no memory of recent resizes.
+
+**Fix:** Derive the budget from `cluster.Status.AutoResizeEvents` instead of
+the in-memory tracker. Filter events by volume key and timestamp (last 24h) to
+compute remaining budget. This makes rate limiting durable across restarts and
+consistent across operator replicas. The `GlobalBudgetTracker` can be removed
+or kept as a fast-path cache that is hydrated from status on startup.
+
+**Dependency:** The status persistence bug (above) must be fixed first, or the
+events used to compute budget will not exist in the API server.
+
+### Resize Metrics Defined but Never Set (Critical)
+
+Four operator-level metrics are registered in
+`pkg/management/postgres/webserver/metricserver/disk.go` but never populated:
+
+- `cnpg_disk_at_limit` — never `.Set()`
+- `cnpg_disk_resize_blocked` — never `.Set()`
+- `cnpg_disk_resizes_total` — never `.Inc()`
+- `cnpg_disk_resize_budget_remaining` — never `.Set()`
+
+These metrics are referenced in the user documentation
+(`docs/src/storage_autoresize.md`), PrometheusRules
+(`docs/src/samples/monitoring/prometheusrule.yaml`), and the troubleshooting
+guide. Alerts based on these metrics will never fire.
+
+**Fix:** These are operator-level metrics (resize decisions happen in the
+controller, not the instance manager). Two approaches:
+
+1. **Preferred:** Move these metrics to the operator's own Prometheus exporter
+   and set them in `autoresize.Reconcile()` after each resize decision.
+2. **Alternative:** Expose the resize status via `cluster.Status` fields and
+   have the instance manager read and export them. This is less direct but
+   keeps all metrics in one exporter.
+
+### WAL Safety Fail-Open Without Warning (Important)
+
+When `walHealth` is nil in `walsafety.go:98`, resize is silently allowed. This
+is the correct default (fail-open for availability), but no warning is emitted.
+
+**Fix:** Emit a Kubernetes warning event when WAL health data is unavailable:
+`"auto-resize permitted without WAL health verification (data unavailable)"`.
+This ensures operators can detect when the safety check is being bypassed.
+
+### parseQuantityOrDefault Silent Fallback (Important)
+
+`clamping.go:136` silently falls back to default values when user-provided
+quantities fail to parse. This means a typo like `minStep: "2XGi"` would
+silently become `minStep: "2Gi"` with no indication to the user.
+
+**Fix:** Log a warning when falling back due to parse error:
+`contextLogger.Warn("invalid quantity, using default", "provided", qtyStr, "default", defaultStr)`
+
+---
+
 ## Open Questions
 
 1. **Should tablespace auto-resize be included in Phase 1?**

@@ -37,31 +37,40 @@ is that the replication slot exists in PostgreSQL (verified via direct `psql`
 query) but the instance manager's WAL health status reports an empty
 `InactiveSlots` array.
 
+**VictoriaLogs confirmation:** Operator logs show `percentUsed` and
+`availableBytes` in pod disk status, but NO WAL health status fields
+(`InactiveSlots`, `InactiveSlotCount`) appear in the logs. Direct psql confirms
+the slot exists: `test_inactive_slot|f|t|128288040` (inactive, has LSN, 128MB
+retention). Cluster status shows: `InactiveSlotCount=0, InactiveSlots=[]`.
+
 **Root cause analysis:** The slot detection query in
 `pkg/management/postgres/wal/health.go` (`queryInactiveSlots`) is correct and
-unit-tested. The query runs only when `isPrimary == true` (line 110). The most
-likely failure mode is a timing issue in the status propagation pipeline:
+unit-tested. The query runs only when `isPrimary == true` (line 110). The status
+propagation pipeline has multiple failure points:
 
-1. Instance manager runs `fillWALHealthStatus()` as part of its periodic status
-   probe (`probes.go:128`).
-2. The health check queries `pg_replication_slots WHERE NOT active AND
-   slot_type = 'physical' AND restart_lsn IS NOT NULL`.
-3. Query errors are non-fatal (logged, not returned) — if the query times out
-   under load, `InactiveSlots` stays nil.
-4. The status is written to the Cluster CR by `updateDiskStatus` in the
-   controller, which aggregates from all instance status reports.
+1. **isPrimary gating**: `queryInactiveSlots` only runs when `isPrimary == true`
+   (`wal/health.go:110`). `isPrimary` is set from `NOT pg_is_in_recovery()` in
+   `probes.go:97`. If the instance is transiently in recovery during the status
+   probe, slot checks are skipped entirely.
+2. **Non-fatal error handling**: All three WAL health sub-queries (ready WAL
+   count, archiver status, inactive slots) treat errors as non-fatal — logged
+   but not returned (`wal/health.go:98,106,113`). If `queryInactiveSlots` fails
+   (timeout, connection issue), `InactiveSlots` stays nil and the resize
+   proceeds without slot safety checks.
+3. **No WAL health status serialized**: VictoriaLogs shows no WAL health fields
+   in the instance status, suggesting `fillWALHealthStatus` either silently
+   fails or the health checker returns empty data.
 
-The E2E test polls for 180s at 5s intervals, which should be sufficient for
-multiple status cycles. However, under AKS load (concurrent Azure Disk
-operations, CSI driver pressure), the instance manager's probe cycle may be
-delayed or the database connection may be saturated.
+**Recommendation for PR:** The slot detection logic needs hardening:
+1. Add structured logging to `queryInactiveSlots` so results (or errors) are
+   visible in operator logs
+2. Consider making the slot query error fatal (return error instead of
+   swallowing it) so the WAL safety check fails closed
+3. The flaky E2E test should be stabilized once the detection is hardened
 
-**Recommendation for PR:** Ship with `PIt()` and document the known issue. The
-WAL safety blocking logic is proven by the archive health test (Test #11) which
-exercises the same code path (different check, same blocking mechanism). The slot
-detection logic has full unit test coverage in `wal/health_test.go`. The flaky
-E2E test can be stabilized in a follow-up by adding retry logic or a longer
-probe timeout to the instance manager.
+The WAL safety blocking mechanism itself is proven by the archive health test
+(Test #11), which exercises the same blocking code path. The slot detection
+query has full unit test coverage in `wal/health_test.go`.
 
 ---
 
@@ -243,14 +252,16 @@ bytes drop below an absolute threshold. This is an OR condition with
 
 ---
 
-### REQ-12: AutoResizeEvent Status Recording (P1) — GAP
+### REQ-12: AutoResizeEvent Status Recording (P0, upgraded) — GAP
 
 After every resize, the reconciler appends an `AutoResizeEvent` to
-`cluster.status.autoResizeEvents`. This provides audit trail and is consumed
-by the kubectl plugin.
+`cluster.status.autoResizeEvents`. This provides audit trail, is consumed
+by the kubectl plugin, and is now the basis for durable rate limiting.
 
 **Status:** NOT TESTED. No test verifies `cluster.Status.AutoResizeEvents`
-is populated after a resize succeeds.
+is populated after a resize succeeds. **CRITICAL:** A status persistence bug
+was identified — `autoresize.Reconcile` returns early before status is
+patched, so events may never be persisted. This test validates the fix.
 
 **Required change:** Add to Test #1 (basic resize) after the "waiting for PVC
 to be resized" step:
@@ -575,6 +586,33 @@ the CURRENT API.
 
 ---
 
+## Implementation Issues Identified in Review
+
+The following critical issues were found during internal review. These must be
+fixed before PR submission. See `docs/src/design/pvc-autoresize.md` section
+"Pre-Merge Implementation Issues" and the ralph prompt for detailed fix plans.
+
+1. **Status Persistence Bug (CRITICAL)**: `autoresize.Reconcile` returns early
+   from the controller loop, skipping status update. `AutoResizeEvents` are
+   never persisted. Rate limiting (which depends on events) is broken.
+
+2. **Non-Persistent Rate Limiting (CRITICAL)**: `GlobalBudgetTracker` is
+   in-memory. Budget is lost on operator restart. Must derive from persisted
+   `AutoResizeEvents` instead.
+
+3. **Resize Metrics Never Set (CRITICAL)**: `cnpg_disk_at_limit`,
+   `cnpg_disk_resize_blocked`, `cnpg_disk_resizes_total`, and
+   `cnpg_disk_resize_budget_remaining` are registered but never populated.
+   PrometheusRules referencing them will never fire.
+
+4. **WAL Safety Fail-Open Without Warning (IMPORTANT)**: When `walHealth` is
+   nil, resize proceeds without emitting any event or log warning.
+
+5. **parseQuantityOrDefault Silent Fallback (IMPORTANT)**: Invalid user
+   quantities silently fall back to defaults with no warning.
+
+---
+
 ## Priority Summary
 
 ### Verified on AKS (11 passing)
@@ -586,21 +624,25 @@ the CURRENT API.
 - **REQ-07**: Inactive slot blocks resize — E2E test is `PIt()` (flaky
   detection). Unit tests cover the blocking logic. See "Known Issue" above.
 
-### Remaining Gaps for Follow-Up
+### Must Fix Before PR (code bugs)
 
-These are **not required for the initial PR** but are tracked for completeness:
+- Status persistence, rate limit durability, and metrics implementation —
+  these are code bugs, not test gaps. See "Implementation Issues" above.
 
-**P0 gap (1):**
-- **REQ-11**: MinAvailable trigger — untested trigger mode. Can be added as a
-  follow-up test without code changes.
+### Must Add Before PR (P0 test gaps)
 
-**P1 gaps (5):**
-- **REQ-12**: AutoResizeEvent status recording
+- **REQ-11**: MinAvailable trigger — untested trigger mode
+- **REQ-12**: AutoResizeEvent status recording (upgraded to P0 — validates
+  the status persistence fix)
+
+### Should Add Before PR (P1 test gaps)
+
 - **REQ-13**: resize_blocked metric verification
 - **REQ-14**: MaxStep runtime clamping (webhook tested, runtime not)
 - **REQ-15**: MaxPendingWALFiles explicit test
 - **REQ-16**: Multi-instance resize verification
 
-**P2 gaps (8):**
+### Follow-Up (P2)
+
 - REQ-18 through REQ-26: Additional metric assertions, alertOnResize event,
   acknowledgeWALRisk runtime test
