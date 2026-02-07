@@ -142,12 +142,12 @@ var _ = Describe("PVC Auto-Resize", Label(tests.LabelAutoResize), func() {
 
 	Context("auto-resize with separate WAL volume", func() {
 		const (
-			sampleFile  = fixturesDir + "/auto_resize/cluster-autoresize-wal.yaml.template"
-			clusterName = "cluster-autoresize-wal"
+			sampleFile  = fixturesDir + "/auto_resize/cluster-autoresize-wal-runtime.yaml.template"
+			clusterName = "cluster-autoresize-wal-runtime"
 		)
 		var namespace string
 
-		It("should create cluster with both data and WAL resize enabled", func(_ SpecContext) {
+		It("should resize WAL PVC when WAL volume usage exceeds threshold", func(_ SpecContext) {
 			const namespacePrefix = "autoresize-wal-e2e"
 			var err error
 
@@ -186,17 +186,82 @@ var _ = Describe("PVC Auto-Resize", Label(tests.LabelAutoResize), func() {
 				Expect(dataCount).To(BeNumerically(">", 0), "should have data PVCs")
 				Expect(walCount).To(BeNumerically(">", 0), "should have WAL PVCs")
 			})
+
+			By("filling the WAL volume to trigger auto-resize", func() {
+				podName := clusterName + "-1"
+				pod := &corev1.Pod{}
+				err := env.Client.Get(env.Ctx, types.NamespacedName{
+					Namespace: namespace,
+					Name:      podName,
+				}, pod)
+				Expect(err).ToNot(HaveOccurred())
+
+				// Fill the WAL volume to exceed the 80% usage threshold
+				// The WAL volume is 2Gi, so writing ~1.7Gi should trigger resize
+				// WAL mount is at /var/lib/postgresql/wal/pg_wal
+				commandTimeout := time.Second * 120
+				_, _, err = env.EventuallyExecCommand(
+					env.Ctx, *pod, specs.PostgresContainerName, &commandTimeout,
+					"sh", "-c",
+					"dd if=/dev/zero of=/var/lib/postgresql/wal/pg_wal/fill_file bs=1M count=1700",
+				)
+				Expect(err).ToNot(HaveOccurred())
+			})
+
+			By("waiting for WAL PVC to be resized", func() {
+				// The reconciler runs every 30s, give it time to detect and resize
+				Eventually(func() bool {
+					pvcList, err := storage.GetPVCList(env.Ctx, env.Client, namespace)
+					if err != nil {
+						return false
+					}
+
+					for idx := range pvcList.Items {
+						pvc := &pvcList.Items[idx]
+						// Only check WAL PVCs for this cluster
+						if pvc.Labels[utils.ClusterLabelName] != clusterName {
+							continue
+						}
+						if pvc.Labels[utils.PvcRoleLabelName] != string(utils.PVCRolePgWal) {
+							continue
+						}
+						currentSize := pvc.Spec.Resources.Requests[corev1.ResourceStorage]
+						originalSize := resource.MustParse("2Gi")
+						if currentSize.Cmp(originalSize) > 0 {
+							return true
+						}
+					}
+					return false
+				}, 5*time.Minute, 10*time.Second).Should(BeTrue(),
+					"WAL PVC should have been resized beyond its original 2Gi")
+			})
+
+			By("cleaning up the fill file", func() {
+				podName := clusterName + "-1"
+				pod := &corev1.Pod{}
+				err := env.Client.Get(env.Ctx, types.NamespacedName{
+					Namespace: namespace,
+					Name:      podName,
+				}, pod)
+				Expect(err).ToNot(HaveOccurred())
+
+				commandTimeout := time.Second * 30
+				_, _, _ = env.EventuallyExecCommand(
+					env.Ctx, *pod, specs.PostgresContainerName, &commandTimeout,
+					"rm", "-f", "/var/lib/postgresql/wal/pg_wal/fill_file",
+				)
+			})
 		})
 	})
 
 	Context("auto-resize respects expansion limit", func() {
 		const (
-			sampleFile  = fixturesDir + "/auto_resize/cluster-autoresize-basic.yaml.template"
-			clusterName = "cluster-autoresize-basic"
+			sampleFile  = fixturesDir + "/auto_resize/cluster-autoresize-limit.yaml.template"
+			clusterName = "cluster-autoresize-limit"
 		)
 		var namespace string
 
-		It("should have the configured expansion limit", func(_ SpecContext) {
+		It("should resize PVC but never exceed configured limit", func(_ SpecContext) {
 			const namespacePrefix = "autoresize-limit-e2e"
 			var err error
 
@@ -205,10 +270,94 @@ var _ = Describe("PVC Auto-Resize", Label(tests.LabelAutoResize), func() {
 
 			AssertCreateCluster(namespace, clusterName, sampleFile, env)
 
-			By("verifying expansion limit is set", func() {
+			By("verifying expansion limit is set to 3Gi", func() {
 				cluster, err := clusterutils.Get(env.Ctx, env.Client, namespace, clusterName)
 				Expect(err).ToNot(HaveOccurred())
-				Expect(cluster.Spec.StorageConfiguration.Resize.Expansion.Limit).To(Equal("10Gi"))
+				Expect(cluster.Spec.StorageConfiguration.Resize.Expansion.Limit).To(Equal("3Gi"))
+			})
+
+			By("filling the disk to trigger first auto-resize", func() {
+				podName := clusterName + "-1"
+				pod := &corev1.Pod{}
+				err := env.Client.Get(env.Ctx, types.NamespacedName{
+					Namespace: namespace,
+					Name:      podName,
+				}, pod)
+				Expect(err).ToNot(HaveOccurred())
+
+				// Fill the disk to exceed the 80% usage threshold
+				// The volume is 2Gi, so writing ~1.7Gi should trigger resize
+				commandTimeout := time.Second * 120
+				_, _, err = env.EventuallyExecCommand(
+					env.Ctx, *pod, specs.PostgresContainerName, &commandTimeout,
+					"sh", "-c",
+					"dd if=/dev/zero of=/var/lib/postgresql/data/pgdata/fill_file bs=1M count=1700",
+				)
+				Expect(err).ToNot(HaveOccurred())
+			})
+
+			By("waiting for PVC to be resized to 3Gi (the limit)", func() {
+				// The reconciler runs every 30s, give it time to detect and resize
+				Eventually(func() bool {
+					pvcList, err := storage.GetPVCList(env.Ctx, env.Client, namespace)
+					if err != nil {
+						return false
+					}
+
+					for idx := range pvcList.Items {
+						pvc := &pvcList.Items[idx]
+						if pvc.Labels[utils.ClusterLabelName] != clusterName {
+							continue
+						}
+						if pvc.Labels[utils.PvcRoleLabelName] != string(utils.PVCRolePgData) {
+							continue
+						}
+						currentSize := pvc.Spec.Resources.Requests[corev1.ResourceStorage]
+						limitSize := resource.MustParse("3Gi")
+						// Should have grown to the limit
+						if currentSize.Cmp(limitSize) >= 0 {
+							return true
+						}
+					}
+					return false
+				}, 5*time.Minute, 10*time.Second).Should(BeTrue(),
+					"PVC should have been resized to the limit of 3Gi")
+			})
+
+			By("verifying PVC does not exceed the limit", func() {
+				pvcList, err := storage.GetPVCList(env.Ctx, env.Client, namespace)
+				Expect(err).ToNot(HaveOccurred())
+
+				for idx := range pvcList.Items {
+					pvc := &pvcList.Items[idx]
+					if pvc.Labels[utils.ClusterLabelName] != clusterName {
+						continue
+					}
+					if pvc.Labels[utils.PvcRoleLabelName] != string(utils.PVCRolePgData) {
+						continue
+					}
+					currentSize := pvc.Spec.Resources.Requests[corev1.ResourceStorage]
+					limitSize := resource.MustParse("3Gi")
+					// Should not exceed limit
+					Expect(currentSize.Cmp(limitSize)).To(BeNumerically("<=", 0),
+						"PVC size should not exceed limit of 3Gi")
+				}
+			})
+
+			By("cleaning up the fill file", func() {
+				podName := clusterName + "-1"
+				pod := &corev1.Pod{}
+				err := env.Client.Get(env.Ctx, types.NamespacedName{
+					Namespace: namespace,
+					Name:      podName,
+				}, pod)
+				Expect(err).ToNot(HaveOccurred())
+
+				commandTimeout := time.Second * 30
+				_, _, _ = env.EventuallyExecCommand(
+					env.Ctx, *pod, specs.PostgresContainerName, &commandTimeout,
+					"rm", "-f", "/var/lib/postgresql/data/pgdata/fill_file",
+				)
 			})
 		})
 	})
@@ -279,12 +428,12 @@ var _ = Describe("PVC Auto-Resize", Label(tests.LabelAutoResize), func() {
 
 	Context("rate-limit enforcement", func() {
 		const (
-			sampleFile  = fixturesDir + "/auto_resize/cluster-autoresize-basic.yaml.template"
-			clusterName = "cluster-autoresize-basic"
+			sampleFile  = fixturesDir + "/auto_resize/cluster-autoresize-ratelimit.yaml.template"
+			clusterName = "cluster-autoresize-ratelimit"
 		)
 		var namespace string
 
-		It("should have the configured maxActionsPerDay", func(_ SpecContext) {
+		It("should block second resize when rate limit exhausted", func(_ SpecContext) {
 			const namespacePrefix = "autoresize-ratelimit-e2e"
 			var err error
 
@@ -293,23 +442,134 @@ var _ = Describe("PVC Auto-Resize", Label(tests.LabelAutoResize), func() {
 
 			AssertCreateCluster(namespace, clusterName, sampleFile, env)
 
-			By("verifying maxActionsPerDay is set", func() {
+			By("verifying maxActionsPerDay is set to 1", func() {
 				cluster, err := clusterutils.Get(env.Ctx, env.Client, namespace, clusterName)
 				Expect(err).ToNot(HaveOccurred())
 				Expect(cluster.Spec.StorageConfiguration.Resize.Strategy).ToNot(BeNil())
-				Expect(cluster.Spec.StorageConfiguration.Resize.Strategy.MaxActionsPerDay).To(Equal(5))
+				Expect(cluster.Spec.StorageConfiguration.Resize.Strategy.MaxActionsPerDay).To(Equal(1))
+			})
+
+			By("filling the disk to trigger first auto-resize", func() {
+				podName := clusterName + "-1"
+				pod := &corev1.Pod{}
+				err := env.Client.Get(env.Ctx, types.NamespacedName{
+					Namespace: namespace,
+					Name:      podName,
+				}, pod)
+				Expect(err).ToNot(HaveOccurred())
+
+				// Fill the disk to exceed the 80% usage threshold
+				commandTimeout := time.Second * 120
+				_, _, err = env.EventuallyExecCommand(
+					env.Ctx, *pod, specs.PostgresContainerName, &commandTimeout,
+					"sh", "-c",
+					"dd if=/dev/zero of=/var/lib/postgresql/data/pgdata/fill_file bs=1M count=1700",
+				)
+				Expect(err).ToNot(HaveOccurred())
+			})
+
+			var sizeAfterFirstResize resource.Quantity
+			By("waiting for first resize to succeed", func() {
+				Eventually(func() bool {
+					pvcList, err := storage.GetPVCList(env.Ctx, env.Client, namespace)
+					if err != nil {
+						return false
+					}
+
+					for idx := range pvcList.Items {
+						pvc := &pvcList.Items[idx]
+						if pvc.Labels[utils.ClusterLabelName] != clusterName {
+							continue
+						}
+						if pvc.Labels[utils.PvcRoleLabelName] != string(utils.PVCRolePgData) {
+							continue
+						}
+						currentSize := pvc.Spec.Resources.Requests[corev1.ResourceStorage]
+						originalSize := resource.MustParse("2Gi")
+						if currentSize.Cmp(originalSize) > 0 {
+							sizeAfterFirstResize = currentSize
+							return true
+						}
+					}
+					return false
+				}, 5*time.Minute, 10*time.Second).Should(BeTrue(),
+					"First resize should succeed")
+			})
+
+			By("filling the disk again to attempt second resize", func() {
+				podName := clusterName + "-1"
+				pod := &corev1.Pod{}
+				err := env.Client.Get(env.Ctx, types.NamespacedName{
+					Namespace: namespace,
+					Name:      podName,
+				}, pod)
+				Expect(err).ToNot(HaveOccurred())
+
+				// Remove old fill file and create a new one to trigger resize again
+				commandTimeout := time.Second * 30
+				_, _, _ = env.EventuallyExecCommand(
+					env.Ctx, *pod, specs.PostgresContainerName, &commandTimeout,
+					"rm", "-f", "/var/lib/postgresql/data/pgdata/fill_file",
+				)
+
+				// Fill again to exceed threshold
+				commandTimeout = time.Second * 120
+				_, _, err = env.EventuallyExecCommand(
+					env.Ctx, *pod, specs.PostgresContainerName, &commandTimeout,
+					"sh", "-c",
+					"dd if=/dev/zero of=/var/lib/postgresql/data/pgdata/fill_file2 bs=1M count=2000",
+				)
+				Expect(err).ToNot(HaveOccurred())
+			})
+
+			By("verifying second resize is blocked by rate limit", func() {
+				// Wait 2 minutes and verify size hasn't changed
+				time.Sleep(2 * time.Minute)
+
+				pvcList, err := storage.GetPVCList(env.Ctx, env.Client, namespace)
+				Expect(err).ToNot(HaveOccurred())
+
+				for idx := range pvcList.Items {
+					pvc := &pvcList.Items[idx]
+					if pvc.Labels[utils.ClusterLabelName] != clusterName {
+						continue
+					}
+					if pvc.Labels[utils.PvcRoleLabelName] != string(utils.PVCRolePgData) {
+						continue
+					}
+					currentSize := pvc.Spec.Resources.Requests[corev1.ResourceStorage]
+					Expect(currentSize.Cmp(sizeAfterFirstResize)).To(Equal(0),
+						"PVC size should not have changed due to rate limit")
+				}
+			})
+
+			By("cleaning up the fill files", func() {
+				podName := clusterName + "-1"
+				pod := &corev1.Pod{}
+				err := env.Client.Get(env.Ctx, types.NamespacedName{
+					Namespace: namespace,
+					Name:      podName,
+				}, pod)
+				Expect(err).ToNot(HaveOccurred())
+
+				commandTimeout := time.Second * 30
+				_, _, _ = env.EventuallyExecCommand(
+					env.Ctx, *pod, specs.PostgresContainerName, &commandTimeout,
+					"rm", "-f", "/var/lib/postgresql/data/pgdata/fill_file",
+					"/var/lib/postgresql/data/pgdata/fill_file2",
+				)
 			})
 		})
 	})
 
 	Context("minStep clamping", func() {
 		const (
-			sampleFile  = fixturesDir + "/auto_resize/cluster-autoresize-basic.yaml.template"
-			clusterName = "cluster-autoresize-basic"
+			sampleFile  = fixturesDir + "/auto_resize/cluster-autoresize-minstep.yaml.template"
+			clusterName = "cluster-autoresize-minstep"
 		)
 		var namespace string
 
-		It("should have the configured minStep", func(_ SpecContext) {
+		It("should resize by at least minStep even when step percentage is smaller", func(_ SpecContext) {
 			const namespacePrefix = "autoresize-minstep-e2e"
 			var err error
 
@@ -318,11 +578,74 @@ var _ = Describe("PVC Auto-Resize", Label(tests.LabelAutoResize), func() {
 
 			AssertCreateCluster(namespace, clusterName, sampleFile, env)
 
-			By("verifying minStep is configured", func() {
+			By("verifying minStep is configured to 1Gi with 5% step", func() {
 				cluster, err := clusterutils.Get(env.Ctx, env.Client, namespace, clusterName)
 				Expect(err).ToNot(HaveOccurred())
 				Expect(cluster.Spec.StorageConfiguration.Resize.Expansion).ToNot(BeNil())
 				Expect(cluster.Spec.StorageConfiguration.Resize.Expansion.MinStep).To(Equal("1Gi"))
+				// 5% of 2Gi = 102Mi, but minStep clamps to 1Gi
+			})
+
+			By("filling the disk to trigger auto-resize", func() {
+				podName := clusterName + "-1"
+				pod := &corev1.Pod{}
+				err := env.Client.Get(env.Ctx, types.NamespacedName{
+					Namespace: namespace,
+					Name:      podName,
+				}, pod)
+				Expect(err).ToNot(HaveOccurred())
+
+				// Fill the disk to exceed the 80% usage threshold
+				commandTimeout := time.Second * 120
+				_, _, err = env.EventuallyExecCommand(
+					env.Ctx, *pod, specs.PostgresContainerName, &commandTimeout,
+					"sh", "-c",
+					"dd if=/dev/zero of=/var/lib/postgresql/data/pgdata/fill_file bs=1M count=1700",
+				)
+				Expect(err).ToNot(HaveOccurred())
+			})
+
+			By("waiting for PVC to be resized by at least minStep (1Gi)", func() {
+				Eventually(func() bool {
+					pvcList, err := storage.GetPVCList(env.Ctx, env.Client, namespace)
+					if err != nil {
+						return false
+					}
+
+					for idx := range pvcList.Items {
+						pvc := &pvcList.Items[idx]
+						if pvc.Labels[utils.ClusterLabelName] != clusterName {
+							continue
+						}
+						if pvc.Labels[utils.PvcRoleLabelName] != string(utils.PVCRolePgData) {
+							continue
+						}
+						currentSize := pvc.Spec.Resources.Requests[corev1.ResourceStorage]
+						// Original was 2Gi, minStep is 1Gi, so should be at least 3Gi
+						expectedMinSize := resource.MustParse("3Gi")
+						if currentSize.Cmp(expectedMinSize) >= 0 {
+							return true
+						}
+					}
+					return false
+				}, 5*time.Minute, 10*time.Second).Should(BeTrue(),
+					"PVC should have grown by at least minStep (1Gi) from 2Gi to at least 3Gi")
+			})
+
+			By("cleaning up the fill file", func() {
+				podName := clusterName + "-1"
+				pod := &corev1.Pod{}
+				err := env.Client.Get(env.Ctx, types.NamespacedName{
+					Namespace: namespace,
+					Name:      podName,
+				}, pod)
+				Expect(err).ToNot(HaveOccurred())
+
+				commandTimeout := time.Second * 30
+				_, _, _ = env.EventuallyExecCommand(
+					env.Ctx, *pod, specs.PostgresContainerName, &commandTimeout,
+					"rm", "-f", "/var/lib/postgresql/data/pgdata/fill_file",
+				)
 			})
 		})
 	})
@@ -424,7 +747,7 @@ var _ = Describe("PVC Auto-Resize", Label(tests.LabelAutoResize), func() {
 		)
 		var namespace string
 
-		It("should create cluster with tablespace resize enabled", func(_ SpecContext) {
+		It("should resize tablespace PVC when usage exceeds threshold", func(_ SpecContext) {
 			const namespacePrefix = "autoresize-tbs-e2e"
 			var err error
 
@@ -458,108 +781,299 @@ var _ = Describe("PVC Auto-Resize", Label(tests.LabelAutoResize), func() {
 				}
 				Expect(tbsCount).To(BeNumerically(">", 0), "should have tablespace PVCs")
 			})
-		})
-	})
 
-	Context("WAL safety policy - archive health requirement", func() {
-		It("should accept cluster with requireArchiveHealthy configured", func(_ SpecContext) {
-			const namespacePrefix = "autoresize-archivehealth-e2e"
-
-			namespace, err := env.CreateUniqueTestNamespace(env.Ctx, env.Client, namespacePrefix)
-			Expect(err).ToNot(HaveOccurred())
-
-			cluster := &apiv1.Cluster{}
-			cluster.SetName("autoresize-archive-check")
-			cluster.SetNamespace(namespace)
-			cluster.Spec.Instances = 1
-			cluster.Spec.StorageConfiguration = apiv1.StorageConfiguration{
-				Size: "2Gi",
-				Resize: &apiv1.ResizeConfiguration{
-					Enabled: true,
-					Strategy: &apiv1.ResizeStrategy{
-						WALSafetyPolicy: &apiv1.WALSafetyPolicy{
-							AcknowledgeWALRisk:    true,
-							RequireArchiveHealthy: boolPtr(true),
-							MaxPendingWALFiles:    intPtr(50),
-						},
-					},
-				},
-			}
-			cluster.Spec.Bootstrap = &apiv1.BootstrapConfiguration{
-				InitDB: &apiv1.BootstrapInitDB{
-					Database: "app",
-					Owner:    "app",
-				},
-			}
-
-			err = env.Client.Create(env.Ctx, cluster)
-			Expect(err).ToNot(HaveOccurred(),
-				"cluster with archive health check should be created")
-
-			By("verifying WAL safety policy is configured", func() {
-				created, err := clusterutils.Get(env.Ctx, env.Client, namespace, "autoresize-archive-check")
+			By("filling the tablespace volume to trigger auto-resize", func() {
+				podName := clusterName + "-1"
+				pod := &corev1.Pod{}
+				err := env.Client.Get(env.Ctx, types.NamespacedName{
+					Namespace: namespace,
+					Name:      podName,
+				}, pod)
 				Expect(err).ToNot(HaveOccurred())
-				Expect(created.Spec.StorageConfiguration.Resize.Strategy.WALSafetyPolicy).ToNot(BeNil())
-				Expect(*created.Spec.StorageConfiguration.Resize.Strategy.WALSafetyPolicy.RequireArchiveHealthy).To(BeTrue())
-				Expect(*created.Spec.StorageConfiguration.Resize.Strategy.WALSafetyPolicy.MaxPendingWALFiles).To(Equal(50))
+
+				// Fill the tablespace volume to exceed the 80% usage threshold
+				// Tablespaces are mounted at /var/lib/postgresql/tablespaces/<name>
+				commandTimeout := time.Second * 120
+				_, _, err = env.EventuallyExecCommand(
+					env.Ctx, *pod, specs.PostgresContainerName, &commandTimeout,
+					"sh", "-c",
+					"dd if=/dev/zero of=/var/lib/postgresql/tablespaces/tbs1/fill_file bs=1M count=1700",
+				)
+				Expect(err).ToNot(HaveOccurred())
+			})
+
+			By("waiting for tablespace PVC to be resized", func() {
+				Eventually(func() bool {
+					pvcList, err := storage.GetPVCList(env.Ctx, env.Client, namespace)
+					if err != nil {
+						return false
+					}
+
+					for idx := range pvcList.Items {
+						pvc := &pvcList.Items[idx]
+						if pvc.Labels[utils.ClusterLabelName] != clusterName {
+							continue
+						}
+						if pvc.Labels[utils.PvcRoleLabelName] != string(utils.PVCRolePgTablespace) {
+							continue
+						}
+						currentSize := pvc.Spec.Resources.Requests[corev1.ResourceStorage]
+						originalSize := resource.MustParse("2Gi")
+						if currentSize.Cmp(originalSize) > 0 {
+							return true
+						}
+					}
+					return false
+				}, 5*time.Minute, 10*time.Second).Should(BeTrue(),
+					"Tablespace PVC should have been resized beyond its original 2Gi")
+			})
+
+			By("cleaning up the fill file", func() {
+				podName := clusterName + "-1"
+				pod := &corev1.Pod{}
+				err := env.Client.Get(env.Ctx, types.NamespacedName{
+					Namespace: namespace,
+					Name:      podName,
+				}, pod)
+				Expect(err).ToNot(HaveOccurred())
+
+				commandTimeout := time.Second * 30
+				_, _, _ = env.EventuallyExecCommand(
+					env.Ctx, *pod, specs.PostgresContainerName, &commandTimeout,
+					"rm", "-f", "/var/lib/postgresql/tablespaces/tbs1/fill_file",
+				)
 			})
 		})
 	})
 
-	Context("WAL safety policy - slot retention limit", func() {
-		It("should accept cluster with maxSlotRetentionBytes configured", func(_ SpecContext) {
-			const namespacePrefix = "autoresize-slotretention-e2e"
+	Context("WAL safety policy - archive health blocks resize", func() {
+		const (
+			sampleFile  = fixturesDir + "/auto_resize/cluster-autoresize-archive-block.yaml.template"
+			clusterName = "cluster-autoresize-archive-block"
+		)
+		var namespace string
 
-			namespace, err := env.CreateUniqueTestNamespace(env.Ctx, env.Client, namespacePrefix)
+		It("should block resize when archive is unhealthy", func(_ SpecContext) {
+			const namespacePrefix = "autoresize-archiveblock-e2e"
+			var err error
+
+			namespace, err = env.CreateUniqueTestNamespace(env.Ctx, env.Client, namespacePrefix)
 			Expect(err).ToNot(HaveOccurred())
 
-			cluster := &apiv1.Cluster{}
-			cluster.SetName("autoresize-slot-check")
-			cluster.SetNamespace(namespace)
-			cluster.Spec.Instances = 1
-			cluster.Spec.StorageConfiguration = apiv1.StorageConfiguration{
-				Size: "2Gi",
-				Resize: &apiv1.ResizeConfiguration{
-					Enabled: true,
-					Strategy: &apiv1.ResizeStrategy{
-						WALSafetyPolicy: &apiv1.WALSafetyPolicy{
-							AcknowledgeWALRisk:    true,
-							MaxSlotRetentionBytes: int64Ptr(1073741824), // 1Gi
-						},
-					},
-				},
-			}
-			cluster.Spec.Bootstrap = &apiv1.BootstrapConfiguration{
-				InitDB: &apiv1.BootstrapInitDB{
-					Database: "app",
-					Owner:    "app",
-				},
-			}
+			AssertCreateCluster(namespace, clusterName, sampleFile, env)
 
-			err = env.Client.Create(env.Ctx, cluster)
-			Expect(err).ToNot(HaveOccurred(),
-				"cluster with slot retention check should be created")
-
-			By("verifying slot retention limit is configured", func() {
-				created, err := clusterutils.Get(env.Ctx, env.Client, namespace, "autoresize-slot-check")
+			By("verifying requireArchiveHealthy is enabled", func() {
+				cluster, err := clusterutils.Get(env.Ctx, env.Client, namespace, clusterName)
 				Expect(err).ToNot(HaveOccurred())
-				Expect(created.Spec.StorageConfiguration.Resize.Strategy.WALSafetyPolicy).ToNot(BeNil())
-				slotRetention := *created.Spec.StorageConfiguration.Resize.Strategy.WALSafetyPolicy.MaxSlotRetentionBytes
-				Expect(slotRetention).To(Equal(int64(1073741824)))
+				Expect(cluster.Spec.StorageConfiguration.Resize.Strategy.WALSafetyPolicy).ToNot(BeNil())
+				Expect(*cluster.Spec.StorageConfiguration.Resize.Strategy.WALSafetyPolicy.RequireArchiveHealthy).To(BeTrue())
+			})
+
+			By("generating WAL to trigger archive failures", func() {
+				podName := clusterName + "-1"
+				pod := &corev1.Pod{}
+				err := env.Client.Get(env.Ctx, types.NamespacedName{
+					Namespace: namespace,
+					Name:      podName,
+				}, pod)
+				Expect(err).ToNot(HaveOccurred())
+
+				// Generate some WAL to trigger archive attempts
+				commandTimeout := time.Second * 60
+				for i := 0; i < 5; i++ {
+					_, _, _ = env.EventuallyExecCommand(
+						env.Ctx, *pod, specs.PostgresContainerName, &commandTimeout,
+						"psql", "-U", "postgres", "-c", "SELECT pg_switch_wal()",
+					)
+				}
+			})
+
+			By("filling the disk to trigger auto-resize", func() {
+				podName := clusterName + "-1"
+				pod := &corev1.Pod{}
+				err := env.Client.Get(env.Ctx, types.NamespacedName{
+					Namespace: namespace,
+					Name:      podName,
+				}, pod)
+				Expect(err).ToNot(HaveOccurred())
+
+				// Fill the disk to exceed the 80% usage threshold
+				commandTimeout := time.Second * 120
+				_, _, err = env.EventuallyExecCommand(
+					env.Ctx, *pod, specs.PostgresContainerName, &commandTimeout,
+					"sh", "-c",
+					"dd if=/dev/zero of=/var/lib/postgresql/data/pgdata/fill_file bs=1M count=1700",
+				)
+				Expect(err).ToNot(HaveOccurred())
+			})
+
+			By("verifying resize is blocked due to unhealthy archive", func() {
+				// Wait 2 minutes and verify PVC has NOT been resized
+				time.Sleep(2 * time.Minute)
+
+				pvcList, err := storage.GetPVCList(env.Ctx, env.Client, namespace)
+				Expect(err).ToNot(HaveOccurred())
+
+				for idx := range pvcList.Items {
+					pvc := &pvcList.Items[idx]
+					if pvc.Labels[utils.ClusterLabelName] != clusterName {
+						continue
+					}
+					if pvc.Labels[utils.PvcRoleLabelName] != string(utils.PVCRolePgData) {
+						continue
+					}
+					currentSize := pvc.Spec.Resources.Requests[corev1.ResourceStorage]
+					originalSize := resource.MustParse("2Gi")
+					Expect(currentSize.Cmp(originalSize)).To(Equal(0),
+						"PVC should NOT have been resized due to unhealthy archive")
+				}
+			})
+
+			By("cleaning up the fill file", func() {
+				podName := clusterName + "-1"
+				pod := &corev1.Pod{}
+				err := env.Client.Get(env.Ctx, types.NamespacedName{
+					Namespace: namespace,
+					Name:      podName,
+				}, pod)
+				Expect(err).ToNot(HaveOccurred())
+
+				commandTimeout := time.Second * 30
+				_, _, _ = env.EventuallyExecCommand(
+					env.Ctx, *pod, specs.PostgresContainerName, &commandTimeout,
+					"rm", "-f", "/var/lib/postgresql/data/pgdata/fill_file",
+				)
+			})
+		})
+	})
+
+	Context("WAL safety policy - inactive slot blocks resize", func() {
+		const (
+			sampleFile  = fixturesDir + "/auto_resize/cluster-autoresize-slot-block.yaml.template"
+			clusterName = "cluster-autoresize-slot-block"
+		)
+		var namespace string
+
+		It("should block resize when replication slot retains too much WAL", func(_ SpecContext) {
+			const namespacePrefix = "autoresize-slotblock-e2e"
+			var err error
+
+			namespace, err = env.CreateUniqueTestNamespace(env.Ctx, env.Client, namespacePrefix)
+			Expect(err).ToNot(HaveOccurred())
+
+			AssertCreateCluster(namespace, clusterName, sampleFile, env)
+
+			By("verifying maxSlotRetentionBytes is configured", func() {
+				cluster, err := clusterutils.Get(env.Ctx, env.Client, namespace, clusterName)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(cluster.Spec.StorageConfiguration.Resize.Strategy.WALSafetyPolicy).ToNot(BeNil())
+				// maxSlotRetentionBytes is set to 100MB in the fixture
+				Expect(*cluster.Spec.StorageConfiguration.Resize.Strategy.WALSafetyPolicy.MaxSlotRetentionBytes).To(
+					Equal(int64(104857600)))
+			})
+
+			By("creating an inactive replication slot", func() {
+				podName := clusterName + "-1"
+				pod := &corev1.Pod{}
+				err := env.Client.Get(env.Ctx, types.NamespacedName{
+					Namespace: namespace,
+					Name:      podName,
+				}, pod)
+				Expect(err).ToNot(HaveOccurred())
+
+				commandTimeout := time.Second * 30
+				_, _, err = env.EventuallyExecCommand(
+					env.Ctx, *pod, specs.PostgresContainerName, &commandTimeout,
+					"psql", "-U", "postgres", "-c",
+					"SELECT pg_create_physical_replication_slot('test_inactive_slot')",
+				)
+				Expect(err).ToNot(HaveOccurred())
+			})
+
+			By("generating WAL to cause slot retention", func() {
+				podName := clusterName + "-1"
+				pod := &corev1.Pod{}
+				err := env.Client.Get(env.Ctx, types.NamespacedName{
+					Namespace: namespace,
+					Name:      podName,
+				}, pod)
+				Expect(err).ToNot(HaveOccurred())
+
+				// Generate enough WAL to exceed maxSlotRetentionBytes (100MB)
+				// Each pg_switch_wal creates a 16MB WAL segment
+				commandTimeout := time.Second * 60
+				for i := 0; i < 10; i++ {
+					_, _, _ = env.EventuallyExecCommand(
+						env.Ctx, *pod, specs.PostgresContainerName, &commandTimeout,
+						"psql", "-U", "postgres", "-c", "SELECT pg_switch_wal()",
+					)
+					time.Sleep(time.Second)
+				}
+			})
+
+			By("filling the disk to trigger auto-resize", func() {
+				podName := clusterName + "-1"
+				pod := &corev1.Pod{}
+				err := env.Client.Get(env.Ctx, types.NamespacedName{
+					Namespace: namespace,
+					Name:      podName,
+				}, pod)
+				Expect(err).ToNot(HaveOccurred())
+
+				// Fill the disk to exceed the 80% usage threshold
+				commandTimeout := time.Second * 120
+				_, _, err = env.EventuallyExecCommand(
+					env.Ctx, *pod, specs.PostgresContainerName, &commandTimeout,
+					"sh", "-c",
+					"dd if=/dev/zero of=/var/lib/postgresql/data/pgdata/fill_file bs=1M count=1700",
+				)
+				Expect(err).ToNot(HaveOccurred())
+			})
+
+			By("verifying resize is blocked due to inactive slot retention", func() {
+				// Wait 2 minutes and verify PVC has NOT been resized
+				time.Sleep(2 * time.Minute)
+
+				pvcList, err := storage.GetPVCList(env.Ctx, env.Client, namespace)
+				Expect(err).ToNot(HaveOccurred())
+
+				for idx := range pvcList.Items {
+					pvc := &pvcList.Items[idx]
+					if pvc.Labels[utils.ClusterLabelName] != clusterName {
+						continue
+					}
+					if pvc.Labels[utils.PvcRoleLabelName] != string(utils.PVCRolePgData) {
+						continue
+					}
+					currentSize := pvc.Spec.Resources.Requests[corev1.ResourceStorage]
+					originalSize := resource.MustParse("2Gi")
+					Expect(currentSize.Cmp(originalSize)).To(Equal(0),
+						"PVC should NOT have been resized due to inactive slot retention")
+				}
+			})
+
+			By("cleaning up", func() {
+				podName := clusterName + "-1"
+				pod := &corev1.Pod{}
+				err := env.Client.Get(env.Ctx, types.NamespacedName{
+					Namespace: namespace,
+					Name:      podName,
+				}, pod)
+				Expect(err).ToNot(HaveOccurred())
+
+				commandTimeout := time.Second * 30
+				// Drop the replication slot
+				_, _, _ = env.EventuallyExecCommand(
+					env.Ctx, *pod, specs.PostgresContainerName, &commandTimeout,
+					"psql", "-U", "postgres", "-c",
+					"SELECT pg_drop_replication_slot('test_inactive_slot')",
+				)
+				// Remove fill file
+				_, _, _ = env.EventuallyExecCommand(
+					env.Ctx, *pod, specs.PostgresContainerName, &commandTimeout,
+					"rm", "-f", "/var/lib/postgresql/data/pgdata/fill_file",
+				)
 			})
 		})
 	})
 })
-
-// Helper functions for pointer types
-func boolPtr(b bool) *bool {
-	return &b
-}
-
-func intPtr(i int) *int {
-	return &i
-}
-
-func int64Ptr(i int64) *int64 {
-	return &i
-}

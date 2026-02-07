@@ -1,13 +1,15 @@
 apiVersion: postgresql.cnpg.io/v1
 kind: Cluster
 metadata:
-  name: cluster-autoresize-tablespace
+  name: cluster-autoresize-wal-runtime
 spec:
   instances: 1
 
   postgresql:
     parameters:
       log_checkpoints: "on"
+      # Smaller WAL segment size to fill faster
+      wal_segment_size: "16"
 
   primaryUpdateStrategy: unsupervised
   primaryUpdateMethod: switchover
@@ -32,17 +34,18 @@ spec:
         walSafetyPolicy:
           acknowledgeWALRisk: true
 
-  tablespaces:
-    - name: tbs1
-      storage:
-        storageClass: ${E2E_DEFAULT_STORAGE_CLASS}
-        size: 2Gi
-        resize:
-          enabled: true
-          triggers:
-            usageThreshold: 80
-          expansion:
-            step: "1Gi"
-            limit: "10Gi"
-          strategy:
-            maxActionsPerDay: 10
+  walStorage:
+    storageClass: ${E2E_DEFAULT_STORAGE_CLASS}
+    size: 2Gi
+    resize:
+      enabled: true
+      triggers:
+        usageThreshold: 80
+      expansion:
+        step: "1Gi"
+        limit: "10Gi"
+      strategy:
+        maxActionsPerDay: 10
+        walSafetyPolicy:
+          # No archive health required for this runtime test
+          requireArchiveHealthy: false

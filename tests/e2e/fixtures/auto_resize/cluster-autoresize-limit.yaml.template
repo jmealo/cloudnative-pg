@@ -1,7 +1,7 @@
 apiVersion: postgresql.cnpg.io/v1
 kind: Cluster
 metadata:
-  name: cluster-autoresize-tablespace
+  name: cluster-autoresize-limit
 spec:
   instances: 1
 
@@ -26,23 +26,9 @@ spec:
         usageThreshold: 80
       expansion:
         step: "1Gi"
-        limit: "10Gi"
+        # Limit is 3Gi - only 1Gi of expansion from 2Gi initial
+        limit: "3Gi"
       strategy:
         maxActionsPerDay: 10
         walSafetyPolicy:
           acknowledgeWALRisk: true
-
-  tablespaces:
-    - name: tbs1
-      storage:
-        storageClass: ${E2E_DEFAULT_STORAGE_CLASS}
-        size: 2Gi
-        resize:
-          enabled: true
-          triggers:
-            usageThreshold: 80
-          expansion:
-            step: "1Gi"
-            limit: "10Gi"
-          strategy:
-            maxActionsPerDay: 10
