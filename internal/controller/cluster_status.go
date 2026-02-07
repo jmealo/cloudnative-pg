@@ -26,6 +26,7 @@ import (
 	"runtime"
 	"slices"
 	"sort"
+	"time"
 
 	"github.com/cloudnative-pg/machinery/pkg/log"
 	pgTime "github.com/cloudnative-pg/machinery/pkg/postgres/time"
@@ -780,10 +781,82 @@ func (r *ClusterReconciler) updateClusterStatusThatRequiresInstancesState(
 		})
 	}
 
+	// Update disk status from instance status
+	updateDiskStatus(cluster, statuses)
+
 	if !reflect.DeepEqual(existingClusterStatus, cluster.Status) {
 		return r.Status().Update(ctx, cluster)
 	}
 	return nil
+}
+
+// updateDiskStatus populates cluster.Status.DiskStatus from instance statuses.
+func updateDiskStatus(cluster *apiv1.Cluster, statuses postgres.PostgresqlStatusList) {
+	if cluster.Status.DiskStatus == nil {
+		cluster.Status.DiskStatus = &apiv1.ClusterDiskStatus{
+			Instances: make(map[string]*apiv1.InstanceDiskStatus),
+		}
+	}
+
+	for _, item := range statuses.Items {
+		if item.Pod == nil || item.DiskStatus == nil {
+			continue
+		}
+
+		podName := item.Pod.Name
+		instanceStatus := &apiv1.InstanceDiskStatus{
+			LastUpdated: &metav1.Time{Time: time.Now()},
+		}
+
+		// Convert data volume
+		if item.DiskStatus.DataVolume != nil {
+			instanceStatus.DataVolume = convertVolumeStatus(item.DiskStatus.DataVolume)
+		}
+
+		// Convert WAL volume
+		if item.DiskStatus.WALVolume != nil {
+			instanceStatus.WALVolume = convertVolumeStatus(item.DiskStatus.WALVolume)
+		}
+
+		// Convert tablespace volumes
+		if len(item.DiskStatus.Tablespaces) > 0 {
+			instanceStatus.Tablespaces = make(map[string]*apiv1.VolumeDiskStatus)
+			for name, vol := range item.DiskStatus.Tablespaces {
+				instanceStatus.Tablespaces[name] = convertVolumeStatus(vol)
+			}
+		}
+
+		// Convert WAL health status
+		if item.WALHealthStatus != nil {
+			instanceStatus.WALHealth = &apiv1.WALHealthInfo{
+				ArchiveHealthy:    item.WALHealthStatus.ArchiveHealthy,
+				PendingWALFiles:   item.WALHealthStatus.PendingWALFiles,
+				InactiveSlotCount: item.WALHealthStatus.InactiveSlotCount,
+			}
+			for _, slot := range item.WALHealthStatus.InactiveSlots {
+				instanceStatus.WALHealth.InactiveSlots = append(instanceStatus.WALHealth.InactiveSlots,
+					apiv1.InactiveSlotInfo{
+						SlotName:       slot.SlotName,
+						RetentionBytes: slot.RetentionBytes,
+					})
+			}
+		}
+
+		cluster.Status.DiskStatus.Instances[podName] = instanceStatus
+	}
+}
+
+// convertVolumeStatus converts a postgres.VolumeStatus to apiv1.VolumeDiskStatus.
+func convertVolumeStatus(vol *postgres.VolumeStatus) *apiv1.VolumeDiskStatus {
+	return &apiv1.VolumeDiskStatus{
+		TotalBytes:     vol.TotalBytes,
+		UsedBytes:      vol.UsedBytes,
+		AvailableBytes: vol.AvailableBytes,
+		PercentUsed:    int(vol.PercentUsed),
+		InodesTotal:    vol.InodesTotal,
+		InodesUsed:     vol.InodesUsed,
+		InodesFree:     vol.InodesFree,
+	}
 }
 
 // getPodsTopology returns a map with all the information about the pods topology
