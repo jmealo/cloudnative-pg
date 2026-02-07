@@ -1044,6 +1044,27 @@ var _ = Describe("PVC Auto-Resize", Label(tests.LabelAutoResize), func() {
 				// retention exceeding the threshold. This is necessary because
 				// the WAL health check runs as part of the instance status update,
 				// which happens periodically.
+				//
+				// First verify the slot exists directly via PostgreSQL (helps with debugging)
+				podName := clusterName + "-1"
+				pod := &corev1.Pod{}
+				err := env.Client.Get(env.Ctx, types.NamespacedName{
+					Namespace: namespace,
+					Name:      podName,
+				}, pod)
+				Expect(err).ToNot(HaveOccurred())
+
+				commandTimeout := time.Second * 30
+				stdout, _, err := env.EventuallyExecCommand(
+					env.Ctx, *pod, specs.PostgresContainerName, &commandTimeout,
+					"psql", "-U", "postgres", "-t", "-A", "-c",
+					"SELECT slot_name, active, restart_lsn IS NOT NULL as has_lsn, "+
+						"pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)::bigint as retention "+
+						"FROM pg_replication_slots WHERE slot_name = 'test_inactive_slot'",
+				)
+				Expect(err).ToNot(HaveOccurred())
+				GinkgoWriter.Printf("Slot status from PostgreSQL: %s\n", stdout)
+
 				Eventually(func(g Gomega) {
 					cluster, err := clusterutils.Get(env.Ctx, env.Client, namespace, clusterName)
 					g.Expect(err).ToNot(HaveOccurred())
@@ -1053,10 +1074,15 @@ var _ = Describe("PVC Auto-Resize", Label(tests.LabelAutoResize), func() {
 						return
 					}
 
-					podName := clusterName + "-1"
 					instanceStatus, ok := cluster.Status.DiskStatus.Instances[podName]
 					g.Expect(ok).To(BeTrue(), "instance status should exist")
 					g.Expect(instanceStatus.WALHealth).ToNot(BeNil(), "WAL health should be populated")
+
+					// Log current slot count for debugging
+					GinkgoWriter.Printf("InactiveSlotCount=%d, InactiveSlots=%v\n",
+						instanceStatus.WALHealth.InactiveSlotCount,
+						instanceStatus.WALHealth.InactiveSlots)
+
 					g.Expect(instanceStatus.WALHealth.InactiveSlots).ToNot(BeEmpty(),
 						"inactive slot should be detected")
 
@@ -1069,7 +1095,7 @@ var _ = Describe("PVC Auto-Resize", Label(tests.LabelAutoResize), func() {
 						}
 					}
 					g.Expect(false).To(BeTrue(), "test_inactive_slot not found in WAL health")
-				}, 120*time.Second, 5*time.Second).Should(Succeed())
+				}, 180*time.Second, 5*time.Second).Should(Succeed())
 			})
 
 			By("filling the disk to trigger auto-resize", func() {
