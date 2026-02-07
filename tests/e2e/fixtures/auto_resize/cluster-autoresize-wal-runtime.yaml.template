@@ -8,8 +8,9 @@ spec:
   postgresql:
     parameters:
       log_checkpoints: "on"
-      # Smaller WAL segment size to fill faster
-      wal_segment_size: "16"
+      # Use min_wal_size and max_wal_size for faster WAL recycling in tests
+      min_wal_size: "32MB"
+      max_wal_size: "64MB"
 
   primaryUpdateStrategy: unsupervised
   primaryUpdateMethod: switchover
