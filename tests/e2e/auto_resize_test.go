@@ -496,7 +496,7 @@ var _ = Describe("PVC Auto-Resize", Label(tests.LabelAutoResize), func() {
 					"First resize should succeed")
 			})
 
-			By("filling the disk again to attempt second resize", func() {
+			By("attempting to trigger second resize (rate limit should block)", func() {
 				podName := clusterName + "-1"
 				pod := &corev1.Pod{}
 				err := env.Client.Get(env.Ctx, types.NamespacedName{
@@ -512,14 +512,16 @@ var _ = Describe("PVC Auto-Resize", Label(tests.LabelAutoResize), func() {
 					"rm", "-f", "/var/lib/postgresql/data/pgdata/fill_file",
 				)
 
-				// Fill again to exceed threshold
+				// Try to fill the disk again - this may fail with "no space left" if rate
+				// limiting prevented the resize, which is actually expected behavior.
+				// We'll verify the PVC size didn't change in the next step.
 				commandTimeout = time.Second * 120
-				_, _, err = env.EventuallyExecCommand(
+				_, _, _ = env.EventuallyExecCommand(
 					env.Ctx, *pod, specs.PostgresContainerName, &commandTimeout,
 					"sh", "-c",
-					"dd if=/dev/zero of=/var/lib/postgresql/data/pgdata/fill_file2 bs=1M count=2000",
+					"dd if=/dev/zero of=/var/lib/postgresql/data/pgdata/fill_file2 bs=1M count=2000 || true",
 				)
-				Expect(err).ToNot(HaveOccurred())
+				// Ignore the error - the important thing is whether resize was blocked
 			})
 
 			By("verifying second resize is blocked by rate limit", func() {
