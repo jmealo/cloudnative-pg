@@ -56,6 +56,7 @@ import (
 	"github.com/cloudnative-pg/cloudnative-pg/pkg/certs"
 	"github.com/cloudnative-pg/cloudnative-pg/pkg/management/postgres/webserver/client/remote"
 	"github.com/cloudnative-pg/cloudnative-pg/pkg/postgres"
+	"github.com/cloudnative-pg/cloudnative-pg/pkg/reconciler/autoresize"
 	"github.com/cloudnative-pg/cloudnative-pg/pkg/reconciler/hibernation"
 	instanceReconciler "github.com/cloudnative-pg/cloudnative-pg/pkg/reconciler/instance"
 	"github.com/cloudnative-pg/cloudnative-pg/pkg/reconciler/majorupgrade"
@@ -451,6 +452,15 @@ func (r *ClusterReconciler) reconcile(ctx context.Context, cluster *apiv1.Cluste
 		resources.pvcs.Items,
 	); err != nil {
 		return ctrl.Result{}, err
+	}
+
+	// Run auto-resize reconciliation if enabled
+	if cluster.Spec.StorageConfiguration.AutoResize != nil && cluster.Spec.StorageConfiguration.AutoResize.Enabled {
+		diskStatuses := convertDiskStatuses(instancesStatus)
+		autoResizeReconciler := autoresize.NewReconciler(r.Client, r.Recorder)
+		if res, err := autoResizeReconciler.Reconcile(ctx, cluster, diskStatuses, resources.pvcs.Items); err != nil || !res.IsZero() {
+			return res, err
+		}
 	}
 
 	if instancesStatus.AllReadyInstancesStatusUnreachable() {
@@ -1514,4 +1524,55 @@ func (r *ClusterReconciler) mapNodeToClusters() handler.MapFunc {
 		}
 		return requests
 	}
+}
+
+// convertDiskStatuses converts disk statuses from postgres.PostgresqlStatusList to []apiv1.InstanceDiskStatus
+func convertDiskStatuses(instancesStatus postgres.PostgresqlStatusList) []apiv1.InstanceDiskStatus {
+	var diskStatuses []apiv1.InstanceDiskStatus
+	now := metav1.Now()
+
+	for _, status := range instancesStatus.Items {
+		if status.DiskStatus == nil || status.Pod == nil {
+			continue
+		}
+
+		instanceDiskStatus := apiv1.InstanceDiskStatus{
+			PodName:     status.Pod.Name,
+			LastUpdated: now,
+		}
+
+		if status.DiskStatus.Data != nil {
+			instanceDiskStatus.Data = &apiv1.VolumeDiskStatus{
+				TotalBytes:     status.DiskStatus.Data.TotalBytes,
+				UsedBytes:      status.DiskStatus.Data.UsedBytes,
+				AvailableBytes: status.DiskStatus.Data.AvailableBytes,
+				PercentUsed:    status.DiskStatus.Data.PercentUsed,
+			}
+		}
+
+		if status.DiskStatus.WAL != nil {
+			instanceDiskStatus.WAL = &apiv1.VolumeDiskStatus{
+				TotalBytes:     status.DiskStatus.WAL.TotalBytes,
+				UsedBytes:      status.DiskStatus.WAL.UsedBytes,
+				AvailableBytes: status.DiskStatus.WAL.AvailableBytes,
+				PercentUsed:    status.DiskStatus.WAL.PercentUsed,
+			}
+		}
+
+		if len(status.DiskStatus.Tablespaces) > 0 {
+			instanceDiskStatus.Tablespaces = make(map[string]*apiv1.VolumeDiskStatus)
+			for name, ts := range status.DiskStatus.Tablespaces {
+				instanceDiskStatus.Tablespaces[name] = &apiv1.VolumeDiskStatus{
+					TotalBytes:     ts.TotalBytes,
+					UsedBytes:      ts.UsedBytes,
+					AvailableBytes: ts.AvailableBytes,
+					PercentUsed:    ts.PercentUsed,
+				}
+			}
+		}
+
+		diskStatuses = append(diskStatuses, instanceDiskStatus)
+	}
+
+	return diskStatuses
 }
