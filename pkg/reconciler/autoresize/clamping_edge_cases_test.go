@@ -206,7 +206,8 @@ var _ = Describe("CalculateNewSize edge cases", func() {
 		It("should handle terabyte-scale volumes", func() {
 			currentSize := resource.MustParse("10Ti")
 			policy := &apiv1.ExpansionPolicy{
-				Step: intstr.IntOrString{Type: intstr.String, StrVal: "10%"},
+				Step:    intstr.IntOrString{Type: intstr.String, StrVal: "10%"},
+				MaxStep: "2Ti", // Allow 1Ti step (10% of 10Ti) without clamping
 			}
 
 			newSize, err := CalculateNewSize(currentSize, policy)
