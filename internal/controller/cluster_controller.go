@@ -56,6 +56,7 @@ import (
 	"github.com/cloudnative-pg/cloudnative-pg/pkg/certs"
 	"github.com/cloudnative-pg/cloudnative-pg/pkg/management/postgres/webserver/client/remote"
 	"github.com/cloudnative-pg/cloudnative-pg/pkg/postgres"
+	"github.com/cloudnative-pg/cloudnative-pg/pkg/reconciler/autoresize"
 	"github.com/cloudnative-pg/cloudnative-pg/pkg/reconciler/hibernation"
 	instanceReconciler "github.com/cloudnative-pg/cloudnative-pg/pkg/reconciler/instance"
 	"github.com/cloudnative-pg/cloudnative-pg/pkg/reconciler/majorupgrade"
@@ -809,6 +810,18 @@ func (r *ClusterReconciler) reconcileResources(
 		return res, err
 	}
 
+	// Auto-resize PVCs based on disk usage
+	diskInfoByPod := buildDiskInfoByPod(instancesStatus)
+	if res, err := autoresize.Reconcile(
+		ctx,
+		r.Client,
+		cluster,
+		diskInfoByPod,
+		resources.pvcs.Items,
+	); err != nil || !res.IsZero() {
+		return res, err
+	}
+
 	// In-place Postgres major version upgrades
 	if result, err := majorupgrade.Reconcile(
 		ctx,
@@ -854,6 +867,23 @@ func (r *ClusterReconciler) reconcileResources(
 	r.cleanupCompletedJobs(ctx, resources.jobs)
 
 	return ctrl.Result{}, nil
+}
+
+// buildDiskInfoByPod constructs a map of pod name to disk info from the instance status list.
+// This is used by the auto-resize reconciler to evaluate disk usage triggers.
+func buildDiskInfoByPod(instancesStatus postgres.PostgresqlStatusList) map[string]*autoresize.InstanceDiskInfo {
+	diskInfoByPod := make(map[string]*autoresize.InstanceDiskInfo)
+	for idx := range instancesStatus.Items {
+		status := &instancesStatus.Items[idx]
+		if status.Pod == nil || status.DiskStatus == nil {
+			continue
+		}
+		diskInfoByPod[status.Pod.Name] = &autoresize.InstanceDiskInfo{
+			DiskStatus:      status.DiskStatus,
+			WALHealthStatus: status.WALHealthStatus,
+		}
+	}
+	return diskInfoByPod
 }
 
 // deleteTerminatedPods will delete the Pods that are terminated

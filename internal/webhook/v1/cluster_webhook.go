@@ -40,6 +40,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/validation"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	validationutil "k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/utils/ptr"
@@ -195,6 +196,7 @@ func (v *ClusterCustomValidator) validate(r *apiv1.Cluster) (allErrs field.Error
 		v.validatePluginConfiguration,
 		v.validateLivenessPingerProbe,
 		v.validateExtensions,
+		v.validateAutoResize,
 	}
 
 	for _, validate := range validations {
@@ -2862,6 +2864,245 @@ func (v *ClusterCustomValidator) validateExtensions(r *apiv1.Cluster) field.Erro
 
 			libraryPaths.Put(path)
 		}
+	}
+
+	return result
+}
+
+// validateAutoResize validates the auto-resize configuration for all storage types.
+func (v *ClusterCustomValidator) validateAutoResize(r *apiv1.Cluster) field.ErrorList {
+	var result field.ErrorList
+
+	// Validate data volume resize configuration
+	if r.Spec.StorageConfiguration.Resize != nil {
+		result = append(result,
+			validateResizeConfiguration(
+				*field.NewPath("spec", "storage", "resize"),
+				r.Spec.StorageConfiguration.Resize,
+				!r.ShouldCreateWalArchiveVolume(),
+			)...)
+	}
+
+	// Validate WAL volume resize configuration
+	if r.Spec.WalStorage != nil && r.Spec.WalStorage.Resize != nil {
+		result = append(result,
+			validateResizeConfiguration(
+				*field.NewPath("spec", "walStorage", "resize"),
+				r.Spec.WalStorage.Resize,
+				false, // WAL volumes are not single-volume
+			)...)
+	}
+
+	// Validate tablespace resize configurations
+	for idx, tbs := range r.Spec.Tablespaces {
+		if tbs.Storage.Resize != nil {
+			result = append(result,
+				validateResizeConfiguration(
+					*field.NewPath("spec", "tablespaces").Index(idx).Child("storage", "resize"),
+					tbs.Storage.Resize,
+					false, // tablespace volumes are not single-volume
+				)...)
+		}
+	}
+
+	return result
+}
+
+// validateResizeConfiguration validates a single ResizeConfiguration.
+func validateResizeConfiguration(
+	structPath field.Path,
+	config *apiv1.ResizeConfiguration,
+	isSingleVolume bool,
+) field.ErrorList {
+	var result field.ErrorList
+
+	if !config.Enabled {
+		return result
+	}
+
+	// Validate triggers
+	if config.Triggers != nil {
+		result = append(result,
+			validateResizeTriggers(*structPath.Child("triggers"), config.Triggers)...)
+	}
+
+	// Validate expansion policy
+	if config.Expansion != nil {
+		result = append(result,
+			validateExpansionPolicy(*structPath.Child("expansion"), config.Expansion)...)
+	}
+
+	// Validate strategy
+	if config.Strategy != nil {
+		result = append(result,
+			validateResizeStrategy(*structPath.Child("strategy"), config.Strategy)...)
+	}
+
+	// For single-volume clusters, require acknowledgeWALRisk
+	if isSingleVolume {
+		if config.Strategy == nil ||
+			config.Strategy.WALSafetyPolicy == nil ||
+			!config.Strategy.WALSafetyPolicy.AcknowledgeWALRisk {
+			result = append(result, field.Required(
+				structPath.Child("strategy", "walSafetyPolicy", "acknowledgeWALRisk"),
+				"single-volume clusters (no separate WAL storage) must set acknowledgeWALRisk=true "+
+					"to enable auto-resize, acknowledging that resizing without separate WAL storage "+
+					"can mask WAL-related issues"))
+		}
+	}
+
+	return result
+}
+
+// validateResizeTriggers validates the trigger configuration.
+func validateResizeTriggers(structPath field.Path, triggers *apiv1.ResizeTriggers) field.ErrorList {
+	var result field.ErrorList
+
+	if triggers.UsageThreshold != 0 && (triggers.UsageThreshold < 1 || triggers.UsageThreshold > 99) {
+		result = append(result, field.Invalid(
+			structPath.Child("usageThreshold"),
+			triggers.UsageThreshold,
+			"usageThreshold must be between 1 and 99"))
+	}
+
+	if triggers.MinAvailable != "" {
+		if _, err := resource.ParseQuantity(triggers.MinAvailable); err != nil {
+			result = append(result, field.Invalid(
+				structPath.Child("minAvailable"),
+				triggers.MinAvailable,
+				"minAvailable must be a valid Kubernetes quantity (e.g., '10Gi')"))
+		}
+	}
+
+	return result
+}
+
+// validateExpansionPolicy validates the expansion policy configuration.
+func validateExpansionPolicy(structPath field.Path, expansion *apiv1.ExpansionPolicy) field.ErrorList {
+	var result field.ErrorList
+
+	// Validate step
+	result = append(result, validateExpansionStep(structPath, expansion.Step)...)
+
+	// Validate minStep
+	if expansion.MinStep != "" {
+		if _, err := resource.ParseQuantity(expansion.MinStep); err != nil {
+			result = append(result, field.Invalid(
+				structPath.Child("minStep"),
+				expansion.MinStep,
+				"minStep must be a valid Kubernetes quantity (e.g., '2Gi')"))
+		}
+	}
+
+	// Validate maxStep
+	if expansion.MaxStep != "" {
+		if _, err := resource.ParseQuantity(expansion.MaxStep); err != nil {
+			result = append(result, field.Invalid(
+				structPath.Child("maxStep"),
+				expansion.MaxStep,
+				"maxStep must be a valid Kubernetes quantity (e.g., '500Gi')"))
+		}
+	}
+
+	// Validate limit
+	if expansion.Limit != "" {
+		if _, err := resource.ParseQuantity(expansion.Limit); err != nil {
+			result = append(result, field.Invalid(
+				structPath.Child("limit"),
+				expansion.Limit,
+				"limit must be a valid Kubernetes quantity (e.g., '1Ti')"))
+		}
+	}
+
+	// Validate minStep <= maxStep if both set
+	if expansion.MinStep != "" && expansion.MaxStep != "" {
+		minStepQty, minErr := resource.ParseQuantity(expansion.MinStep)
+		maxStepQty, maxErr := resource.ParseQuantity(expansion.MaxStep)
+		if minErr == nil && maxErr == nil && minStepQty.Cmp(maxStepQty) > 0 {
+			result = append(result, field.Invalid(
+				structPath.Child("minStep"),
+				expansion.MinStep,
+				"minStep must not be greater than maxStep"))
+		}
+	}
+
+	return result
+}
+
+// validateResizeStrategy validates the resize strategy configuration.
+func validateResizeStrategy(
+	structPath field.Path,
+	strategy *apiv1.ResizeStrategy,
+) field.ErrorList {
+	var result field.ErrorList
+
+	if strategy.MaxActionsPerDay != 0 && (strategy.MaxActionsPerDay < 0 || strategy.MaxActionsPerDay > 10) {
+		result = append(result, field.Invalid(
+			structPath.Child("maxActionsPerDay"),
+			strategy.MaxActionsPerDay,
+			"maxActionsPerDay must be between 0 and 10"))
+	}
+
+	if strategy.WALSafetyPolicy != nil {
+		result = append(result,
+			validateWALSafetyPolicy(*structPath.Child("walSafetyPolicy"), strategy.WALSafetyPolicy)...)
+	}
+
+	return result
+}
+
+// validateWALSafetyPolicy validates the WAL safety policy configuration.
+func validateWALSafetyPolicy(
+	structPath field.Path,
+	policy *apiv1.WALSafetyPolicy,
+) field.ErrorList {
+	var result field.ErrorList
+
+	if policy.MaxPendingWALFiles != nil && *policy.MaxPendingWALFiles < 0 {
+		result = append(result, field.Invalid(
+			structPath.Child("maxPendingWALFiles"),
+			*policy.MaxPendingWALFiles,
+			"maxPendingWALFiles must be non-negative"))
+	}
+
+	if policy.MaxSlotRetentionBytes != nil && *policy.MaxSlotRetentionBytes < 0 {
+		result = append(result, field.Invalid(
+			structPath.Child("maxSlotRetentionBytes"),
+			*policy.MaxSlotRetentionBytes,
+			"maxSlotRetentionBytes must be non-negative"))
+	}
+
+	return result
+}
+
+// validateExpansionStep validates the step field in expansion policy.
+func validateExpansionStep(structPath field.Path, stepVal intstr.IntOrString) field.ErrorList {
+	var result field.ErrorList
+
+	if stepVal.StrVal == "" {
+		return result
+	}
+
+	stepStr := stepVal.StrVal
+	if strings.HasSuffix(stepStr, "%") {
+		// Percentage validation
+		percentStr := strings.TrimSuffix(stepStr, "%")
+		percent, err := strconv.Atoi(percentStr)
+		if err != nil || percent <= 0 || percent > 100 {
+			result = append(result, field.Invalid(
+				structPath.Child("step"),
+				stepStr,
+				"percentage step must be between 1% and 100%"))
+		}
+		return result
+	}
+
+	// Absolute quantity validation
+	if _, err := resource.ParseQuantity(stepStr); err != nil {
+		result = append(result, field.Invalid(
+			structPath.Child("step"),
+			stepStr,
+			"step must be a valid Kubernetes quantity (e.g., '10Gi') or a percentage (e.g., '20%')"))
 	}
 
 	return result
