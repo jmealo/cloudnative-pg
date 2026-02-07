@@ -20,6 +20,7 @@ SPDX-License-Identifier: Apache-2.0
 package e2e
 
 import (
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -32,6 +33,7 @@ import (
 	"github.com/cloudnative-pg/cloudnative-pg/pkg/utils"
 	"github.com/cloudnative-pg/cloudnative-pg/tests"
 	"github.com/cloudnative-pg/cloudnative-pg/tests/utils/clusterutils"
+	"github.com/cloudnative-pg/cloudnative-pg/tests/utils/proxy"
 	"github.com/cloudnative-pg/cloudnative-pg/tests/utils/storage"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -387,29 +389,30 @@ var _ = Describe("PVC Auto-Resize", Label(tests.LabelAutoResize), func() {
 			AssertCreateCluster(namespace, clusterName, sampleFile, env)
 
 			By("verifying disk metrics are exposed", func() {
+				cluster, err := clusterutils.Get(env.Ctx, env.Client, namespace, clusterName)
+				Expect(err).ToNot(HaveOccurred())
+
 				podName := clusterName + "-1"
 				pod := &corev1.Pod{}
-				err := env.Client.Get(env.Ctx, types.NamespacedName{
+				err = env.Client.Get(env.Ctx, types.NamespacedName{
 					Namespace: namespace,
 					Name:      podName,
 				}, pod)
 				Expect(err).ToNot(HaveOccurred())
 
-				commandTimeout := time.Second * 30
-				stdout, _, err := env.EventuallyExecCommand(
-					env.Ctx, *pod, specs.PostgresContainerName, &commandTimeout,
-					"sh", "-c",
-					"curl -s http://localhost:9187/metrics | grep cnpg_disk",
-				)
-				Expect(err).ToNot(HaveOccurred())
-				Expect(stdout).To(ContainSubstring("cnpg_disk_total_bytes"),
-					"should expose cnpg_disk_total_bytes metric")
-				Expect(stdout).To(ContainSubstring("cnpg_disk_used_bytes"),
-					"should expose cnpg_disk_used_bytes metric")
-				Expect(stdout).To(ContainSubstring("cnpg_disk_available_bytes"),
-					"should expose cnpg_disk_available_bytes metric")
-				Expect(stdout).To(ContainSubstring("cnpg_disk_percent_used"),
-					"should expose cnpg_disk_percent_used metric")
+				Eventually(func(g Gomega) {
+					out, err := proxy.RetrieveMetricsFromInstance(env.Ctx, env.Interface, *pod,
+						cluster.IsMetricsTLSEnabled())
+					g.Expect(err).ToNot(HaveOccurred(), "while getting pod metrics")
+					g.Expect(strings.Contains(out, "cnpg_disk_total_bytes")).To(BeTrue(),
+						"should expose cnpg_disk_total_bytes metric")
+					g.Expect(strings.Contains(out, "cnpg_disk_used_bytes")).To(BeTrue(),
+						"should expose cnpg_disk_used_bytes metric")
+					g.Expect(strings.Contains(out, "cnpg_disk_available_bytes")).To(BeTrue(),
+						"should expose cnpg_disk_available_bytes metric")
+					g.Expect(strings.Contains(out, "cnpg_disk_percent_used")).To(BeTrue(),
+						"should expose cnpg_disk_percent_used metric")
+				}, 60*time.Second, 5*time.Second).Should(Succeed())
 			})
 		})
 	})
