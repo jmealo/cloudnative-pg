@@ -140,18 +140,19 @@ func (h *WALHealthChecker) Check(ctx context.Context, db *sql.DB) (*WALHealthSta
 		}
 	}
 
-	// Only check replication slots on the primary (uses pg_current_wal_lsn())
-	if isPrimary {
-		slots, err := h.checkReplicationSlots(ctx, db)
-		if err != nil {
-			return nil, err
-		}
+	// Check replication slots on both primary and replica
+	// - Primary uses pg_current_wal_lsn() to calculate retained bytes
+	// - Replica uses pg_last_wal_replay_lsn() to calculate retained bytes
+	// Note: CNPG synchronizes "Standby HA slots" from primary to replicas
+	slots, err := h.checkReplicationSlots(ctx, db, isPrimary)
+	if err != nil {
+		return nil, err
+	}
 
-		for _, slot := range slots {
-			if !slot.Active {
-				status.InactiveSlots = append(status.InactiveSlots, slot)
-				status.TotalSlotRetentionBytes += slot.RetainedBytes
-			}
+	for _, slot := range slots {
+		if !slot.Active {
+			status.InactiveSlots = append(status.InactiveSlots, slot)
+			status.TotalSlotRetentionBytes += slot.RetainedBytes
 		}
 	}
 
@@ -211,16 +212,34 @@ func (h *WALHealthChecker) checkArchiveStats(ctx context.Context, db *sql.DB, st
 	return nil
 }
 
-func (h *WALHealthChecker) checkReplicationSlots(ctx context.Context, db *sql.DB) (slots []SlotInfo, err error) {
-	rows, err := db.QueryContext(ctx, `
+func (h *WALHealthChecker) checkReplicationSlots(
+	ctx context.Context,
+	db *sql.DB,
+	isPrimary bool,
+) (slots []SlotInfo, err error) {
+	// Use pg_current_wal_lsn() on primary, pg_last_wal_replay_lsn() on replica
+	// to calculate WAL retained by each slot
+	var lsnFunc string
+	if isPrimary {
+		lsnFunc = "pg_current_wal_lsn()"
+	} else {
+		lsnFunc = "pg_last_wal_replay_lsn()"
+	}
+
+	query := `
 		SELECT
 			slot_name,
 			active,
 			restart_lsn,
-			pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn) as retained_bytes
+			CASE
+				WHEN restart_lsn IS NOT NULL THEN pg_wal_lsn_diff(` + lsnFunc + `, restart_lsn)
+				ELSE 0
+			END as retained_bytes
 		FROM pg_replication_slots
 		WHERE slot_type = 'physical'
-	`)
+	`
+
+	rows, err := db.QueryContext(ctx, query)
 	if err != nil {
 		return nil, err
 	}
