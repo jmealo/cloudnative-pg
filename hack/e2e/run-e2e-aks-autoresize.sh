@@ -138,7 +138,7 @@ diagnose_volume_attachments() {
 
 print_victorialogs_hint() {
   info "=== VictoriaLogs Query Hint ==="
-  info "To view all logs relevant to auto-resize E2E tests in VictoriaLogs, use:"
+  info "To view all logs relevant to auto-resize E2E tests in VictoriaLogs, use the victorialogs-infra MCP:"
   info ""
   info '  {namespace=~"autoresize-.*|cnpg-system"}'
   info ""
@@ -148,6 +148,7 @@ print_victorialogs_hint() {
   info "For Azure CSI driver logs specifically:"
   info '  {namespace="kube-system"} AND (_msg:~"csi|azuredisk|attach|detach")'
   info ""
+  info "You can also check metrics using the victoriametrics-infra MCP."
   info "=== End VictoriaLogs Hint ==="
 }
 
