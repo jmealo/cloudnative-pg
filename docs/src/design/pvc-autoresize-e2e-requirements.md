@@ -57,9 +57,19 @@ propagation pipeline has multiple failure points:
    but not returned (`wal/health.go:98,106,113`). If `queryInactiveSlots` fails
    (timeout, connection issue), `InactiveSlots` stays nil and the resize
    proceeds without slot safety checks.
-3. **No WAL health status serialized**: VictoriaLogs shows no WAL health fields
+3. **Status polling timing**: The instance manager runs
+   `fillWALHealthStatus` as part of its periodic status probe cycle. If the
+   slot is created after the most recent probe but before the test checks
+   cluster status, subsequent probes may be delayed under AKS load.
+4. **Connection pooling/caching**: The instance manager's database connection
+   (`superUserDB` in `probes.go`) could be seeing a stale snapshot or
+   experiencing lock contention during the `pg_replication_slots` query,
+   particularly under concurrent WAL generation load.
+5. **No WAL health status serialized**: VictoriaLogs shows no WAL health fields
    in the instance status, suggesting `fillWALHealthStatus` either silently
-   fails or the health checker returns empty data.
+   fails or the health checker returns empty data. This could indicate a
+   serialization issue in `WALHealthStatus` marshaling or an error in
+   `fillWALHealthStatus` that causes an early return before setting the status.
 
 **Recommendation for PR:** The slot detection logic needs hardening:
 1. Add structured logging to `queryInactiveSlots` so results (or errors) are

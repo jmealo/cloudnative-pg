@@ -1050,6 +1050,17 @@ silently become `minStep: "2Gi"` with no indication to the user.
 **Fix:** Log a warning when falling back due to parse error:
 `contextLogger.Warn("invalid quantity, using default", "provided", qtyStr, "default", defaultStr)`
 
+### IntOrString Zero-Value Ambiguity for `step: 0` (Important)
+
+In `clamping.go:77-81`, `IntOrString{Type: intstr.Int, IntVal: 0}` (i.e., `step: 0`
+in YAML) is treated as "use default 20%" rather than "zero step = don't resize".
+A user who explicitly sets `step: 0` expecting it to disable auto-resize would
+instead get silent 20% growth.
+
+**Fix (preferred):** Reject `step: 0` in webhook validation with a clear error
+message: `"step must be a positive quantity or percentage, not 0"`. Alternatively,
+document the behavior explicitly if `step: 0` meaning "use default" is intentional.
+
 ---
 
 ## Open Questions

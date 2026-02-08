@@ -271,6 +271,47 @@ func parseQuantityOrDefault(qtyStr string, defaultStr string) *resource.Quantity
 
 ---
 
+## Phase 5.5: Reject or Document `step: 0` Zero-Value (IMPORTANT)
+
+### The Issue
+
+In `pkg/reconciler/autoresize/clamping.go:77-81`:
+```go
+if (stepVal.Type == intstr.String && stepVal.StrVal == "") ||
+    (stepVal.Type == intstr.Int && stepVal.IntVal == 0) {
+    stepVal = intstr.FromString(defaultStepPercent)
+}
+```
+
+`IntOrString{Type: intstr.Int, IntVal: 0}` (i.e. `step: 0`) is treated as
+"use default 20%" rather than "0 step = don't resize". If someone explicitly
+sets `step: 0` thinking it disables resize, they get 20% resizes instead.
+
+### The Fix (choose one)
+
+**Option A: Reject `step: 0` in webhook validation** (preferred)
+
+In `internal/webhook/v1/cluster_webhook.go`, `validateExpansionStep()`:
+```go
+if stepVal.Type == intstr.Int && stepVal.IntVal == 0 {
+    return field.ErrorList{field.Invalid(fldPath.Child("step"), stepVal,
+        "step must be a positive quantity or percentage, not 0")}
+}
+```
+
+**Option B: Document the behavior**
+
+If `step: 0` should mean "use default", document this explicitly in
+`docs/src/storage_autoresize.md` in the expansion section. Add a note:
+"If `step` is omitted or set to `0`, the default step of 20% is used."
+
+### Verification
+
+1. `make test` passes
+2. If Option A: add webhook unit test for `step: 0` rejection
+
+---
+
 ## Phase 6: E2E Test Gaps (P0 + P1)
 
 Read `docs/src/design/pvc-autoresize-e2e-requirements.md` in full. Address
