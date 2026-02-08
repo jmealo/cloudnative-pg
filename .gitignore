@@ -37,5 +37,3 @@ bundle.Dockerfile
 catalog
 catalog.Dockerfile
 cloudnative-pg-catalog.yaml
-.mcp.json
-*mcp*
