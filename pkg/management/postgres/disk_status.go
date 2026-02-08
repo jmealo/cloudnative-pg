@@ -102,14 +102,14 @@ func (instance *Instance) fillWALHealthStatus(db *sql.DB, result *postgres.Postg
 	}
 
 	checker := wal.NewHealthChecker(getReadyWALCount)
-	contextLogger.Debug("checking WAL health",
+	contextLogger.Info("checking WAL health",
 		"isPrimary", result.IsPrimary)
 	healthStatus, err := checker.Check(db, result.IsPrimary)
 	if err != nil {
 		contextLogger.Error(err, "failed to check WAL health for status")
 		return
 	}
-	contextLogger.Debug("WAL health check completed",
+	contextLogger.Info("WAL health check completed",
 		"archiveHealthy", healthStatus.ArchiveHealthy,
 		"inactiveSlotCount", len(healthStatus.InactiveSlots))
 
