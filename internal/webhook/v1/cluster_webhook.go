@@ -131,7 +131,7 @@ func (v *ClusterCustomValidator) ValidateUpdate(
 	}
 
 	return allWarnings, apierrors.NewInvalid(
-		schema.GroupKind{Group: "cluster.cnpg.io", Kind: "Cluster"},
+		schema.GroupKind{Group: "postgresql.cnpg.io", Kind: "Cluster"},
 		cluster.Name, allErrs)
 }
 

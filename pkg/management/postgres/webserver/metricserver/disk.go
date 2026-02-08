@@ -202,6 +202,17 @@ func (dm *DiskMetrics) setVolumeStats(result *disk.VolumeProbeResult) {
 	dm.InodesFree.WithLabelValues(volType, ts).Set(float64(result.Stats.InodesFree))
 }
 
+// resetVolumeStats clears the disk usage metrics for a volume to avoid stale data on probe failure.
+func (dm *DiskMetrics) resetVolumeStats(volType string, ts string) {
+	dm.TotalBytes.WithLabelValues(volType, ts).Set(0)
+	dm.UsedBytes.WithLabelValues(volType, ts).Set(0)
+	dm.AvailableBytes.WithLabelValues(volType, ts).Set(0)
+	dm.PercentUsed.WithLabelValues(volType, ts).Set(0)
+	dm.InodesTotal.WithLabelValues(volType, ts).Set(0)
+	dm.InodesUsed.WithLabelValues(volType, ts).Set(0)
+	dm.InodesFree.WithLabelValues(volType, ts).Set(0)
+}
+
 // collectWALHealthMetrics queries WAL archive health and updates metrics.
 func collectWALHealthMetrics(ctx context.Context, e *Exporter, db *sql.DB, isPrimary bool) {
 	contextLogger := log.FromContext(ctx).WithName("wal_health_metrics")
@@ -245,15 +256,17 @@ func collectDiskUsageMetrics(e *Exporter) {
 	probe := disk.NewProbe()
 
 	cluster, clusterErr := e.getCluster()
+	localPodName := e.instance.GetPodName()
 
 	// Probe PGDATA volume
 	dataResult, err := probe.ProbeVolume(specs.PgDataPath, disk.VolumeTypeData, "")
 	if err != nil {
 		contextLogger.Error(err, "failed to probe PGDATA volume")
+		e.Metrics.DiskMetrics.resetVolumeStats(string(disk.VolumeTypeData), "")
 	} else {
 		e.Metrics.DiskMetrics.setVolumeStats(dataResult)
 		if clusterErr == nil {
-			e.Metrics.DiskMetrics.deriveDecisionMetrics(cluster, dataResult)
+			e.Metrics.DiskMetrics.deriveDecisionMetrics(cluster, dataResult, localPodName)
 		}
 	}
 
@@ -262,9 +275,10 @@ func collectDiskUsageMetrics(e *Exporter) {
 		walResult, err := probe.ProbeVolume(specs.PgWalVolumePath, disk.VolumeTypeWAL, "")
 		if err != nil {
 			contextLogger.Error(err, "failed to probe WAL volume")
+			e.Metrics.DiskMetrics.resetVolumeStats(string(disk.VolumeTypeWAL), "")
 		} else {
 			e.Metrics.DiskMetrics.setVolumeStats(walResult)
-			e.Metrics.DiskMetrics.deriveDecisionMetrics(cluster, walResult)
+			e.Metrics.DiskMetrics.deriveDecisionMetrics(cluster, walResult, localPodName)
 		}
 	}
 
@@ -276,31 +290,31 @@ func collectDiskUsageMetrics(e *Exporter) {
 			if err != nil {
 				contextLogger.Error(err, "failed to probe tablespace volume",
 					"tablespace", tbsConfig.Name)
+				e.Metrics.DiskMetrics.resetVolumeStats(string(disk.VolumeTypeTablespace), tbsConfig.Name)
 			} else {
 				e.Metrics.DiskMetrics.setVolumeStats(tbsResult)
-				e.Metrics.DiskMetrics.deriveDecisionMetrics(cluster, tbsResult)
+				e.Metrics.DiskMetrics.deriveDecisionMetrics(cluster, tbsResult, localPodName)
 			}
 		}
 	}
 }
 
 // deriveDecisionMetrics populates logical metrics (totals, budget) from cluster status history.
-func (dm *DiskMetrics) deriveDecisionMetrics(cluster *apiv1.Cluster, probe *disk.VolumeProbeResult) {
-	podName := cluster.Status.CurrentPrimary
-	if podName == "" {
-		// If we don't know the primary name, we can't reliably determine the PVC name.
-		// Fallback to the current pod name if possible.
-		podName = cluster.Name + "-1" // placeholder
-	}
-
+// The localPodName parameter is the name of the pod running this collector, ensuring each
+// pod emits metrics with its own labels rather than the primary's.
+func (dm *DiskMetrics) deriveDecisionMetrics(
+	cluster *apiv1.Cluster,
+	probe *disk.VolumeProbeResult,
+	localPodName string,
+) {
 	var pvcName string
 	switch probe.VolumeType {
 	case disk.VolumeTypeData:
-		pvcName = podName
+		pvcName = localPodName
 	case disk.VolumeTypeWAL:
-		pvcName = podName + apiv1.WalArchiveVolumeSuffix
+		pvcName = localPodName + apiv1.WalArchiveVolumeSuffix
 	case disk.VolumeTypeTablespace:
-		pvcName = specs.PvcNameForTablespace(podName, probe.Tablespace)
+		pvcName = specs.PvcNameForTablespace(localPodName, probe.Tablespace)
 	}
 
 	volType := string(probe.VolumeType)
@@ -329,7 +343,7 @@ func (dm *DiskMetrics) deriveDecisionMetrics(cluster *apiv1.Cluster, probe *disk
 	recentCount := dmCache.recentCount[pvcName]
 	dmCache.mu.Unlock()
 
-	dm.ResizesTotal.WithLabelValues(podName, pvcName, volType, ts, "success").Set(float64(successCount))
+	dm.ResizesTotal.WithLabelValues(localPodName, pvcName, volType, ts, "success").Set(float64(successCount))
 
 	// 2. Calculate remaining budget (24h window)
 	maxActions := 3 // default
@@ -342,7 +356,7 @@ func (dm *DiskMetrics) deriveDecisionMetrics(cluster *apiv1.Cluster, probe *disk
 	if budgetRemain < 0 {
 		budgetRemain = 0
 	}
-	dm.ResizeBudgetRemain.WithLabelValues(podName, pvcName, volType, ts).Set(float64(budgetRemain))
+	dm.ResizeBudgetRemain.WithLabelValues(localPodName, pvcName, volType, ts).Set(float64(budgetRemain))
 
 	// 3. At Limit metric and blocked status
 	atLimit := false

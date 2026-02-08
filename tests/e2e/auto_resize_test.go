@@ -744,20 +744,19 @@ var _ = Describe("PVC Auto-Resize", Label(tests.LabelAutoResize), func() {
 			})
 
 			By("verifying second resize is blocked by rate limit", func() {
-				// Wait for any potential resize to complete/be blocked, then verify size is unchanged
-				time.Sleep(30 * time.Second)
-
 				// Verify size remains constant - the rate limit should have blocked the second resize
-				pvcList, err := storage.GetPVCList(env.Ctx, env.Client, namespace)
-				Expect(err).ToNot(HaveOccurred())
-				for idx := range pvcList.Items {
-					pvc := &pvcList.Items[idx]
-					if pvc.Labels[utils.ClusterLabelName] == clusterName &&
-						pvc.Labels[utils.PvcRoleLabelName] == string(utils.PVCRolePgData) {
-						Expect(pvc.Spec.Resources.Requests.Storage().String()).To(Equal(sizeAfterFirstResize.String()),
-							"PVC size should remain unchanged after second trigger due to rate limit")
+				Consistently(func(g Gomega) {
+					pvcList, err := storage.GetPVCList(env.Ctx, env.Client, namespace)
+					g.Expect(err).ToNot(HaveOccurred())
+					for idx := range pvcList.Items {
+						pvc := &pvcList.Items[idx]
+						if pvc.Labels[utils.ClusterLabelName] == clusterName &&
+							pvc.Labels[utils.PvcRoleLabelName] == string(utils.PVCRolePgData) {
+							g.Expect(pvc.Spec.Resources.Requests.Storage().Cmp(sizeAfterFirstResize)).To(Equal(0),
+								"PVC size should remain unchanged due to rate limit")
+						}
 					}
-				}
+				}, 30*time.Second, 5*time.Second).Should(Succeed())
 
 				// Verify a blocking event was recorded
 				Eventually(func(g Gomega) {
