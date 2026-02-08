@@ -20,6 +20,8 @@ SPDX-License-Identifier: Apache-2.0
 package v1
 
 import (
+	"strings"
+
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
 
@@ -592,14 +594,15 @@ var _ = Describe("getAutoResizeWarnings", func() {
 			}
 			warnings := getAutoResizeWarnings(cluster)
 			Expect(warnings).ToNot(BeEmpty())
-			hasArchiveWarning := false
+			// Check that one of the warnings contains "no backup configuration"
+			found := false
 			for _, w := range warnings {
-				if ContainSubstring("no backup configuration").Match(w) == nil {
-					hasArchiveWarning = true
+				if strings.Contains(w, "no backup configuration") {
+					found = true
 					break
 				}
 			}
-			Expect(hasArchiveWarning).To(BeTrue())
+			Expect(found).To(BeTrue(), "expected a warning about no backup configuration")
 		})
 	})
 
@@ -621,7 +624,8 @@ var _ = Describe("getAutoResizeWarnings", func() {
 							Strategy: &apiv1.ResizeStrategy{
 								MaxActionsPerDay: ptr.To(3),
 								WALSafetyPolicy: &apiv1.WALSafetyPolicy{
-									AcknowledgeWALRisk: true,
+									AcknowledgeWALRisk:    true,
+									RequireArchiveHealthy: ptr.To(false),
 								},
 							},
 						},

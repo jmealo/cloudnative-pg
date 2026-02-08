@@ -70,7 +70,7 @@ func Reconcile(
 	diskInfoByPod map[string]*InstanceDiskInfo,
 	pvcs []corev1.PersistentVolumeClaim,
 ) (ctrl.Result, error) {
-	contextLogger := log.FromContext(ctx).WithName("autoresize").WithValues("cluster", cluster.Name, "namespace", cluster.Namespace)
+	contextLogger := log.FromContext(ctx).WithName("autoresize")
 
 	if !IsAutoResizeEnabled(cluster) {
 		return ctrl.Result{}, nil
