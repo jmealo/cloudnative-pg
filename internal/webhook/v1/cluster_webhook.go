@@ -3092,10 +3092,10 @@ func validateResizeConfiguration(
 func validateResizeTriggers(structPath field.Path, triggers *apiv1.ResizeTriggers) field.ErrorList {
 	var result field.ErrorList
 
-	if triggers.UsageThreshold != 0 && (triggers.UsageThreshold < 1 || triggers.UsageThreshold > 99) {
+	if triggers.UsageThreshold != nil && (*triggers.UsageThreshold < 1 || *triggers.UsageThreshold > 99) {
 		result = append(result, field.Invalid(
 			structPath.Child("usageThreshold"),
-			triggers.UsageThreshold,
+			*triggers.UsageThreshold,
 			"usageThreshold must be between 1 and 99"))
 	}
 
@@ -3170,10 +3170,10 @@ func validateResizeStrategy(
 ) field.ErrorList {
 	var result field.ErrorList
 
-	if strategy.MaxActionsPerDay != 0 && (strategy.MaxActionsPerDay < 0 || strategy.MaxActionsPerDay > 10) {
+	if strategy.MaxActionsPerDay != nil && (*strategy.MaxActionsPerDay < 0 || *strategy.MaxActionsPerDay > 10) {
 		result = append(result, field.Invalid(
 			structPath.Child("maxActionsPerDay"),
-			strategy.MaxActionsPerDay,
+			*strategy.MaxActionsPerDay,
 			"maxActionsPerDay must be between 0 and 10"))
 	}
 

@@ -149,23 +149,20 @@ func reconcilePVC(
 	}
 
 	triggers := resizeConfig.Triggers
+	// Use default trigger if none provided
 	if triggers == nil {
-		triggers = &apiv1.ResizeTriggers{UsageThreshold: 80}
+		triggers = &apiv1.ResizeTriggers{}
 	}
 
-	//nolint:gosec // G115 - disk sizes cannot exceed MaxInt64 (8 exabytes)
+	// Trigger Check
 	if !ShouldResize(volumeStats.PercentUsed, int64(volumeStats.AvailableBytes), triggers) {
 		return false, nil
 	}
 
 	// Rate limiting - derived from persisted status
 	maxActions := DefaultMaxActionsPerDay
-	if resizeConfig.Strategy != nil {
-		if resizeConfig.Strategy.MaxActionsPerDay == 0 {
-			maxActions = 0
-		} else if resizeConfig.Strategy.MaxActionsPerDay > 0 {
-			maxActions = resizeConfig.Strategy.MaxActionsPerDay
-		}
+	if resizeConfig.Strategy != nil && resizeConfig.Strategy.MaxActionsPerDay != nil {
+		maxActions = *resizeConfig.Strategy.MaxActionsPerDay
 	}
 
 	if !HasBudget(cluster, pvc.Name, maxActions) {

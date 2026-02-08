@@ -425,44 +425,74 @@ type ClusterStatus struct {
     // DiskStatus reports disk usage for all instances
     // +optional
     DiskStatus *ClusterDiskStatus `json:"diskStatus,omitempty"`
+
+    // AutoResizeEvents contains the history of auto-resize operations.
+    // Used by the stateless rate limiter (HasBudget) for budget calculation.
+    // Capped at maxAutoResizeEventHistory (50) entries.
+    // +optional
+    AutoResizeEvents []AutoResizeEvent `json:"autoResizeEvents,omitempty"`
 }
 
 type ClusterDiskStatus struct {
-    Instances     []InstanceDiskStatus `json:"instances,omitempty"`
-    LastAutoResize *AutoResizeEvent    `json:"lastAutoResize,omitempty"`
+    // Instances contains per-instance disk status, keyed by instance name.
+    // +optional
+    Instances map[string]*InstanceDiskStatus `json:"instances,omitempty"`
 }
 
 type InstanceDiskStatus struct {
-    PodName     string                          `json:"podName"`
-    Data        *VolumeDiskStatus               `json:"data,omitempty"`
-    WAL         *VolumeDiskStatus               `json:"wal,omitempty"`
-    Tablespaces map[string]*VolumeDiskStatus    `json:"tablespaces,omitempty"`
-    WALHealth   *WALHealthInfo                  `json:"walHealth,omitempty"`
-    LastUpdated metav1.Time                     `json:"lastUpdated"`
+    // DataVolume contains disk stats for the PGDATA volume.
+    // +optional
+    DataVolume *VolumeDiskStatus `json:"dataVolume,omitempty"`
+
+    // WALVolume contains disk stats for the WAL volume (if separate from PGDATA).
+    // +optional
+    WALVolume *VolumeDiskStatus `json:"walVolume,omitempty"`
+
+    // Tablespaces contains disk stats for tablespace volumes.
+    // +optional
+    Tablespaces map[string]*VolumeDiskStatus `json:"tablespaces,omitempty"`
+
+    // WALHealth contains the WAL archive health status.
+    // +optional
+    WALHealth *WALHealthInfo `json:"walHealth,omitempty"`
+
+    // LastUpdated is the timestamp when this status was last updated.
+    // +optional
+    LastUpdated *metav1.Time `json:"lastUpdated,omitempty"`
 }
 
 type VolumeDiskStatus struct {
-    TotalBytes     int64   `json:"totalBytes"`
-    UsedBytes      int64   `json:"usedBytes"`
-    AvailableBytes int64   `json:"availableBytes"`
-    PercentUsed    float64 `json:"percentUsed"`
-    AtLimit        bool    `json:"atLimit,omitempty"`
+    TotalBytes     uint64 `json:"totalBytes,omitempty"`
+    UsedBytes      uint64 `json:"usedBytes,omitempty"`
+    AvailableBytes uint64 `json:"availableBytes,omitempty"`
+    PercentUsed    int    `json:"percentUsed,omitempty"`  // 0-100, rounded
+    InodesTotal    uint64 `json:"inodesTotal,omitempty"`
+    InodesUsed     uint64 `json:"inodesUsed,omitempty"`
+    InodesFree     uint64 `json:"inodesFree,omitempty"`
+    AtLimit        bool   `json:"atLimit,omitempty"`
 }
 
 type WALHealthInfo struct {
-    ArchiveHealthy              bool     `json:"archiveHealthy"`
-    PendingArchiveFiles         int      `json:"pendingArchiveFiles"`
-    InactiveReplicationSlots    []string `json:"inactiveReplicationSlots,omitempty"`
+    ArchiveHealthy bool             `json:"archiveHealthy,omitempty"`
+    PendingWALFiles int             `json:"pendingWALFiles,omitempty"`
+    InactiveSlotCount int           `json:"inactiveSlotCount,omitempty"`
+    InactiveSlots []InactiveSlotInfo `json:"inactiveSlots,omitempty"`
+}
+
+type InactiveSlotInfo struct {
+    SlotName       string `json:"slotName"`
+    RetentionBytes int64  `json:"retentionBytes"`
 }
 
 type AutoResizeEvent struct {
-    Time       metav1.Time `json:"time"`
-    PodName    string      `json:"podName"`
-    PVCName    string      `json:"pvcName"`
-    VolumeType string      `json:"volumeType"`
-    OldSize    string      `json:"oldSize"`
-    NewSize    string      `json:"newSize"`
-    Reason     string      `json:"reason"`
+    Timestamp  metav1.Time `json:"timestamp,omitempty"`
+    InstanceName string    `json:"instanceName,omitempty"`
+    PVCName    string      `json:"pvcName,omitempty"`
+    VolumeType string      `json:"volumeType,omitempty"`
+    Tablespace string      `json:"tablespace,omitempty"`
+    PreviousSize string    `json:"previousSize,omitempty"`
+    NewSize    string      `json:"newSize,omitempty"`
+    Result     string      `json:"result,omitempty"`
 }
 ```
 
@@ -670,7 +700,12 @@ The `strategy.maxActionsPerDay` field replaces the earlier `cooldownPeriod` conc
 
 Cloud providers impose daily modification limits on volumes. AWS EBS, for example, historically limits volumes to approximately 4 modifications per 24 hours. The default `maxActionsPerDay: 3` reserves one modification slot for manual human intervention during emergencies. If the operator consumes all available slots autonomously, an administrator cannot resize a volume manually when they need to.
 
-The reconciler tracks resize events per volume in the cluster status and maintains a 24-hour rolling window. When the budget is exhausted, resize is blocked with a `resize_blocked{reason="rate_limit"}` metric and a warning event.
+The reconciler uses a stateless `HasBudget()` function that derives the remaining
+budget from `cluster.Status.AutoResizeEvents` — a persisted list of resize events
+stored in the cluster status. This is a 24-hour rolling window. When the budget is
+exhausted, resize is blocked and a `AutoResizeRateLimited` Kubernetes warning event
+is emitted. (The `resize_blocked{reason="rate_limit"}` metric is planned but not
+yet populated — see Follow-Up PR #2.)
 
 ### Webhook Validation
 
@@ -691,23 +726,36 @@ The validating webhook enforces:
 
 ### Complete Metrics List
 
-| Metric Name | Type | Labels | Description |
-|-------------|------|--------|-------------|
-| `cnpg_disk_total_bytes` | Gauge | `volume_type`, `tablespace` | Total volume capacity from `statfs()` |
-| `cnpg_disk_used_bytes` | Gauge | `volume_type`, `tablespace` | Used space on volume |
-| `cnpg_disk_available_bytes` | Gauge | `volume_type`, `tablespace` | Available space on volume |
-| `cnpg_disk_percent_used` | Gauge | `volume_type`, `tablespace` | Percentage of volume used |
-| `cnpg_disk_inodes_total` | Gauge | `volume_type`, `tablespace` | Total inodes on volume |
-| `cnpg_disk_inodes_used` | Gauge | `volume_type`, `tablespace` | Used inodes |
-| `cnpg_disk_inodes_free` | Gauge | `volume_type`, `tablespace` | Free inodes |
-| `cnpg_disk_at_limit` | Gauge | `volume_type`, `tablespace` | 1 if volume has reached `expansion.limit` |
-| `cnpg_disk_resize_blocked` | Gauge | `volume_type`, `tablespace`, `reason` | 1 if auto-resize is blocked |
-| `cnpg_disk_resizes_total` | Counter | `volume_type`, `tablespace`, `result` | Total auto-resize operations |
-| `cnpg_disk_resize_budget_remaining` | Gauge | `volume_type` | Remaining resize operations in the 24h window |
-| `cnpg_wal_archive_healthy` | Gauge | | 1 if WAL archive is healthy |
-| `cnpg_wal_pending_archive_files` | Gauge | | Files awaiting archive |
-| `cnpg_wal_inactive_slots` | Gauge | | Count of inactive replication slots |
-| `cnpg_wal_slot_retention_bytes` | Gauge | `slot_name` | Bytes retained by each slot |
+**Instance Manager Metrics (`:9187`)** — exposed from each PostgreSQL pod:
+
+| Metric Name | Type | Labels | Description | Status |
+|-------------|------|--------|-------------|--------|
+| `cnpg_disk_total_bytes` | Gauge | `volume_type`, `tablespace` | Total volume capacity from `statfs()` | ✅ Implemented |
+| `cnpg_disk_used_bytes` | Gauge | `volume_type`, `tablespace` | Used space on volume | ✅ Implemented |
+| `cnpg_disk_available_bytes` | Gauge | `volume_type`, `tablespace` | Available space on volume | ✅ Implemented |
+| `cnpg_disk_percent_used` | Gauge | `volume_type`, `tablespace` | Percentage of volume used | ✅ Implemented |
+| `cnpg_disk_inodes_total` | Gauge | `volume_type`, `tablespace` | Total inodes on volume | ✅ Implemented |
+| `cnpg_disk_inodes_used` | Gauge | `volume_type`, `tablespace` | Used inodes | ✅ Implemented |
+| `cnpg_disk_inodes_free` | Gauge | `volume_type`, `tablespace` | Free inodes | ✅ Implemented |
+| `cnpg_disk_at_limit` | Gauge | `volume_type`, `tablespace` | 1 if volume has reached `expansion.limit` | ✅ Derived from status |
+| `cnpg_disk_resizes_total` | Counter | `volume_type`, `tablespace`, `result` | Total auto-resize operations | ✅ Derived from status |
+| `cnpg_disk_resize_budget_remaining` | Gauge | `volume_type` | Remaining resize operations in the 24h window | ✅ Derived from status |
+| `cnpg_disk_resize_blocked` | Gauge | `volume_type`, `tablespace`, `reason` | 1 if auto-resize is blocked | ⚠️ Not yet populated (see Follow-Up PR #2) |
+
+**Planned WAL Health Metrics** — not yet implemented, planned for Follow-Up PR #2:
+
+| Metric Name | Type | Labels | Description | Status |
+|-------------|------|--------|-------------|--------|
+| `cnpg_wal_archive_healthy` | Gauge | | 1 if WAL archive is healthy | 🔮 Planned |
+| `cnpg_wal_pending_archive_files` | Gauge | | Files awaiting archive | 🔮 Planned |
+| `cnpg_wal_inactive_slots` | Gauge | | Count of inactive replication slots | 🔮 Planned |
+| `cnpg_wal_slot_retention_bytes` | Gauge | `slot_name` | Bytes retained by each slot | 🔮 Planned |
+
+**Note on metric location:** `resizes_total`, `resize_budget_remaining`, and `at_limit`
+are currently derived in the instance manager from cluster status events. This is a
+pragmatic approach for the initial implementation. Follow-Up PR #2 may move these
+resize-action metrics to the operator's metrics endpoint, which is more idiomatic
+(the operator makes resize decisions, not the instance manager).
 
 ### Label Values
 
@@ -859,58 +907,61 @@ Tests use small initial PVC sizes (500Mi-1Gi) with `dd` to quickly fill to thres
 
 ## Implementation Phases
 
-### Phase 1: Metrics Foundation
+### Phase 1: Metrics Foundation — ✅ IMPLEMENTED
 
 **Goal:** Expose accurate disk metrics from the instance manager.
 
-- Implement `disk.Probe` using `statfs()`
-- Add disk metrics to the Prometheus exporter on `:9187`
-- Add WAL health metrics (archive status, pending files, slot info)
-- Update instance status endpoint to include disk status
-- Add basic Grafana dashboard panels
-- Unit tests for metrics collection
+- ✅ Implement `disk.Probe` using `statfs()`
+- ✅ Add disk metrics to the Prometheus exporter on `:9187` (capacity, used, available, percent, inodes)
+- ✅ WAL health checker (`pkg/management/postgres/wal/health.go`) — queries `pg_stat_archiver`, counts `.ready` files, checks `pg_replication_slots`
+- ✅ Instance status endpoint includes disk status
+- ⬜ Grafana dashboard panels (deferred to Phase 4)
+- ⬜ WAL health _metrics_ on `:9187` (archive_healthy, pending_files, inactive_slots — deferred to Follow-Up PR #2)
+- ✅ Unit tests for metrics collection
 
-**Deliverables:** New metrics on `:9187/metrics`, disk status in cluster status, basic dashboard.
+**Deliverables:** New disk metrics on `:9187/metrics`, disk status in cluster status.
 
-### Phase 2: Auto-Resize Core
+### Phase 2: Auto-Resize Core — ✅ IMPLEMENTED
 
 **Goal:** Implement auto-resize for data and WAL volumes with behavior-driven configuration.
 
-- Add `ResizeConfiguration` to the CRD (with `triggers`, `expansion`, `strategy` sub-structs)
-- Implement the auto-resize reconciler with clamping logic
-- Add rate-limit budget tracking (`maxActionsPerDay`)
-- Add `expansion.limit` enforcement
-- Add resize events and status updates
-- Webhook validation
-- E2E tests for basic resize, clamping, rate limiting, and limit enforcement
+- ✅ `ResizeConfiguration` CRD (with `triggers`, `expansion`, `strategy` sub-structs)
+- ✅ Auto-resize reconciler with clamping logic
+- ✅ Stateless rate-limit budget tracking from `cluster.Status.AutoResizeEvents`
+- ✅ `expansion.limit` enforcement
+- ✅ Resize events and status updates (persisted via `Status().Patch()`)
+- ✅ Webhook validation (including int step rejection, single-volume acknowledgment)
+- ✅ E2E tests for basic resize, clamping, rate limiting, limit enforcement, minAvailable trigger
 
 **Deliverables:** Working auto-resize for data and WAL volumes with clamped expansion and rate limiting.
 
-### Phase 3: WAL Safety
+### Phase 3: WAL Safety — ✅ IMPLEMENTED
 
 **Goal:** Implement WAL-aware safety logic.
 
-- Add `WALSafetyPolicy` to the `strategy` block
-- Implement WAL health evaluation in the reconciler
-- Single-volume `acknowledgeWALRisk` enforcement
-- Block resize when archive/replication unhealthy
-- WAL-specific metrics and alerts
-- E2E tests for archive health blocking and slot blocking
+- ✅ `WALSafetyPolicy` in the `strategy` block
+- ✅ WAL health evaluation in the reconciler (archive health, pending files, slot retention)
+- ✅ Single-volume `acknowledgeWALRisk` enforcement (webhook rejection)
+- ✅ Block resize when archive/replication unhealthy (with Kubernetes events)
+- ✅ Fail-open with warning when WAL health data unavailable
+- ✅ `AlertOnResize` wired to event recorder
+- ✅ E2E tests for archive health blocking
+- ⏳ E2E slot retention test pending (PIt — flaky status propagation, follow-up)
 
 **Deliverables:** WAL-aware auto-resize, single-volume protection, archive health enforcement.
 
-### Phase 4: Tablespaces and Polish
+### Phase 4: Tablespaces and Polish — PARTIALLY IMPLEMENTED
 
 **Goal:** Complete the feature with tablespace support and tooling.
 
-- Tablespace auto-resize support
-- Complete PrometheusRule alert definitions
-- Complete Grafana dashboard (including resize budget gauge)
-- Documentation (including "Reclaiming Disk Space" guide)
-- `kubectl cnpg disk status` command
-- Final E2E test coverage
+- ✅ Tablespace auto-resize support (E2E tested)
+- ⬜ PrometheusRule alert definitions (not yet implemented)
+- ⬜ Grafana dashboard (not yet implemented)
+- ⬜ Documentation ("Reclaiming Disk Space" guide — written in RFC, not yet in user docs)
+- ⬜ `kubectl cnpg disk status` command (not yet implemented)
+- ✅ Core E2E test coverage (12 active tests, 1 pending)
 
-**Deliverables:** Feature-complete with documentation, monitoring, and CLI support.
+**Deliverables remaining:** PrometheusRule alerts, Grafana dashboard, kubectl command, user documentation.
 
 ---
 
@@ -995,49 +1046,51 @@ with stateless `HasBudget()` that derives budget from persisted
 `cluster.Status.AutoResizeEvents`. `ratelimit.go` and `ratelimit_test.go`
 deleted. `PVCName` field added to `AutoResizeEvent`.
 
-### Resize Metrics — RESOLVED
+### Resize Metrics — PARTIALLY RESOLVED
 
-Four metrics were registered but never populated. **Fixed:**
+Four resize-action metrics were registered but never populated. **Partially fixed:**
 `deriveDecisionMetrics()` in `disk.go` now populates `ResizesTotal`,
 `ResizeBudgetRemain`, and `AtLimit` from cluster status history. Metrics are
-derived in the instance manager from cluster status (approach #2).
+derived in the instance manager from cluster status.
 
-**Note:** `cnpg_disk_resize_blocked` is still not populated (the blocked
-metric requires operator-side tracking, not instance-manager-side). See
-"Remaining Issues" below.
+**Remaining gaps:**
+- `cnpg_disk_resize_blocked` is registered but still not populated (the blocked
+  metric requires operator-side tracking, not instance-manager-side). See
+  Follow-Up PR #2.
+- WAL health metrics (`cnpg_wal_archive_healthy`, `cnpg_wal_pending_archive_files`,
+  `cnpg_wal_inactive_slots`, `cnpg_wal_slot_retention_bytes`) are not yet
+  implemented as Prometheus metrics. WAL health _data_ is collected and used for
+  resize decisions, but not yet exposed on the `:9187` metrics endpoint. See
+  Follow-Up PR #2.
 
 ### Remaining Issues — This PR
 
-#### Swallowed Errors in PVC Loop (Important)
+#### Swallowed Errors in PVC Loop — RESOLVED
 
-In `reconciler.go`, if 3 out of 5 PVCs fail to resize, the function
-returns `nil` error. The caller has no visibility into partial failures.
+In `reconciler.go`, partial PVC failures are now aggregated with `errors.Join`
+and returned to the caller with `RequeueAfter: RequeueDelay`.
 
-**Fix:** Aggregate errors with `errors.Join`.
+#### Missing Event for "At Expansion Limit" — RESOLVED
 
-#### Missing Event for "At Expansion Limit" (Important)
+Hitting the expansion limit now emits an `AutoResizeAtLimit` Kubernetes warning event.
 
-Rate limit and WAL safety blocks emit events, but hitting the expansion limit
-does not. This is an important operational signal.
+#### Magic Number for Event History Cap — RESOLVED
 
-**Fix:** Add `recorder.Eventf(cluster, corev1.EventTypeWarning, "AutoResizeAtLimit", ...)`.
+Named constant `maxAutoResizeEventHistory = 50` is now used.
 
-#### Magic Number for Event History Cap (Style)
+#### ShouldResize Swallows Parse Error — RESOLVED
 
-**Fix:** Use a named constant: `const maxAutoResizeEventHistory = 50`.
+Invalid `minAvailable` values now log a warning and fall through to percentage-only trigger.
 
-#### ShouldResize Swallows Parse Error (Style)
+#### Structured Error Wrapping — RESOLVED
 
-**Fix:** Log a warning when `minAvailable` fails to parse.
+`fmt.Errorf` calls in the autoresize package now use `%w` for error wrapping.
 
-#### Structured Error Wrapping (Style)
+#### AlertOnResize Field — RESOLVED
 
-All `fmt.Errorf` calls should use `%w` to preserve error chains.
-
-#### AlertOnResize Field Unused (Should Fix)
-
-`AlertOnResize` (`*bool`, default `true`) exists in `WALSafetyPolicy` but is
-never read. **Fix:** Wire to event recorder.
+`AlertOnResize` (`*bool`, default `true`) exists in `WALSafetyPolicy` and is
+now wired to the event recorder. When `AlertOnResize` is true (default),
+successful resize operations emit a `AutoResizeSuccess` Kubernetes event.
 
 ### Remaining Issues — Follow-Up PRs
 
@@ -1059,9 +1112,10 @@ design discussion: does this flag control manual resize, auto-resize, or both?
 `*int` would allow distinguishing "not set" from "explicitly zero" but is an
 API surface change that should be a separate PR.
 
-### WAL Safety Fail-Open Without Warning (Important) — This PR
+### WAL Safety Fail-Open Warning — RESOLVED
 
-When `walHealth` is nil in `walsafety.go:98`, resize is silently allowed.
+When `walHealth` is nil, resize is allowed (fail-open) and now emits a
+`AutoResizeWALHealthUnavailable` Kubernetes warning event.
 
 **Design rationale: Fail-open is correct.** The primary threat is disk full →
 PostgreSQL crashes → data unavailable. If WAL health data is missing (instance
@@ -1070,29 +1124,18 @@ allowing it — the disk may be about to fill up. Fail-closed would mean "if we
 can't verify WAL health, let the database crash." That's wrong for a storage
 safety feature.
 
-**Fix:** Keep fail-open but emit a Kubernetes warning event:
-`"auto-resize permitted without WAL health verification (data unavailable)"`.
-This gives operators visibility without sacrificing availability.
+### parseQuantityOrDefault Silent Fallback — RESOLVED
 
-### parseQuantityOrDefault Silent Fallback (Important)
+`parseQuantityOrDefault` now logs a warning when falling back to a default
+value due to a parse error.
 
-`clamping.go:136` silently falls back to default values when user-provided
-quantities fail to parse. This means a typo like `minStep: "2XGi"` would
-silently become `minStep: "2Gi"` with no indication to the user.
+### IntOrString Zero-Value Ambiguity for `step: 0` — RESOLVED
 
-**Fix:** Log a warning when falling back due to parse error:
-`contextLogger.Warn("invalid quantity, using default", "provided", qtyStr, "default", defaultStr)`
-
-### IntOrString Zero-Value Ambiguity for `step: 0` (Important)
-
-In `clamping.go:77-81`, `IntOrString{Type: intstr.Int, IntVal: 0}` (i.e., `step: 0`
-in YAML) is treated as "use default 20%" rather than "zero step = don't resize".
-A user who explicitly sets `step: 0` expecting it to disable auto-resize would
-instead get silent 20% growth.
-
-**Fix (preferred):** Reject `step: 0` in webhook validation with a clear error
-message: `"step must be a positive quantity or percentage, not 0"`. Alternatively,
-document the behavior explicitly if `step: 0` meaning "use default" is intentional.
+`step: 0` is now rejected in webhook validation with a clear error message:
+`"step must be a positive quantity or percentage, not 0"`. Additionally,
+bare integer step values (e.g., `step: 20`) are rejected with:
+`"integer step values are ambiguous; use a percentage string like '20%' or
+an absolute quantity like '5Gi'"`.
 
 ---
 
@@ -1301,13 +1344,14 @@ The feature has comprehensive unit test coverage across four test suites:
 
 - **Reconciler clamping** (`pkg/reconciler/autoresize/clamping_test.go`, `clamping_edge_cases_test.go`): percentage steps, absolute steps, minStep/maxStep clamping, limit enforcement, degenerate configurations, terabyte-scale and megabyte-scale volumes
 - **Trigger evaluation** (`pkg/reconciler/autoresize/triggers_test.go`): usageThreshold, minAvailable, both-triggers OR logic, defaults, nil handling, edge cases
-- **Rate limiting** (`pkg/reconciler/autoresize/ratelimit_test.go`): budget tracking, exhaustion, rollover, multi-volume isolation, concurrency safety
-- **WAL safety** (`pkg/reconciler/autoresize/walsafety_test.go`): archive health, pending WAL files, slot retention, PVC role variants, nil inputs
-- **Webhook validation** (`internal/webhook/v1/cluster_webhook_autoresize_test.go`, `cluster_webhook_autoresize_conflicts_test.go`): per-field validation, cross-field conflict detection (limit < size, step > limit, minStep > limit, absolute step with minStep/maxStep, multi-volume errors, WAL safety edge cases)
+- **Stateless rate limiting** (`pkg/reconciler/autoresize/hasbudget_test.go`): budget from empty events, budget exhausted, events older than 24h ignored, per-PVC isolation, mixed old/new events, maxActions=0 boundary, negative maxActions
+- **WAL safety** (`pkg/reconciler/autoresize/walsafety_test.go`): archive health, pending WAL files, slot retention, PVC role variants, nil inputs, fail-open when WAL health unavailable
+- **Webhook validation** (`internal/webhook/v1/cluster_webhook_autoresize_test.go`, `cluster_webhook_autoresize_conflicts_test.go`): per-field validation, cross-field conflict detection (limit < size, step > limit, minStep > limit, absolute step with minStep/maxStep, multi-volume errors, WAL safety edge cases, int step rejection, step: 0 rejection)
+- **Webhook warnings** (`internal/webhook/v1/cluster_webhook_autoresize_warnings_test.go`): maxActionsPerDay=0, minAvailable > size, limit <= size, minStep/maxStep with absolute step, acknowledgeWALRisk on dual-volume, requireArchiveHealthy without backup, valid config produces no warnings
 
 ### E2E Tests
 
-11 of 12 E2E tests pass on AKS (3-node cluster, Azure Disk CSI driver):
+12 active E2E tests + 1 pending on AKS (3-node cluster, Azure Disk CSI driver):
 
 1. Basic data PVC resize (fill past 80%, verify PVC grows)
 2. WAL PVC resize (separate WAL volume)
@@ -1320,11 +1364,14 @@ The feature has comprehensive unit test coverage across four test suites:
 9. Prometheus metric exposure (`cnpg_disk_*` metrics)
 10. Tablespace PVC resize
 11. WAL archive health blocks resize (bogus barmanObjectStore)
+12. MinAvailable trigger (absolute bytes-remaining trigger)
+13. AutoResizeEvent status verification (REQ-12: events persisted in cluster status)
+14-16. Various time.Sleep→Eventually/Consistently replacements for reliability
 
-Test #12 (inactive replication slot blocks resize) is marked pending due to a
-flaky status propagation issue — the blocking logic is unit-tested and the same
-WAL safety code path is proven by the archive health test (#11). This will be
-stabilized in a follow-up.
+Test #17 (inactive replication slot blocks resize) is marked `PIt()` (pending)
+due to a flaky status propagation issue — the blocking logic is unit-tested and
+the same WAL safety code path is proven by the archive health test (#11). This
+will be stabilized in a follow-up.
 
 See [E2E Testing Requirements](pvc-autoresize-e2e-requirements.md) for the full
 test inventory, gap analysis, and known issues.

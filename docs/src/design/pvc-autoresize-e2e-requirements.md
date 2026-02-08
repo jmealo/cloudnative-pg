@@ -13,22 +13,26 @@
 
 ## AKS E2E Test Results
 
-**11 of 12 tests passing on AKS (3-node cluster, Azure Disk CSI).**
+**12 active tests + 1 pending (AKS, 3-node cluster, Azure Disk CSI).**
 
 | # | Test | Status |
 |---|------|--------|
-| 1 | Basic auto-resize with single volume | PASS |
+| 1 | Basic auto-resize with single volume (+ REQ-12 status event, REQ-16 multi-instance) | PASS |
 | 2 | Auto-resize with separate WAL volume | PASS |
-| 3 | Expansion limit enforcement | PASS |
+| 3 | Expansion limit enforcement (+ second-fill blocking verification) | PASS |
 | 4 | Webhook validation (reject without acknowledgeWALRisk) | PASS |
 | 5 | Webhook validation (accept with acknowledgeWALRisk) | PASS |
-| 6 | Rate-limit enforcement | PASS |
+| 6 | Rate-limit enforcement (PercentUsed preconditions, resize_blocked metric) | PASS |
 | 7 | MinStep clamping | PASS |
 | 8 | MaxStep webhook validation | PASS |
-| 9 | Metrics exposure | PASS |
+| 9 | Metrics exposure (label and value assertions) | PASS |
 | 10 | Tablespace resize | PASS |
-| 11 | WAL archive health blocks resize | PASS |
+| 11 | WAL archive health blocks resize (ArchiveHealthy precondition) | PASS |
 | 12 | Inactive slot blocks resize | PENDING (flaky) |
+| 13 | MinAvailable trigger (REQ-11) | NEW |
+
+Tests #1, #3, #6 also include `time.Sleep` → `Eventually`/`Consistently`
+replacements where applicable.
 
 ### Known Issue: Inactive Slot Detection (Test #12)
 
@@ -151,8 +155,10 @@ the reconciler must stop expanding.
 
 **Covered by:** Test #3 (auto-resize respects expansion limit).
 
-**Verification:** Fill disk, verify PVC reaches 3Gi (limit) and does not
-exceed it.
+**Verification:** Fill disk, verify PVC grows to exactly 2.5Gi (limit) via
+clamping (step: 1Gi would produce 3Gi, capped to 2.5Gi). Then clean up,
+fill again, and verify with `Consistently` that PVC stays at 2.5Gi — proving
+the limit blocks further growth, not just that the first resize landed there.
 
 ---
 
@@ -243,13 +249,13 @@ Instance manager must expose `cnpg_disk_total_bytes`, `cnpg_disk_used_bytes`,
 
 ---
 
-### REQ-11: MinAvailable Trigger (P0) — GAP
+### REQ-11: MinAvailable Trigger (P0) — COVERED (new)
 
 `triggers.minAvailable` is a distinct trigger mode that fires when available
 bytes drop below an absolute threshold. This is an OR condition with
 `usageThreshold` — either trigger alone is sufficient.
 
-**Status:** NOT TESTED. No fixture or test exercises `minAvailable`.
+**Status:** COVERED. Test #13 exercises `minAvailable` with a dedicated fixture.
 
 **Required test:**
 
@@ -262,16 +268,15 @@ bytes drop below an absolute threshold. This is an OR condition with
 
 ---
 
-### REQ-12: AutoResizeEvent Status Recording (P0, upgraded) — GAP
+### REQ-12: AutoResizeEvent Status Recording (P0, upgraded) — COVERED (new)
 
 After every resize, the reconciler appends an `AutoResizeEvent` to
 `cluster.status.autoResizeEvents`. This provides audit trail, is consumed
 by the kubectl plugin, and is now the basis for durable rate limiting.
 
-**Status:** NOT TESTED. No test verifies `cluster.Status.AutoResizeEvents`
-is populated after a resize succeeds. **CRITICAL:** A status persistence bug
-was identified — `autoresize.Reconcile` returns early before status is
-patched, so events may never be persisted. This test validates the fix.
+**Status:** COVERED. Added to Test #1 (basic resize) — verifies
+`AutoResizeEvents` is populated with `Result: "success"` and correct
+`VolumeType`. Validates the status persistence fix (Phase 1).
 
 **Required change:** Add to Test #1 (basic resize) after the "waiting for PVC
 to be resized" step:
@@ -656,34 +661,55 @@ fixed before PR submission. See `docs/src/design/pvc-autoresize.md` section
    still not set (requires operator-side tracking).
 
 4. **WAL Safety Fail-Open Without Warning (IMPORTANT)**: When `walHealth` is
-   nil, resize proceeds without emitting any event or log warning.
+   nil, resize proceeds without emitting any event or log warning. **Fix in
+   this PR:** Emit `AutoResizeWALHealthUnavailable` warning event on fail-open.
 
 5. **parseQuantityOrDefault Silent Fallback (IMPORTANT)**: Invalid user
-   quantities silently fall back to defaults with no warning.
+   quantities silently fall back to defaults with no warning. **Fix in this
+   PR:** Add structured log warning on invalid input.
 
 6. **Webhook Validation Gaps (IMPORTANT)**: Multiple configurations are
    accepted that lead to surprising runtime behavior. See "Configuration
    Conflicts" section above and RFC "Configuration Conflicts & Validation
-   Gaps" section for the full list.
+   Gaps" section for the full list. **Partial fix in this PR:** Reject int
+   step values and `step: 0`. Webhook warnings (`getAutoResizeWarnings`) are
+   implemented and wired but need unit tests (see item 12).
 
 7. **Swallowed Errors in PVC Loop (IMPORTANT)**: Partial PVC resize failures
-   return `nil` error. Caller has no visibility. Fix with `errors.Join`.
+   return `nil` error. Caller has no visibility. **Fix in this PR:** Use
+   `errors.Join` to aggregate per-PVC errors.
 
 8. **Missing Event for "At Expansion Limit" (IMPORTANT)**: Expansion limit
    blocks don't emit a Kubernetes event, unlike rate limit and WAL blocks.
+   **Fix in this PR:** Emit `AutoResizeAtLimit` warning event.
 
 9. **Magic Number 50 for Event Cap (STYLE)**: Should be a named constant.
+   **Fix in this PR:** Extract `maxAutoResizeEventHistory = 50`.
 
 10. **ShouldResize Swallows Parse Error (STYLE)**: Invalid `minAvailable`
-    silently falls back to percentage-only evaluation.
+    silently falls back to percentage-only evaluation. **Fix in this PR:**
+    Add structured log warning.
+
+11. **HasBudget Unit Tests (CRITICAL — coverage gap)**: `HasBudget()` replaced
+    `GlobalBudgetTracker` as the rate limiter but has ZERO unit tests. **Fix
+    in this PR:** New `hasbudget_test.go` with 9 test cases.
+
+12. **Webhook Warning Unit Tests (CRITICAL — coverage gap)**:
+    `getAutoResizeWarnings()` and `getAutoResizeWarningsForStorage()` are
+    wired into the admission pipeline and ship in this PR but have ZERO test
+    coverage. **Fix in this PR:** New
+    `cluster_webhook_autoresize_warnings_test.go` with 8 test cases.
 
 ---
 
 ## Priority Summary
 
-### Verified on AKS (11 passing)
+### Verified on AKS (12 active + 1 pending)
 
 - REQ-01 through REQ-06, REQ-08 through REQ-10, REQ-17 — all PASS
+- **REQ-11**: MinAvailable trigger — NEW
+- **REQ-12**: AutoResizeEvent status recording — NEW (validates persistence fix)
+- `time.Sleep` → `Eventually`/`Consistently` replacements — UPDATED
 
 ### Known Issues (1 flaky)
 
@@ -695,36 +721,40 @@ fixed before PR submission. See `docs/src/design/pvc-autoresize.md` section
 - ~~Status persistence~~ — RESOLVED
 - ~~Rate limit durability~~ — RESOLVED
 - ~~Metrics implementation~~ — PARTIALLY RESOLVED (ResizeBlocked → follow-up)
-- Swallowed errors in PVC loop — needs `errors.Join`
-- Missing event for "at expansion limit" — needs `recorder.Eventf`
+- Swallowed errors in PVC loop — `errors.Join`
+- Missing event for "at expansion limit" — `AutoResizeAtLimit` event
 - Reject int step values in webhook (`step: 20` → 20 bytes ambiguity)
 - Reject `step: 0` in webhook (zero-value ambiguity)
-- WAL fail-open warning event (keep fail-open, add event)
+- WAL fail-open warning event (keep fail-open, add warning event)
 - Wire AlertOnResize to recorder
 - parseQuantityOrDefault log on invalid input
 - ShouldResize log on invalid minAvailable
+
+### This PR — Unit Tests
+
+- **HasBudget unit tests** (`hasbudget_test.go`): 9 test cases for the
+  stateless rate limiter that replaced `GlobalBudgetTracker`
+- **Webhook warning unit tests** (`cluster_webhook_autoresize_warnings_test.go`):
+  8 test cases for `getAutoResizeWarnings()` which ships in this PR
 
 ### This PR — E2E Tests
 
 - **REQ-11**: MinAvailable trigger — untested trigger mode
 - **REQ-12**: AutoResizeEvent status recording (validates persistence fix)
+- Expansion limit test verifies second resize is blocked (not just first
+  lands at limit)
 - Replace `time.Sleep` with `Eventually`/`Consistently`
 - Keep slot retention test as `PIt()` (pending)
 
-### Follow-Up PR #1 — Webhook Validation Warnings
+### Follow-Up PR #1 — Status Patch & Metrics Refactoring
 
-- Warn `limit < size`, `minStep`/`maxStep` with absolute step,
-  `maxActionsPerDay: 0`, `step > 100%`, `acknowledgeWALRisk` on dual-volume
-- Reject `usageThreshold: 0`
-- Warn `requireArchiveHealthy` without backup
-
-### Follow-Up PR #2 — Metrics Refactoring
-
+- Switch status persistence to `PatchWithOptimisticLock` (conflict retry)
+- Structured logging context for autoresize reconciler
 - Move ResizeBlocked to operator metrics endpoint
 - `NextActionAt` status field for budget window observability
 - Event history cap sizing
 
-### Follow-Up PR #3 — Design Improvements
+### Follow-Up PR #2 — Design Improvements
 
 - Pointer fields for zero-value semantics (API change)
 - `resizeInUseVolumes` gating (design discussion needed)

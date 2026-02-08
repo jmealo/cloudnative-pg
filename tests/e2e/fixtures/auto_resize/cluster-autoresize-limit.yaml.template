@@ -5,13 +5,6 @@ metadata:
 spec:
   instances: 1
 
-  postgresql:
-    parameters:
-      log_checkpoints: "on"
-
-  primaryUpdateStrategy: unsupervised
-  primaryUpdateMethod: switchover
-
   bootstrap:
     initdb:
       database: app
@@ -25,10 +18,11 @@ spec:
       triggers:
         usageThreshold: 80
       expansion:
+        # Step is 1Gi, but Limit is 2.5Gi. 
+        # Resize should grow from 2Gi to exactly 2.5Gi (clamped).
         step: "1Gi"
-        # Limit is 3Gi - only 1Gi of expansion from 2Gi initial
-        limit: "3Gi"
+        limit: "2.5Gi"
       strategy:
-        maxActionsPerDay: 10
         walSafetyPolicy:
           acknowledgeWALRisk: true
+          requireArchiveHealthy: false

@@ -242,14 +242,15 @@ var _ = Describe("EvaluateWALSafety", func() {
 	})
 
 	Context("nil walHealth", func() {
-		It("should allow resize when walHealth is nil (fail-open)", func() {
+		It("should block resize when walHealth is nil (fail-closed)", func() {
 			result := EvaluateWALSafety(
 				string(utils.PVCRolePgWal),
 				false,
 				walSafety,
 				nil, // no health data
 			)
-			Expect(result.Allowed).To(BeTrue())
+			Expect(result.Allowed).To(BeFalse())
+			Expect(result.BlockReason).To(Equal(WALSafetyBlockHealthUnavailable))
 		})
 	})
 

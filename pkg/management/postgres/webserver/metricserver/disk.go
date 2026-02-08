@@ -21,6 +21,8 @@ package metricserver
 
 import (
 	"database/sql"
+	"fmt"
+	"sync"
 	"time"
 
 	"github.com/cloudnative-pg/machinery/pkg/log"
@@ -34,6 +36,19 @@ import (
 	"github.com/cloudnative-pg/cloudnative-pg/pkg/specs"
 )
 
+// decisionMetricsCache caches auto-resize counts derived from cluster status to avoid O(N) scans on every scrape.
+type decisionMetricsCache struct {
+	mu              sync.Mutex
+	resourceVersion string
+	successCount    map[string]int // key: volumeType/tablespace
+	recentCount     map[string]int
+}
+
+var dmCache = &decisionMetricsCache{
+	successCount: make(map[string]int),
+	recentCount:  make(map[string]int),
+}
+
 // DiskMetrics contains the Prometheus metric descriptors for disk usage.
 type DiskMetrics struct {
 	TotalBytes            *prometheus.GaugeVec
@@ -45,7 +60,7 @@ type DiskMetrics struct {
 	InodesFree            *prometheus.GaugeVec
 	AtLimit               *prometheus.GaugeVec
 	ResizeBlocked         *prometheus.GaugeVec
-	ResizesTotal          *prometheus.GaugeVec // Changed from Counter to Gauge to allow manual derivation from history
+	ResizesTotal          *prometheus.GaugeVec
 	ResizeBudgetRemain    *prometheus.GaugeVec
 	WALArchiveHealthy     prometheus.Gauge
 	WALPendingFiles       prometheus.Gauge
@@ -268,33 +283,39 @@ func collectDiskUsageMetrics(e *Exporter) {
 func (dm *DiskMetrics) deriveDecisionMetrics(cluster *apiv1.Cluster, probe *disk.VolumeProbeResult) {
 	volType := string(probe.VolumeType)
 	ts := probe.Tablespace
+	key := fmt.Sprintf("%s/%s", volType, ts)
 
-	// 1. Calculate totals from history
-	successCount := 0
-	for _, event := range cluster.Status.AutoResizeEvents {
-		if event.VolumeType != volType || event.Tablespace != ts {
-			continue
+	dmCache.mu.Lock()
+	if dmCache.resourceVersion != cluster.ResourceVersion {
+		// Version changed, refresh cache
+		newSuccess := make(map[string]int)
+		newRecent := make(map[string]int)
+		cutoff := time.Now().Add(-24 * time.Hour)
+
+		for _, event := range cluster.Status.AutoResizeEvents {
+			eventKey := fmt.Sprintf("%s/%s", event.VolumeType, event.Tablespace)
+			if event.Result == "success" {
+				newSuccess[eventKey]++
+				if event.Timestamp.After(cutoff) {
+					newRecent[eventKey]++
+				}
+			}
 		}
-		if event.Result == "success" {
-			successCount++
-		}
+		dmCache.successCount = newSuccess
+		dmCache.recentCount = newRecent
+		dmCache.resourceVersion = cluster.ResourceVersion
 	}
+	successCount := dmCache.successCount[key]
+	recentCount := dmCache.recentCount[key]
+	dmCache.mu.Unlock()
+
 	dm.ResizesTotal.WithLabelValues(volType, ts, "success").Set(float64(successCount))
 
 	// 2. Calculate remaining budget (24h window)
 	maxActions := 3 // default
 	resizeConfig := getResizeConfig(cluster, probe.VolumeType, ts)
-	if resizeConfig != nil && resizeConfig.Strategy != nil && resizeConfig.Strategy.MaxActionsPerDay > 0 {
-		maxActions = resizeConfig.Strategy.MaxActionsPerDay
-	}
-
-	cutoff := time.Now().Add(-24 * time.Hour)
-	recentCount := 0
-	for _, event := range cluster.Status.AutoResizeEvents {
-		if event.VolumeType == volType && event.Tablespace == ts &&
-			event.Timestamp.After(cutoff) && event.Result == "success" {
-			recentCount++
-		}
+	if resizeConfig != nil && resizeConfig.Strategy != nil && resizeConfig.Strategy.MaxActionsPerDay != nil {
+		maxActions = *resizeConfig.Strategy.MaxActionsPerDay
 	}
 
 	budgetRemain := maxActions - recentCount

@@ -34,9 +34,9 @@ func ShouldResize(usedPercent float64, availableBytes int64, triggers *apiv1.Res
 	}
 
 	// Check usage threshold trigger
-	usageThreshold := triggers.UsageThreshold
-	if usageThreshold == 0 {
-		usageThreshold = 80 // default
+	usageThreshold := 80 // default
+	if triggers.UsageThreshold != nil {
+		usageThreshold = *triggers.UsageThreshold
 	}
 
 	if usedPercent > float64(usageThreshold) {

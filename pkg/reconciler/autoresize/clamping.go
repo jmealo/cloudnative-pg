@@ -28,6 +28,7 @@ import (
 	"strings"
 
 	"github.com/cloudnative-pg/machinery/pkg/log"
+	"gopkg.in/inf.v0"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/util/intstr"
 
@@ -87,7 +88,8 @@ func CalculateNewSize(currentSize resource.Quantity, policy *apiv1.ExpansionPoli
 	}
 	stepVal = normalizedStep
 
-	var expansionStep resource.Quantity
+	currentDec := currentSize.AsDec()
+	var expansionStepDec *inf.Dec
 
 	if isPercentageStep(stepVal) {
 		// Handle percentage-based step
@@ -96,33 +98,34 @@ func CalculateNewSize(currentSize resource.Quantity, policy *apiv1.ExpansionPoli
 			return currentSize, fmt.Errorf("invalid percentage step: %w", err)
 		}
 
-		// Calculate raw step: currentSize * (percent / 100)
-		rawStep := resource.NewQuantity(currentSize.Value()*int64(percent)/100, currentSize.Format)
+		// expansionStep = currentSize * (percent / 100)
+		expansionStepDec = new(inf.Dec).Mul(currentDec, inf.NewDec(int64(percent), 0))
+		expansionStepDec = new(inf.Dec).QuoRound(expansionStepDec, inf.NewDec(100, 0), 0, inf.RoundDown)
 
 		// Parse min and max step constraints
 		minStepQty := parseQuantityOrDefault(policy.MinStep, defaultMinStep)
 		maxStepQty := parseQuantityOrDefault(policy.MaxStep, defaultMaxStep)
 
+		minStepDec := minStepQty.AsDec()
+		maxStepDec := maxStepQty.AsDec()
+
 		// Clamp the step: max(minStep, min(rawStep, maxStep))
-		switch {
-		case rawStep.Cmp(*minStepQty) < 0:
-			expansionStep = *minStepQty
-		case rawStep.Cmp(*maxStepQty) > 0:
-			expansionStep = *maxStepQty
-		default:
-			expansionStep = *rawStep
+		if expansionStepDec.Cmp(minStepDec) < 0 {
+			expansionStepDec = minStepDec
+		} else if expansionStepDec.Cmp(maxStepDec) > 0 {
+			expansionStepDec = maxStepDec
 		}
 	} else {
-		// Absolute value step - parse as Quantity, ignore minStep/maxStep
-		var err error
-		expansionStep, err = resource.ParseQuantity(stepVal.StrVal)
+		// Absolute value step
+		qty, err := resource.ParseQuantity(stepVal.StrVal)
 		if err != nil {
 			return currentSize, fmt.Errorf("failed to parse step as quantity: %w", err)
 		}
+		expansionStepDec = qty.AsDec()
 	}
 
 	// Calculate new size: currentSize + expansionStep
-	newSize := resource.NewQuantity(currentSize.Value()+expansionStep.Value(), currentSize.Format)
+	newSizeDec := new(inf.Dec).Add(currentDec, expansionStepDec)
 
 	// Apply limit if specified
 	if policy.Limit != "" {
@@ -131,12 +134,13 @@ func CalculateNewSize(currentSize resource.Quantity, policy *apiv1.ExpansionPoli
 			return currentSize, fmt.Errorf("failed to parse limit: %w", err)
 		}
 
-		if limit.Value() > 0 && newSize.Cmp(limit) > 0 {
-			newSize = &limit
+		limitDec := limit.AsDec()
+		if limitDec.Cmp(inf.NewDec(0, 0)) > 0 && newSizeDec.Cmp(limitDec) > 0 {
+			newSizeDec = limitDec
 		}
 	}
 
-	return *newSize, nil
+	return *resource.NewDecimalQuantity(*newSizeDec, currentSize.Format), nil
 }
 
 // parseQuantityOrDefault attempts to parse a quantity string, returning a default if empty or invalid.

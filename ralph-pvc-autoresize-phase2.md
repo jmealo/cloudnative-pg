@@ -6,6 +6,29 @@ Every additional change makes it harder to review. Only implement items marked
 "SHIP IN THIS PR" below. Items marked "FOLLOW-UP PR" should NOT be implemented —
 they will be separate, focused PRs after the core feature merges.
 
+**MANDATORY VERIFICATION GATE:** You are NOT done until you have actually RUN the
+tests and they PASS. Saying "the code looks correct" is NOT the same as running
+the tests. You MUST execute these commands and see them succeed before claiming
+completion:
+
+```bash
+make generate && make manifests   # CRD + deepcopy regeneration
+make fmt                          # gofmt
+make lint                         # golangci-lint
+make test                         # unit tests
+```
+
+If any command fails, FIX THE ISSUE and re-run. Do not skip. Do not say "this
+should work." Do not say "I believe this will pass." RUN IT.
+
+After unit tests pass, run E2E tests on AKS:
+```bash
+hack/e2e/run-e2e-aks-autoresize.sh
+```
+
+**YOU MUST PASTE THE ACTUAL COMMAND OUTPUT** showing success. If you have not
+pasted `make test` output showing PASS, you are not done.
+
 Ref: docs/src/design/pvc-autoresize.md (see "Pre-Merge Implementation Issues"
      and "Configuration Conflicts & Validation Gaps")
 E2E Requirements: docs/src/design/pvc-autoresize-e2e-requirements.md
@@ -187,9 +210,138 @@ if walSafety != nil && (walSafety.AlertOnResize == nil || *walSafety.AlertOnResi
 
 Grep for `fmt.Errorf.*%v` in the autoresize package and replace with `%w`.
 
+### Fix 10: HasBudget unit tests (Must Have — coverage gap)
+
+`HasBudget()` in `reconciler.go` is the rate limiter for the entire feature.
+It replaced the old `GlobalBudgetTracker` (deleted `ratelimit.go` +
+`ratelimit_test.go`) but the replacement has ZERO unit tests.
+
+Create `pkg/reconciler/autoresize/hasbudget_test.go` following the same
+Ginkgo v2 pattern as `walsafety_test.go`:
+
+```go
+package autoresize
+
+import (
+    "time"
+
+    metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+    apiv1 "github.com/cloudnative-pg/cloudnative-pg/api/v1"
+
+    . "github.com/onsi/ginkgo/v2"
+    . "github.com/onsi/gomega"
+)
+
+var _ = Describe("HasBudget", func() {
+    // Test cases needed:
+})
+```
+
+**Required test cases:**
+
+1. **Empty events list → has budget**: Cluster with no `AutoResizeEvents`,
+   `maxActions=3` → returns `true`.
+
+2. **Events within 24h for same PVC → budget exhausted**: 3 events for
+   PVC "cluster-1" all with `Timestamp` within last hour, `maxActions=3`
+   → returns `false`.
+
+3. **Events within 24h for same PVC → budget remaining**: 2 events for
+   PVC "cluster-1" within last hour, `maxActions=3` → returns `true`.
+
+4. **Events older than 24h are ignored**: 3 events for PVC "cluster-1"
+   all with `Timestamp` 25 hours ago, `maxActions=3` → returns `true`.
+
+5. **Events for DIFFERENT PVC don't count**: 3 events for PVC "cluster-2"
+   within last hour, checking budget for PVC "cluster-1", `maxActions=3`
+   → returns `true`.
+
+6. **Mixed old and new events**: 2 events 25h ago + 2 events 1h ago for
+   same PVC, `maxActions=3` → returns `true` (only 2 within window).
+
+7. **maxActions=0 → always false**: Any events, `maxActions=0` → `false`.
+
+8. **maxActions negative → always false**: `maxActions=-1` → `false`.
+
+9. **Boundary: event exactly at 24h cutoff**: Event with `Timestamp`
+   exactly `time.Now().Add(-24 * time.Hour)` — verify consistent behavior.
+
+Build events with:
+```go
+apiv1.AutoResizeEvent{
+    Timestamp:    metav1.NewTime(time.Now().Add(-1 * time.Hour)),
+    PVCName:      "cluster-1",
+    InstanceName: "cluster-1",
+    VolumeType:   "data",
+    Result:       "success",
+}
+```
+
+### Fix 11: getAutoResizeWarnings unit tests (Must Have — untested shipping code)
+
+`getAutoResizeWarnings()` and `getAutoResizeWarningsForStorage()` in
+`cluster_webhook.go` are already implemented and wired into the admission
+pipeline (line 2544). This code runs on every cluster create/update.
+It has ZERO test coverage. Shipping untested webhook code is not acceptable.
+
+Add tests to `cluster_webhook_autoresize_test.go` (or a new file
+`cluster_webhook_autoresize_warnings_test.go`) following the existing
+pattern:
+
+```go
+package v1
+
+import (
+    "k8s.io/apimachinery/pkg/util/intstr"
+    "k8s.io/utils/ptr"
+
+    apiv1 "github.com/cloudnative-pg/cloudnative-pg/api/v1"
+
+    . "github.com/onsi/ginkgo/v2"
+    . "github.com/onsi/gomega"
+)
+```
+
+**Required test cases for each warning condition:**
+
+1. **`maxActionsPerDay: 0` warns**: Cluster with `resize.enabled: true`,
+   `strategy.maxActionsPerDay: 0` → warnings include substring
+   `"effectively disables auto-resize"`.
+
+2. **`minAvailable > size` warns**: Cluster with `size: "1Gi"`,
+   `triggers.minAvailable: "5Gi"` → warnings include substring
+   `"resize will trigger immediately"`.
+
+3. **`limit <= size` warns**: Cluster with `size: "10Gi"`,
+   `expansion.limit: "5Gi"` → warnings include substring
+   `"auto-resize will never increase"`.
+
+4. **`minStep`/`maxStep` with absolute step warns**: Cluster with
+   `step: "10Gi"`, `minStep: "2Gi"` → warnings include substring
+   `"apply only to percentage-based steps"`.
+
+5. **`acknowledgeWALRisk` on dual-volume warns**: Cluster with
+   `walStorage` configured AND `acknowledgeWALRisk: true` on data →
+   warnings include substring `"has no effect"`.
+
+6. **`requireArchiveHealthy` without backup warns**: Cluster with
+   `requireArchiveHealthy: true` and NO `barmanObjectStore` → warnings
+   include substring `"no backup configuration"`.
+
+7. **No warnings for valid config**: Cluster with sensible configuration
+   → `getAutoResizeWarnings()` returns empty.
+
+8. **Disabled resize produces no warnings**: Cluster with
+   `resize.enabled: false` → no warnings.
+
+Use the `makeCluster` / `makeMultiVolumeCluster` helpers from
+`cluster_webhook_autoresize_conflicts_test.go` if they work, or build
+minimal cluster objects inline.
+
 ### Verification
 
-1. `make test` passes
+1. `make test` passes (including new HasBudget and warning tests)
 2. `make lint` passes
 3. `make vet` passes
 
@@ -230,7 +382,59 @@ Consistently(func(g Gomega) {
 }, 2*time.Minute, 10*time.Second).Should(Succeed())
 ```
 
-### E2E 4: Slot Retention Test — Keep as PIt() (Pending)
+### E2E 4: Expansion Limit Test — verify limit BLOCKS second resize (Should Fix)
+
+The current expansion limit test (Test #3) only proves one resize happened
+and landed at the limit. It does NOT verify that the limit blocks further
+growth. The test starts at 2Gi with `step: 1Gi` and `limit: 3Gi` — one
+resize lands exactly at 3Gi by construction. This proves "resize happened"
+but not "limit works."
+
+**Fix:** After the first resize reaches 3Gi, clean up the fill file, then
+fill again to exceed 80% of the now-3Gi volume. Wait with `Consistently`
+to verify the PVC stays at 3Gi and does NOT grow to 4Gi. This proves the
+limit is actually enforced, not just that the math happened to land there.
+
+Add after the "verifying PVC does not exceed the limit" step:
+
+```go
+By("cleaning up fill file before second fill attempt", func() {
+    // ... rm -f fill_file
+})
+
+By("filling disk again to verify limit blocks further resize", func() {
+    // Write ~2.5Gi to the now-3Gi volume to exceed 80% again
+    commandTimeout := time.Second * 120
+    _, _, err = env.EventuallyExecCommand(
+        env.Ctx, *pod, specs.PostgresContainerName, &commandTimeout,
+        "sh", "-c",
+        "dd if=/dev/zero of=/var/lib/postgresql/data/pgdata/fill_file bs=1M count=2500",
+    )
+    Expect(err).ToNot(HaveOccurred())
+})
+
+By("verifying PVC stays at limit and does not grow", func() {
+    Consistently(func(g Gomega) {
+        pvcList, err := storage.GetPVCList(env.Ctx, env.Client, namespace)
+        g.Expect(err).ToNot(HaveOccurred())
+        for idx := range pvcList.Items {
+            pvc := &pvcList.Items[idx]
+            if pvc.Labels[utils.ClusterLabelName] != clusterName {
+                continue
+            }
+            if pvc.Labels[utils.PvcRoleLabelName] != string(utils.PVCRolePgData) {
+                continue
+            }
+            currentSize := pvc.Spec.Resources.Requests[corev1.ResourceStorage]
+            limitSize := resource.MustParse("3Gi")
+            g.Expect(currentSize.Cmp(limitSize)).To(BeNumerically("<=", 0),
+                "PVC should remain at limit, not grow further")
+        }
+    }, 2*time.Minute, 10*time.Second).Should(Succeed())
+})
+```
+
+### E2E 5: Slot Retention Test — Keep as PIt() (Pending)
 
 The slot detection issue has multiple root cause candidates (isPrimary gating,
 error swallowing, missing WAL health serialization). Do NOT attempt to fix this
@@ -257,30 +461,21 @@ make generate && make manifests && make fmt && make lint && make test
 
 ---
 
-## FOLLOW-UP PR #1: Webhook Validation Warnings
-
-These are safe UX improvements but NOT bugs. Ship separately to keep the
-core PR reviewable.
+## FOLLOW-UP PR #1: Status Patch & Metrics Refactoring
 
 Items:
-- Warn when `limit < spec.storage.size` (silent no-op)
-- Warn when `minStep`/`maxStep` set with absolute step (silently ignored)
-- Warn when `maxActionsPerDay: 0` with `enabled: true` (effectively disabled)
-- Warn for `step > 100%` (massive resize)
-- Warn when `minAvailable > spec.storage.size` (immediate trigger)
-- Warn when `acknowledgeWALRisk` on dual-volume cluster (no-op)
-- Warn for `requireArchiveHealthy: true` without backup stanza
-- Reject `usageThreshold: 0` (zero-value ambiguity)
-
-## FOLLOW-UP PR #2: Metrics Refactoring
-
-Items:
+- Switch status persistence from raw `r.Status().Patch()` to CNPG's
+  `status.PatchWithOptimisticLock()` (in `pkg/resources/status/patch.go`).
+  This provides conflict retry via `retry.RetryOnConflict`. Requires
+  restructuring autoresize status updates to use `Transaction` closures.
 - Move `cnpg_disk_resize_blocked` to operator metrics endpoint (or populate
   from status)
 - Consider moving all resize-action metrics to operator endpoint
 - Add `NextActionAt` or `BudgetResetAt` status field for observability
+- Structured logging context (`log.WithValues("cluster", ...)`) for the
+  autoresize reconciler
 
-## FOLLOW-UP PR #3: Design Improvements
+## FOLLOW-UP PR #2: Design Improvements (was #3)
 
 Items:
 - Pointer fields for `UsageThreshold` and `MaxActionsPerDay` (API change)
@@ -308,12 +503,49 @@ COMMITEOF
 
 ## Completion Criteria
 
-ALL of the following must be true:
+**STOP. READ THIS CAREFULLY.**
 
-### Build & Test
-- `make generate && make manifests && make fmt && make lint && make test` exit 0
-- All E2E tests pass on AKS (slot test stays as PIt)
-- All commits have DCO sign-off
+You may ONLY output `<promise>COMPLETE</promise>` after ALL of the following
+are true AND you have pasted the actual terminal output proving it:
+
+### Build & Test — MUST RUN, NOT JUST READ CODE
+- [ ] You ran `make generate` and it exited 0 (paste output)
+- [ ] You ran `make manifests` and it exited 0 (paste output)
+- [ ] You ran `make fmt` and it exited 0 (paste output)
+- [ ] You ran `make lint` and it exited 0 (paste output)
+- [ ] You ran `make test` and ALL tests passed (paste output showing PASS)
+- [ ] You ran `hack/e2e/run-e2e-aks-autoresize.sh` and E2E tests passed
+      (slot test stays as PIt; use `--focus` to rerun failing tests)
+- [ ] All commits have DCO sign-off
+
+If you say COMPLETE without having run `make test` and pasted the output,
+you are lying. Do not do this.
+
+### How to run E2E tests on AKS
+
+The E2E runner script handles build, deploy, and test execution:
+
+```bash
+# Full run (build image, deploy operator, run tests):
+hack/e2e/run-e2e-aks-autoresize.sh
+
+# Skip build/deploy when iterating on test code:
+hack/e2e/run-e2e-aks-autoresize.sh --skip-build --skip-deploy
+
+# Re-run a single failing test by name:
+hack/e2e/run-e2e-aks-autoresize.sh --focus "archive health" --skip-build --skip-deploy
+
+# Diagnose a stuck cluster without running tests:
+hack/e2e/run-e2e-aks-autoresize.sh --diagnose-only
+```
+
+Test names for `--focus`: `basic auto-resize`, `separate WAL volume`,
+`expansion limit`, `webhook`, `rate-limit`, `minStep`, `maxStep`,
+`metrics`, `tablespace`, `archive health`, `inactive slot`, `minAvailable`.
+
+If a test fails, fix the code, re-run with `--focus "failing test name"`
+until it passes, then run the full suite without `--focus` to confirm
+no regressions.
 
 ### Critical Bugs (RESOLVED)
 - ~~Status persistence~~ ✅
@@ -331,16 +563,25 @@ ALL of the following must be true:
 - ShouldResize logs on invalid minAvailable
 - %w error wrapping
 
+### Unit Tests (this PR)
+- HasBudget unit tests (Fix 10) — rate limiter has ZERO unit tests currently
+- getAutoResizeWarnings unit tests (Fix 11) — webhook warnings ship in this
+  PR but have ZERO test coverage
+
 ### E2E (this PR)
 - REQ-12: AutoResizeEvent status verification
 - REQ-11: MinAvailable trigger test
+- Expansion limit test verifies second resize is blocked (not just first lands at limit)
 - time.Sleep replaced with Eventually/Consistently
+- ALL E2E tests pass on AKS (run `hack/e2e/run-e2e-aks-autoresize.sh`)
 
 ### NOT in this PR (follow-up)
-- Webhook warnings (limit < size, minStep/maxStep with absolute step, etc.)
 - Metrics refactoring (operator endpoint, ResizeBlocked, NextActionAt)
 - Pointer field API changes
 - resizeInUseVolumes gating
 - Slot test stabilization
+- E2E maxStep runtime clamping test (REQ-14, unit tests prove the math)
+- E2E multi-instance test (REQ-16)
+- E2E metric value assertions (REQ-18)
 
 When ALL "this PR" criteria are met, output: <promise>COMPLETE</promise>

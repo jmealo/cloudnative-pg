@@ -5,13 +5,6 @@ metadata:
 spec:
   instances: 1
 
-  postgresql:
-    parameters:
-      log_checkpoints: "on"
-
-  primaryUpdateStrategy: unsupervised
-  primaryUpdateMethod: switchover
-
   bootstrap:
     initdb:
       database: app
@@ -23,13 +16,12 @@ spec:
     resize:
       enabled: true
       triggers:
-        usageThreshold: 80
-        minAvailable: 1500Mi
+        # High percentage so it doesn't fire first
+        usageThreshold: 99
+        minAvailable: "500Mi"
       expansion:
         step: "1Gi"
-        limit: "10Gi"
       strategy:
-        maxActionsPerDay: 5
         walSafetyPolicy:
           acknowledgeWALRisk: true
           requireArchiveHealthy: false

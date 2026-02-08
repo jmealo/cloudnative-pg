@@ -2114,8 +2114,7 @@ type ResizeTriggers struct {
 	// +optional
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=99
-	// +kubebuilder:default=80
-	UsageThreshold int `json:"usageThreshold,omitempty"`
+	UsageThreshold *int `json:"usageThreshold,omitempty"`
 
 	// MinAvailable is the minimum available space that must remain on the volume.
 	// When available space drops below this value, a resize is triggered.
@@ -2163,8 +2162,7 @@ type ResizeStrategy struct {
 	// +optional
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=10
-	// +kubebuilder:default=3
-	MaxActionsPerDay int `json:"maxActionsPerDay,omitempty"`
+	MaxActionsPerDay *int `json:"maxActionsPerDay,omitempty"`
 
 	// WALSafetyPolicy defines safety checks for WAL-related volumes.
 	// When the data volume shares WAL storage (single-volume clusters)

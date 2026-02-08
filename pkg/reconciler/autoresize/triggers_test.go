@@ -21,6 +21,7 @@ package autoresize
 
 import (
 	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/utils/ptr"
 
 	apiv1 "github.com/cloudnative-pg/cloudnative-pg/api/v1"
 
@@ -44,7 +45,7 @@ var _ = Describe("ShouldResize", func() {
 		It("should return true when usage exceeds threshold", func() {
 			// 85% used, threshold 80 → true
 			usedPercent = 85.0
-			triggers.UsageThreshold = 80
+			triggers.UsageThreshold = ptr.To(80)
 
 			result := ShouldResize(usedPercent, availableBytes, triggers)
 
@@ -54,7 +55,7 @@ var _ = Describe("ShouldResize", func() {
 		It("should return false when usage is below threshold", func() {
 			// 75% used, threshold 80 → false
 			usedPercent = 75.0
-			triggers.UsageThreshold = 80
+			triggers.UsageThreshold = ptr.To(80)
 
 			result := ShouldResize(usedPercent, availableBytes, triggers)
 
@@ -67,7 +68,7 @@ var _ = Describe("ShouldResize", func() {
 			// 5Gi available, minAvailable "10Gi" → true
 			usedPercent = 50.0
 			availableBytes = mustParseQuantityValue("5Gi")
-			triggers.UsageThreshold = 80
+			triggers.UsageThreshold = ptr.To(80)
 			triggers.MinAvailable = "10Gi"
 
 			result := ShouldResize(usedPercent, availableBytes, triggers)
@@ -79,7 +80,7 @@ var _ = Describe("ShouldResize", func() {
 			// 15Gi available, minAvailable "10Gi" → false
 			usedPercent = 50.0
 			availableBytes = mustParseQuantityValue("15Gi")
-			triggers.UsageThreshold = 80
+			triggers.UsageThreshold = ptr.To(80)
 			triggers.MinAvailable = "10Gi"
 
 			result := ShouldResize(usedPercent, availableBytes, triggers)
@@ -93,7 +94,7 @@ var _ = Describe("ShouldResize", func() {
 			// 85%, minAvailable "10Gi", available 15Gi → true (usage triggers)
 			usedPercent = 85.0
 			availableBytes = mustParseQuantityValue("15Gi")
-			triggers.UsageThreshold = 80
+			triggers.UsageThreshold = ptr.To(80)
 			triggers.MinAvailable = "10Gi"
 
 			result := ShouldResize(usedPercent, availableBytes, triggers)
@@ -105,7 +106,7 @@ var _ = Describe("ShouldResize", func() {
 			// 75%, minAvailable "10Gi", available 5Gi → true (minAvailable triggers)
 			usedPercent = 75.0
 			availableBytes = mustParseQuantityValue("5Gi")
-			triggers.UsageThreshold = 80
+			triggers.UsageThreshold = ptr.To(80)
 			triggers.MinAvailable = "10Gi"
 
 			result := ShouldResize(usedPercent, availableBytes, triggers)
@@ -117,7 +118,7 @@ var _ = Describe("ShouldResize", func() {
 			// 75%, minAvailable "5Gi", available 10Gi → false
 			usedPercent = 75.0
 			availableBytes = mustParseQuantityValue("10Gi")
-			triggers.UsageThreshold = 80
+			triggers.UsageThreshold = ptr.To(80)
 			triggers.MinAvailable = "5Gi"
 
 			result := ShouldResize(usedPercent, availableBytes, triggers)
@@ -127,10 +128,10 @@ var _ = Describe("ShouldResize", func() {
 	})
 
 	Context("Default threshold", func() {
-		It("should use default threshold of 80 when threshold is 0", func() {
-			// 0 means default 80, test with 85% → true
+		It("should use default threshold of 80 when threshold is nil", func() {
+			// nil means default 80, test with 85% → true
 			usedPercent = 85.0
-			triggers.UsageThreshold = 0
+			triggers.UsageThreshold = nil
 
 			result := ShouldResize(usedPercent, availableBytes, triggers)
 
@@ -139,7 +140,7 @@ var _ = Describe("ShouldResize", func() {
 
 		It("should use default threshold of 80 when checking against 75%", func() {
 			usedPercent = 75.0
-			triggers.UsageThreshold = 0
+			triggers.UsageThreshold = nil
 
 			result := ShouldResize(usedPercent, availableBytes, triggers)
 
@@ -162,7 +163,7 @@ var _ = Describe("ShouldResize", func() {
 		It("should handle float precision in usage percent", func() {
 			// Test boundary condition with floating point
 			usedPercent = 80.1
-			triggers.UsageThreshold = 80
+			triggers.UsageThreshold = ptr.To(80)
 
 			result := ShouldResize(usedPercent, availableBytes, triggers)
 
@@ -172,7 +173,7 @@ var _ = Describe("ShouldResize", func() {
 		It("should handle exactly equal usage threshold", func() {
 			// When usage equals threshold, should not trigger (> not >=)
 			usedPercent = 80.0
-			triggers.UsageThreshold = 80
+			triggers.UsageThreshold = ptr.To(80)
 
 			result := ShouldResize(usedPercent, availableBytes, triggers)
 
@@ -183,7 +184,7 @@ var _ = Describe("ShouldResize", func() {
 			// Invalid minAvailable should be ignored
 			usedPercent = 75.0
 			availableBytes = 0
-			triggers.UsageThreshold = 80
+			triggers.UsageThreshold = ptr.To(80)
 			triggers.MinAvailable = "invalid"
 
 			result := ShouldResize(usedPercent, availableBytes, triggers)
@@ -195,7 +196,7 @@ var _ = Describe("ShouldResize", func() {
 			// Empty minAvailable string should be ignored
 			usedPercent = 75.0
 			availableBytes = 0
-			triggers.UsageThreshold = 80
+			triggers.UsageThreshold = ptr.To(80)
 			triggers.MinAvailable = ""
 
 			result := ShouldResize(usedPercent, availableBytes, triggers)

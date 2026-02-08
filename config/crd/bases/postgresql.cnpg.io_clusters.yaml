@@ -6012,7 +6012,6 @@ spec:
                           rate limiting and WAL safety policies.
                         properties:
                           maxActionsPerDay:
-                            default: 3
                             description: |-
                               MaxActionsPerDay is the maximum number of resize operations per volume
                               within a 24-hour rolling window. Reflects cloud provider limits
@@ -6078,7 +6077,6 @@ spec:
                               Can be specified as an absolute value (e.g., "10Gi").
                             type: string
                           usageThreshold:
-                            default: 80
                             description: |-
                               UsageThreshold is the disk usage percentage (1-99) that triggers a resize.
                               When the volume usage exceeds this threshold, a resize is triggered.
@@ -6390,7 +6388,6 @@ spec:
                                 rate limiting and WAL safety policies.
                               properties:
                                 maxActionsPerDay:
-                                  default: 3
                                   description: |-
                                     MaxActionsPerDay is the maximum number of resize operations per volume
                                     within a 24-hour rolling window. Reflects cloud provider limits
@@ -6456,7 +6453,6 @@ spec:
                                     Can be specified as an absolute value (e.g., "10Gi").
                                   type: string
                                 usageThreshold:
-                                  default: 80
                                   description: |-
                                     UsageThreshold is the disk usage percentage (1-99) that triggers a resize.
                                     When the volume usage exceeds this threshold, a resize is triggered.
@@ -6920,7 +6916,6 @@ spec:
                           rate limiting and WAL safety policies.
                         properties:
                           maxActionsPerDay:
-                            default: 3
                             description: |-
                               MaxActionsPerDay is the maximum number of resize operations per volume
                               within a 24-hour rolling window. Reflects cloud provider limits
@@ -6986,7 +6981,6 @@ spec:
                               Can be specified as an absolute value (e.g., "10Gi").
                             type: string
                           usageThreshold:
-                            default: 80
                             description: |-
                               UsageThreshold is the disk usage percentage (1-99) that triggers a resize.
                               When the volume usage exceeds this threshold, a resize is triggered.

@@ -829,7 +829,10 @@ func (r *ClusterReconciler) reconcileResources(
 	// This is CRITICAL because if we return autoResizeRes (requeue), the
 	// rest of the loop is skipped and memory changes are lost.
 	if !reflect.DeepEqual(origCluster.Status, cluster.Status) {
-		if err := r.Status().Patch(ctx, cluster, client.MergeFrom(origCluster)); err != nil {
+		newStatus := cluster.Status
+		if err := status.PatchWithOptimisticLock(ctx, r.Client, cluster, func(c *apiv1.Cluster) {
+			c.Status = newStatus
+		}); err != nil {
 			contextLogger.Error(err, "failed to persist auto-resize status changes")
 			return ctrl.Result{}, err
 		}

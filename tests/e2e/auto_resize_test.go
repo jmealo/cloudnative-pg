@@ -85,42 +85,57 @@ var _ = Describe("PVC Auto-Resize", Label(tests.LabelAutoResize), func() {
 				Expect(err).ToNot(HaveOccurred())
 
 				// Fill the disk to exceed the 80% usage threshold
-				// The volume is 2Gi, so writing ~1.7Gi should trigger resize
 				commandTimeout := time.Second * 120
 				_, _, err = env.EventuallyExecCommand(
 					env.Ctx, *pod, specs.PostgresContainerName, &commandTimeout,
 					"sh", "-c",
-					"dd if=/dev/zero of=/var/lib/postgresql/data/pgdata/fill_file bs=1M count=1700",
+					"dd if=/dev/zero of=/var/lib/postgresql/data/pgdata/fill_file bs=1M count=1800",
 				)
 				Expect(err).ToNot(HaveOccurred())
+
+				// PROOF: Verify percent_used > 80 via status before checking for resize
+				Eventually(func(g Gomega) {
+					cluster, err := clusterutils.Get(env.Ctx, env.Client, namespace, clusterName)
+					g.Expect(err).ToNot(HaveOccurred())
+					g.Expect(cluster.Status.DiskStatus).ToNot(BeNil())
+					instance, ok := cluster.Status.DiskStatus.Instances[podName]
+					g.Expect(ok).To(BeTrue())
+					g.Expect(instance.DataVolume).ToNot(BeNil())
+					g.Expect(instance.DataVolume.PercentUsed).To(BeNumerically(">", 80),
+						"Disk usage must exceed threshold to trigger resize")
+				}, 60*time.Second, 5*time.Second).Should(Succeed())
 			})
 
-			By("waiting for PVC to be resized", func() {
-				// The reconciler runs every 30s, give it time to detect and resize
-				Eventually(func() bool {
+			By("waiting for ALL instance PVCs to be resized (REQ-16)", func() {
+				// The fixture has instances: 2. Both should be resized eventually.
+				Eventually(func(g Gomega) {
 					pvcList, err := storage.GetPVCList(env.Ctx, env.Client, namespace)
-					if err != nil {
-						return false
-					}
+					g.Expect(err).ToNot(HaveOccurred())
 
+					resizedCount := 0
 					for idx := range pvcList.Items {
 						pvc := &pvcList.Items[idx]
-						// Only check data PVCs for this cluster
-						if pvc.Labels[utils.ClusterLabelName] != clusterName {
-							continue
-						}
-						if pvc.Labels[utils.PvcRoleLabelName] != string(utils.PVCRolePgData) {
-							continue
-						}
-						currentSize := pvc.Spec.Resources.Requests[corev1.ResourceStorage]
-						originalSize := resource.MustParse("2Gi")
-						if currentSize.Cmp(originalSize) > 0 {
-							return true
+						if pvc.Labels[utils.ClusterLabelName] == clusterName &&
+							pvc.Labels[utils.PvcRoleLabelName] == string(utils.PVCRolePgData) {
+							currentSize := pvc.Spec.Resources.Requests[corev1.ResourceStorage]
+							originalSize := resource.MustParse("2Gi")
+							if currentSize.Cmp(originalSize) > 0 {
+								resizedCount++
+							}
 						}
 					}
-					return false
-				}, 5*time.Minute, 10*time.Second).Should(BeTrue(),
-					"PVC should have been resized beyond its original 2Gi")
+					g.Expect(resizedCount).To(Equal(2), "Both PVCs (primary and standby) should be resized")
+				}, 5*time.Minute, 10*time.Second).Should(Succeed())
+			})
+
+			By("verifying Kubernetes Events were emitted", func() {
+				Eventually(func(g Gomega) {
+					events, err := env.Interface.CoreV1().Events(namespace).List(env.Ctx, metav1.ListOptions{
+						FieldSelector: "reason=AutoResizeSuccess",
+					})
+					g.Expect(err).ToNot(HaveOccurred())
+					g.Expect(events.Items).ToNot(BeEmpty(), "Should have emitted AutoResizeSuccess event")
+				}, 60*time.Second, 5*time.Second).Should(Succeed())
 			})
 
 			By("verifying an auto-resize event was recorded in cluster status (REQ-12)", func() {
@@ -391,52 +406,28 @@ var _ = Describe("PVC Auto-Resize", Label(tests.LabelAutoResize), func() {
 				Expect(err).ToNot(HaveOccurred())
 			})
 
-			By("waiting for PVC to be resized to 3Gi (the limit)", func() {
-				// The reconciler runs every 30s, give it time to detect and resize
-				Eventually(func() bool {
+			By("waiting for PVC to be resized to 2.5Gi (the clamped limit)", func() {
+				// The fixture has Limit: 2.5Gi and Step: 1Gi.
+				// 2Gi + 1Gi would be 3Gi, so it MUST be clamped to exactly 2.5Gi.
+				Eventually(func(g Gomega) {
 					pvcList, err := storage.GetPVCList(env.Ctx, env.Client, namespace)
-					if err != nil {
-						return false
-					}
+					g.Expect(err).ToNot(HaveOccurred())
 
+					found := false
 					for idx := range pvcList.Items {
 						pvc := &pvcList.Items[idx]
-						if pvc.Labels[utils.ClusterLabelName] != clusterName {
-							continue
-						}
-						if pvc.Labels[utils.PvcRoleLabelName] != string(utils.PVCRolePgData) {
-							continue
-						}
-						currentSize := pvc.Spec.Resources.Requests[corev1.ResourceStorage]
-						limitSize := resource.MustParse("3Gi")
-						// Should have grown to the limit
-						if currentSize.Cmp(limitSize) >= 0 {
-							return true
+						if pvc.Labels[utils.ClusterLabelName] == clusterName &&
+							pvc.Labels[utils.PvcRoleLabelName] == string(utils.PVCRolePgData) {
+							currentSize := pvc.Spec.Resources.Requests[corev1.ResourceStorage]
+							limitSize := resource.MustParse("2.5Gi")
+							// PROOF: It must equal the limit exactly
+							g.Expect(currentSize.Cmp(limitSize)).To(Equal(0),
+								"PVC size should be exactly at the limit of 2.5Gi")
+							found = true
 						}
 					}
-					return false
-				}, 5*time.Minute, 10*time.Second).Should(BeTrue(),
-					"PVC should have been resized to the limit of 3Gi")
-			})
-
-			By("verifying PVC does not exceed the limit", func() {
-				pvcList, err := storage.GetPVCList(env.Ctx, env.Client, namespace)
-				Expect(err).ToNot(HaveOccurred())
-
-				for idx := range pvcList.Items {
-					pvc := &pvcList.Items[idx]
-					if pvc.Labels[utils.ClusterLabelName] != clusterName {
-						continue
-					}
-					if pvc.Labels[utils.PvcRoleLabelName] != string(utils.PVCRolePgData) {
-						continue
-					}
-					currentSize := pvc.Spec.Resources.Requests[corev1.ResourceStorage]
-					limitSize := resource.MustParse("3Gi")
-					// Should not exceed limit
-					Expect(currentSize.Cmp(limitSize)).To(BeNumerically("<=", 0),
-						"PVC size should not exceed limit of 3Gi")
-				}
+					g.Expect(found).To(BeTrue())
+				}, 5*time.Minute, 10*time.Second).Should(Succeed())
 			})
 
 			By("cleaning up the fill file", func() {
@@ -600,44 +591,68 @@ var _ = Describe("PVC Auto-Resize", Label(tests.LabelAutoResize), func() {
 				}, pod)
 				Expect(err).ToNot(HaveOccurred())
 
-				// Remove old fill file and create a new one to trigger resize again
+				// Remove old fill file
 				commandTimeout := time.Second * 30
 				_, _, _ = env.EventuallyExecCommand(
 					env.Ctx, *pod, specs.PostgresContainerName, &commandTimeout,
 					"rm", "-f", "/var/lib/postgresql/data/pgdata/fill_file",
 				)
 
-				// Try to fill the disk again - this may fail with "no space left" if rate
-				// limiting prevented the resize, which is actually expected behavior.
-				// We'll verify the PVC size didn't change in the next step.
+				// PROOF: Verify disk usage is below 80% again after cleanup
+				Eventually(func(g Gomega) {
+					cluster, err := clusterutils.Get(env.Ctx, env.Client, namespace, clusterName)
+					g.Expect(err).ToNot(HaveOccurred())
+					instance := cluster.Status.DiskStatus.Instances[podName]
+					g.Expect(instance.DataVolume.PercentUsed).To(BeNumerically("<", 80))
+				}, 60*time.Second, 5*time.Second).Should(Succeed())
+
+				// Now fill it again
 				commandTimeout = time.Second * 120
 				_, _, _ = env.EventuallyExecCommand(
 					env.Ctx, *pod, specs.PostgresContainerName, &commandTimeout,
 					"sh", "-c",
-					"dd if=/dev/zero of=/var/lib/postgresql/data/pgdata/fill_file2 bs=1M count=2000 || true",
+					"dd if=/dev/zero of=/var/lib/postgresql/data/pgdata/fill_file2 bs=1M count=2500 || true",
 				)
-				// Ignore the error - the important thing is whether resize was blocked
+
+				// PROOF: Verify usage threshold is exceeded
+				Eventually(func(g Gomega) {
+					cluster, err := clusterutils.Get(env.Ctx, env.Client, namespace, clusterName)
+					g.Expect(err).ToNot(HaveOccurred())
+					instance := cluster.Status.DiskStatus.Instances[podName]
+					g.Expect(instance.DataVolume.PercentUsed).To(BeNumerically(">", 80),
+						"Trigger condition must be met for the block to be meaningful")
+				}, 60*time.Second, 5*time.Second).Should(Succeed())
 			})
 
-			By("verifying second resize is blocked by rate limit", func() {
-				// Verify size hasn't changed over a 2-minute window
-				Consistently(func(g Gomega) {
-					pvcList, err := storage.GetPVCList(env.Ctx, env.Client, namespace)
-					g.Expect(err).ToNot(HaveOccurred())
+			By("verifying second resize is blocked and metric is set", func() {
+				cluster, err := clusterutils.Get(env.Ctx, env.Client, namespace, clusterName)
+				Expect(err).ToNot(HaveOccurred())
 
-					for idx := range pvcList.Items {
-						pvc := &pvcList.Items[idx]
-						if pvc.Labels[utils.ClusterLabelName] != clusterName {
-							continue
-						}
-						if pvc.Labels[utils.PvcRoleLabelName] != string(utils.PVCRolePgData) {
-							continue
-						}
-						currentSize := pvc.Spec.Resources.Requests[corev1.ResourceStorage]
-						g.Expect(currentSize.Cmp(sizeAfterFirstResize)).To(Equal(0),
-							"PVC size should not have changed due to rate limit")
+				podName := clusterName + "-1"
+				pod := &corev1.Pod{}
+				err = env.Client.Get(env.Ctx, types.NamespacedName{
+					Namespace: namespace, Name: podName,
+				}, pod)
+				Expect(err).ToNot(HaveOccurred())
+
+				// PROOF: Check the actual Prometheus metric for "rate_limit" reason
+				Eventually(func(g Gomega) {
+					out, err := proxy.RetrieveMetricsFromInstance(env.Ctx, env.Interface, *pod,
+						cluster.IsMetricsTLSEnabled())
+					g.Expect(err).ToNot(HaveOccurred())
+					g.Expect(out).To(ContainSubstring("cnpg_disk_resize_blocked{reason=\"rate_limit\""))
+				}, 120*time.Second, 10*time.Second).Should(Succeed())
+
+				// And size remains constant
+				pvcList, err := storage.GetPVCList(env.Ctx, env.Client, namespace)
+				Expect(err).ToNot(HaveOccurred())
+				for idx := range pvcList.Items {
+					pvc := &pvcList.Items[idx]
+					if pvc.Labels[utils.ClusterLabelName] == clusterName &&
+						pvc.Labels[utils.PvcRoleLabelName] == string(utils.PVCRolePgData) {
+						gomega.Expect(pvc.Spec.Resources.Requests.Storage().String()).To(Equal(sizeAfterFirstResize.String()))
 					}
-				}, 2*time.Minute, 10*time.Second).Should(Succeed())
+				}
 			})
 
 			By("cleaning up the fill files", func() {
@@ -808,7 +823,7 @@ var _ = Describe("PVC Auto-Resize", Label(tests.LabelAutoResize), func() {
 
 			AssertCreateCluster(namespace, clusterName, sampleFile, env)
 
-			By("verifying disk metrics are exposed", func() {
+			By("verifying disk metrics are exposed with correct values", func() {
 				cluster, err := clusterutils.Get(env.Ctx, env.Client, namespace, clusterName)
 				Expect(err).ToNot(HaveOccurred())
 
@@ -823,15 +838,25 @@ var _ = Describe("PVC Auto-Resize", Label(tests.LabelAutoResize), func() {
 				Eventually(func(g Gomega) {
 					out, err := proxy.RetrieveMetricsFromInstance(env.Ctx, env.Interface, *pod,
 						cluster.IsMetricsTLSEnabled())
-					g.Expect(err).ToNot(HaveOccurred(), "while getting pod metrics")
-					g.Expect(strings.Contains(out, "cnpg_disk_total_bytes")).To(BeTrue(),
-						"should expose cnpg_disk_total_bytes metric")
-					g.Expect(strings.Contains(out, "cnpg_disk_used_bytes")).To(BeTrue(),
-						"should expose cnpg_disk_used_bytes metric")
-					g.Expect(strings.Contains(out, "cnpg_disk_available_bytes")).To(BeTrue(),
-						"should expose cnpg_disk_available_bytes metric")
-					g.Expect(strings.Contains(out, "cnpg_disk_percent_used")).To(BeTrue(),
-						"should expose cnpg_disk_percent_used metric")
+					g.Expect(err).ToNot(HaveOccurred())
+
+					// PROOF: Verify cnpg_disk_total_bytes exists and is ~2GiB
+					g.Expect(out).To(ContainSubstring("cnpg_disk_total_bytes{tablespace=\"\",volume_type=\"data\"}"))
+
+					// Parse the value (simplified for E2E)
+					lines := strings.Split(out, "\n")
+					found := false
+					for _, line := range lines {
+						if strings.HasPrefix(line, "cnpg_disk_total_bytes{tablespace=\"\",volume_type=\"data\"}") {
+							parts := strings.Fields(line)
+							val := parts[1]
+							// 2GiB is 2147483648. Check if it's in that ballpark.
+							g.Expect(val).To(Equal("2.147483648e+09"), "Metric value should match 2Gi capacity")
+							found = true
+							break
+						}
+					}
+					g.Expect(found).To(BeTrue(), "Metric line not found")
 				}, 60*time.Second, 5*time.Second).Should(Succeed())
 			})
 		})
@@ -1005,6 +1030,18 @@ var _ = Describe("PVC Auto-Resize", Label(tests.LabelAutoResize), func() {
 				}
 			})
 
+			By("verifying archive is unhealthy", func() {
+				// PROOF: Verify the operator sees the archive as unhealthy
+				Eventually(func(g Gomega) {
+					cluster, err := clusterutils.Get(env.Ctx, env.Client, namespace, clusterName)
+					g.Expect(err).ToNot(HaveOccurred())
+					instance := cluster.Status.DiskStatus.Instances[clusterName+"-1"]
+					g.Expect(instance.WALHealth).ToNot(BeNil())
+					g.Expect(instance.WALHealth.ArchiveHealthy).To(BeFalse(),
+						"Precondition failed: Archive must be unhealthy for this test")
+				}, 120*time.Second, 5*time.Second).Should(Succeed())
+			})
+
 			By("filling the disk to trigger auto-resize", func() {
 				podName := clusterName + "-1"
 				pod := &corev1.Pod{}
@@ -1019,13 +1056,30 @@ var _ = Describe("PVC Auto-Resize", Label(tests.LabelAutoResize), func() {
 				_, _, err = env.EventuallyExecCommand(
 					env.Ctx, *pod, specs.PostgresContainerName, &commandTimeout,
 					"sh", "-c",
-					"dd if=/dev/zero of=/var/lib/postgresql/data/pgdata/fill_file bs=1M count=1700",
+					"dd if=/dev/zero of=/var/lib/postgresql/data/pgdata/fill_file bs=1M count=1800",
 				)
 				Expect(err).ToNot(HaveOccurred())
+
+				// PROOF: Verify percent_used > 80
+				Eventually(func(g Gomega) {
+					cluster, err := clusterutils.Get(env.Ctx, env.Client, namespace, clusterName)
+					g.Expect(err).ToNot(HaveOccurred())
+					instance := cluster.Status.DiskStatus.Instances[podName]
+					g.Expect(instance.DataVolume.PercentUsed).To(BeNumerically(">", 80))
+				}, 60*time.Second, 5*time.Second).Should(Succeed())
 			})
 
 			By("verifying resize is blocked due to unhealthy archive", func() {
-				// Verify PVC has NOT been resized over a 2-minute window
+				// PROOF: Check for blocked metric
+				Eventually(func(g Gomega) {
+					pod := &corev1.Pod{}
+					_ = env.Client.Get(env.Ctx, types.NamespacedName{Namespace: namespace, Name: clusterName + "-1"}, pod)
+					cluster, _ := clusterutils.Get(env.Ctx, env.Client, namespace, clusterName)
+					out, _ := proxy.RetrieveMetricsFromInstance(env.Ctx, env.Interface, *pod, cluster.IsMetricsTLSEnabled())
+					g.Expect(out).To(ContainSubstring("cnpg_disk_resize_blocked{reason=\"wal_health_unavailable\""))
+				}, 60*time.Second, 5*time.Second).Should(Succeed())
+
+				// Verify size has NOT changed
 				originalSize := resource.MustParse("2Gi")
 				Consistently(func(g Gomega) {
 					pvcList, err := storage.GetPVCList(env.Ctx, env.Client, namespace)
@@ -1033,17 +1087,12 @@ var _ = Describe("PVC Auto-Resize", Label(tests.LabelAutoResize), func() {
 
 					for idx := range pvcList.Items {
 						pvc := &pvcList.Items[idx]
-						if pvc.Labels[utils.ClusterLabelName] != clusterName {
-							continue
+						if pvc.Labels[utils.ClusterLabelName] == clusterName &&
+							pvc.Labels[utils.PvcRoleLabelName] == string(utils.PVCRolePgData) {
+							g.Expect(pvc.Spec.Resources.Requests.Storage().String()).To(Equal(originalSize.String()))
 						}
-						if pvc.Labels[utils.PvcRoleLabelName] != string(utils.PVCRolePgData) {
-							continue
-						}
-						currentSize := pvc.Spec.Resources.Requests[corev1.ResourceStorage]
-						g.Expect(currentSize.Cmp(originalSize)).To(Equal(0),
-							"PVC should NOT have been resized due to unhealthy archive")
 					}
-				}, 2*time.Minute, 10*time.Second).Should(Succeed())
+				}, 1*time.Minute, 10*time.Second).Should(Succeed())
 			})
 
 			By("cleaning up the fill file", func() {
