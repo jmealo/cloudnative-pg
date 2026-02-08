@@ -467,3 +467,144 @@ var _ = Describe("reconcilePVC", func() {
 		Expect(resized).To(BeFalse())
 	})
 })
+
+var _ = Describe("Reconcile", func() {
+	var (
+		ctx      context.Context
+		scheme   *runtime.Scheme
+		recorder *record.FakeRecorder
+	)
+
+	BeforeEach(func() {
+		ctx = context.Background()
+		scheme = runtime.NewScheme()
+		Expect(apiv1.AddToScheme(scheme)).To(Succeed())
+		Expect(corev1.AddToScheme(scheme)).To(Succeed())
+		recorder = record.NewFakeRecorder(10)
+	})
+
+	It("should return empty result when auto-resize is disabled", func() {
+		cluster := &apiv1.Cluster{
+			Spec: apiv1.ClusterSpec{
+				StorageConfiguration: apiv1.StorageConfiguration{
+					Resize: &apiv1.ResizeConfiguration{Enabled: false},
+				},
+			},
+		}
+		c := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+		result, err := Reconcile(ctx, c, recorder, cluster, nil, nil)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(result.IsZero()).To(BeTrue())
+	})
+
+	It("should successfully reconcile multiple PVCs", func() {
+		cluster := &apiv1.Cluster{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-cluster", Namespace: "default"},
+			Spec: apiv1.ClusterSpec{
+				StorageConfiguration: apiv1.StorageConfiguration{
+					Resize: &apiv1.ResizeConfiguration{
+						Enabled: true,
+						Triggers: &apiv1.ResizeTriggers{
+							UsageThreshold: ptr.To(80),
+						},
+						Strategy: &apiv1.ResizeStrategy{
+							WALSafetyPolicy: &apiv1.WALSafetyPolicy{
+								AcknowledgeWALRisk: true,
+							},
+						},
+					},
+				},
+			},
+		}
+
+		pvc1 := corev1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "pvc-1",
+				Namespace: "default",
+				Labels: map[string]string{
+					utils.PvcRoleLabelName:      string(utils.PVCRolePgData),
+					utils.InstanceNameLabelName: "pod-1",
+				},
+			},
+			Spec: corev1.PersistentVolumeClaimSpec{
+				Resources: corev1.VolumeResourceRequirements{
+					Requests: corev1.ResourceList{
+						corev1.ResourceStorage: resource.MustParse("10Gi"),
+					},
+				},
+			},
+		}
+
+		c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(&pvc1).Build()
+
+		diskInfoByPod := map[string]*InstanceDiskInfo{
+			"pod-1": {
+				DiskStatus: &postgres.DiskStatus{
+					DataVolume: &postgres.VolumeStatus{
+						PercentUsed:    85,
+						AvailableBytes: 1 * 1024 * 1024 * 1024,
+					},
+				},
+				WALHealthStatus: &postgres.WALHealthStatus{
+					ArchiveHealthy: true,
+				},
+			},
+		}
+
+		pvcs := []corev1.PersistentVolumeClaim{pvc1}
+
+		result, err := Reconcile(ctx, c, recorder, cluster, diskInfoByPod, pvcs)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(result.RequeueAfter).To(Equal(RequeueDelay))
+
+		// Verify PVC was patched
+		var updatedPVC corev1.PersistentVolumeClaim
+		Expect(c.Get(ctx, client.ObjectKey{Namespace: "default", Name: "pvc-1"}, &updatedPVC)).To(Succeed())
+		newSize := updatedPVC.Spec.Resources.Requests[corev1.ResourceStorage]
+		Expect(newSize.String()).To(Equal("12Gi"))
+	})
+
+	It("should return error when a PVC reconciliation fails", func() {
+		cluster := &apiv1.Cluster{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-cluster", Namespace: "default"},
+			Spec: apiv1.ClusterSpec{
+				StorageConfiguration: apiv1.StorageConfiguration{
+					Resize: &apiv1.ResizeConfiguration{
+						Enabled: true,
+						Expansion: &apiv1.ExpansionPolicy{
+							Limit: "invalid",
+						},
+					},
+				},
+			},
+		}
+
+		pvc1 := corev1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "pvc-1",
+				Namespace: "default",
+				Labels: map[string]string{
+					utils.PvcRoleLabelName:      string(utils.PVCRolePgData),
+					utils.InstanceNameLabelName: "pod-1",
+				},
+			},
+		}
+
+		c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(&pvc1).Build()
+
+		diskInfoByPod := map[string]*InstanceDiskInfo{
+			"pod-1": {
+				DiskStatus: &postgres.DiskStatus{
+					DataVolume: &postgres.VolumeStatus{PercentUsed: 90},
+				},
+			},
+		}
+
+		pvcs := []corev1.PersistentVolumeClaim{pvc1}
+
+		result, err := Reconcile(ctx, c, recorder, cluster, diskInfoByPod, pvcs)
+		Expect(err).To(HaveOccurred())
+		Expect(result.RequeueAfter).To(Equal(RequeueDelay))
+	})
+})
