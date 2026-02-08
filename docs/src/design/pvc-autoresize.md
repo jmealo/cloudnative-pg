@@ -1391,8 +1391,7 @@ will be stabilized in a follow-up.
 
 Tests use `Eventually`/`Consistently` patterns throughout (no `time.Sleep`).
 
-See [E2E Testing Requirements](pvc-autoresize-e2e-requirements.md) for the full
-test inventory, gap analysis, and known issues.
+See the E2E tests in `tests/e2e/auto_resize_test.go` for the full test inventory.
 
 ---
 
@@ -1407,11 +1406,6 @@ test inventory, gap analysis, and known issues.
 ---
 
 *This RFC was prepared alongside a detailed E2E testing design. I welcome feedback on the approach, API surface, safety mechanisms, and implementation phasing.*
-
-*Companion documents:*
-
-- *[E2E Testing Spec](pvc-autoresize-e2e-testing.md) — original test scenario designs*
-- *[E2E Testing Requirements](pvc-autoresize-e2e-requirements.md) — gap analysis, AKS test results, and prioritized requirements list*
 
 ---
 
