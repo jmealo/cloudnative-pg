@@ -236,7 +236,7 @@ var _ = Describe("auto-resize configuration conflicts", func() {
 			// CURRENT: accepted — both triggers are OR-ed at runtime.
 			cluster := makeCluster(func(c *apiv1.Cluster) {
 				c.Spec.StorageConfiguration.Resize.Triggers = &apiv1.ResizeTriggers{
-					UsageThreshold: 80,
+					UsageThreshold: ptr.To(80),
 					MinAvailable:   "5Gi",
 				}
 			})
@@ -263,7 +263,7 @@ var _ = Describe("auto-resize configuration conflicts", func() {
 			// which will fire almost immediately.
 			cluster := makeCluster(func(c *apiv1.Cluster) {
 				c.Spec.StorageConfiguration.Resize.Triggers = &apiv1.ResizeTriggers{
-					UsageThreshold: 1,
+					UsageThreshold: ptr.To(1),
 				}
 			})
 			Expect(v.validateAutoResize(cluster)).To(BeEmpty())
@@ -464,14 +464,14 @@ var _ = Describe("auto-resize configuration conflicts", func() {
 						Resize: &apiv1.ResizeConfiguration{
 							Enabled: true,
 							Triggers: &apiv1.ResizeTriggers{
-								UsageThreshold: 85,
+								UsageThreshold: ptr.To(85),
 							},
 							Expansion: &apiv1.ExpansionPolicy{
 								Step:  intstr.IntOrString{Type: intstr.String, StrVal: "10%"},
 								Limit: "500Gi",
 							},
 							Strategy: &apiv1.ResizeStrategy{
-								MaxActionsPerDay: 5,
+								MaxActionsPerDay: ptr.To(5),
 							},
 						},
 					},
@@ -480,14 +480,14 @@ var _ = Describe("auto-resize configuration conflicts", func() {
 						Resize: &apiv1.ResizeConfiguration{
 							Enabled: true,
 							Triggers: &apiv1.ResizeTriggers{
-								UsageThreshold: 90,
+								UsageThreshold: ptr.To(90),
 								MinAvailable:   "2Gi",
 							},
 							Expansion: &apiv1.ExpansionPolicy{
 								Step: intstr.IntOrString{Type: intstr.String, StrVal: "5Gi"},
 							},
 							Strategy: &apiv1.ResizeStrategy{
-								MaxActionsPerDay: 2,
+								MaxActionsPerDay: ptr.To(2),
 								WALSafetyPolicy: &apiv1.WALSafetyPolicy{
 									RequireArchiveHealthy: ptr.To(true),
 									MaxPendingWALFiles:    ptr.To(50),

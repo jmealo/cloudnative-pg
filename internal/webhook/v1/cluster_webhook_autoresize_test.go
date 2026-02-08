@@ -56,14 +56,14 @@ var _ = Describe("auto-resize validation", func() {
 						Resize: &apiv1.ResizeConfiguration{
 							Enabled: true,
 							Triggers: &apiv1.ResizeTriggers{
-								UsageThreshold: 80,
+								UsageThreshold: ptr.To(80),
 							},
 							Expansion: &apiv1.ExpansionPolicy{
 								Step:  intstr.IntOrString{Type: intstr.String, StrVal: "20%"},
 								Limit: "100Gi",
 							},
 							Strategy: &apiv1.ResizeStrategy{
-								MaxActionsPerDay: 3,
+								MaxActionsPerDay: ptr.To(3),
 								WALSafetyPolicy: &apiv1.WALSafetyPolicy{
 									AcknowledgeWALRisk: true,
 								},
@@ -133,7 +133,7 @@ var _ = Describe("auto-resize validation", func() {
 						Resize: &apiv1.ResizeConfiguration{
 							Enabled: true,
 							Triggers: &apiv1.ResizeTriggers{
-								UsageThreshold: 85,
+								UsageThreshold: ptr.To(85),
 								MinAvailable:   "5Gi",
 							},
 							Strategy: &apiv1.ResizeStrategy{

@@ -1353,25 +1353,25 @@ The feature has comprehensive unit test coverage across four test suites:
 
 12 active E2E tests + 1 pending on AKS (3-node cluster, Azure Disk CSI driver):
 
-1. Basic data PVC resize (fill past 80%, verify PVC grows)
+1. Basic data PVC resize (+ REQ-12 event verification, REQ-16 multi-instance)
 2. WAL PVC resize (separate WAL volume)
-3. Expansion limit enforcement (PVC stops at limit)
+3. Expansion limit enforcement (clamping + second-fill blocking verification)
 4. Webhook rejects single-volume without `acknowledgeWALRisk`
 5. Webhook accepts single-volume with `acknowledgeWALRisk`
-6. Rate-limit enforcement (`maxActionsPerDay: 1`)
+6. Rate-limit enforcement (`maxActionsPerDay: 1`, PercentUsed preconditions)
 7. MinStep clamping (5% of 2Gi clamped to 1Gi minStep)
 8. MaxStep webhook validation
-9. Prometheus metric exposure (`cnpg_disk_*` metrics)
+9. Prometheus metric exposure (`cnpg_disk_*` label and value assertions)
 10. Tablespace PVC resize
-11. WAL archive health blocks resize (bogus barmanObjectStore)
+11. WAL archive health blocks resize (ArchiveHealthy precondition check)
 12. MinAvailable trigger (absolute bytes-remaining trigger)
-13. AutoResizeEvent status verification (REQ-12: events persisted in cluster status)
-14-16. Various time.Sleep→Eventually/Consistently replacements for reliability
 
-Test #17 (inactive replication slot blocks resize) is marked `PIt()` (pending)
+Test #13 (inactive replication slot blocks resize) is marked `PIt()` (pending)
 due to a flaky status propagation issue — the blocking logic is unit-tested and
 the same WAL safety code path is proven by the archive health test (#11). This
 will be stabilized in a follow-up.
+
+Tests use `Eventually`/`Consistently` patterns throughout (no `time.Sleep`).
 
 See [E2E Testing Requirements](pvc-autoresize-e2e-requirements.md) for the full
 test inventory, gap analysis, and known issues.

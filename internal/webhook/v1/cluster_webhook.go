@@ -2619,7 +2619,7 @@ func getAutoResizeWarningsForStorage(
 	sizeQty, sizeKnown := getConfiguredStorageSize(configuration)
 
 	// maxActionsPerDay: 0 effectively disables resize
-	if resize.Strategy != nil && resize.Strategy.MaxActionsPerDay == 0 {
+	if resize.Strategy != nil && resize.Strategy.MaxActionsPerDay != nil && *resize.Strategy.MaxActionsPerDay == 0 {
 		warnings = append(warnings, fmt.Sprintf(
 			"%s is set to 0; this effectively disables auto-resize for this volume",
 			path.Child("resize", "strategy", "maxActionsPerDay").String(),
