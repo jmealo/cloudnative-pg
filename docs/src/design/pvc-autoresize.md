@@ -1063,6 +1063,175 @@ document the behavior explicitly if `step: 0` meaning "use default" is intention
 
 ---
 
+## Configuration Conflicts & Validation Gaps
+
+A comprehensive analysis of configurations that are accepted by the webhook and
+CRD schema but lead to surprising, confusing, or silently broken runtime behavior.
+These are organized by severity and recommended action.
+
+### Silent No-Op Configurations (High Severity)
+
+**`limit < currentSize`**: If `expansion.limit` is smaller than the current PVC
+size, the auto-resizer becomes a permanent silent no-op. It triggers, calculates
+a new size, caps it to the limit (which is already exceeded), and produces no
+patch. The user believes they have auto-resize protection but will never get a
+resize.
+
+**Recommendation:** Webhook should warn (not reject, since PVC could be resized
+externally): `"expansion.limit is less than spec.storage.size; auto-resize will
+not trigger until the volume exceeds this limit"`.
+
+**`maxActionsPerDay: 0` with `enabled: true`**: The rate limiter blocks every
+resize attempt. Metrics show `resize_blocked{reason="rate_limit"}` but the
+configuration is contradictory — resize is enabled but can never execute.
+
+**Recommendation:** Webhook should warn: `"maxActionsPerDay: 0 effectively
+disables auto-resize despite enabled: true"`.
+
+### Zero-Value Ambiguities (Medium Severity)
+
+**`usageThreshold: 0`**: Treated as "use default (80%)" rather than "never
+trigger". A user writing `usageThreshold: 0` expecting to disable the threshold
+trigger gets the default 80% instead. This follows the same pattern as the
+`step: 0` issue documented in Pre-Merge Issues above.
+
+**`step: 20` (integer, not string)**: An IntOrString integer value like `step: 20`
+is parsed as `resource.ParseQuantity("20")` which yields **20 bytes**, not 20%.
+To get 20%, the user must write `step: "20%"` (string). A user accustomed to
+Kubernetes percentage patterns (like `maxUnavailable: 25`) may inadvertently
+configure a 20-byte step, which would be rounded up by the CSI driver or
+produce a no-op.
+
+**Recommendation:** Either reject bare integer step values in the webhook
+(`"step must be a percentage string like '20%' or an absolute quantity like
+'5Gi'"`) or document this behavior prominently.
+
+### Silently Ignored Fields (Medium Severity)
+
+**`minStep`/`maxStep` with absolute `step`**: When `step` is an absolute quantity
+(e.g., `"10Gi"`), the `minStep` and `maxStep` fields are silently ignored at
+runtime. A user who sets all three fields expecting bounds is misconfigured.
+
+**Recommendation:** Webhook should warn: `"minStep and maxStep are only applied
+to percentage-based steps; they are ignored when step is an absolute quantity"`.
+
+### Unbounded & Extreme Configurations (Medium Severity)
+
+**No `limit` specified**: PVC grows without bound until cloud provider limits or
+budget exhaustion. This is documented behavior but could surprise users.
+
+**Recommendation:** Consider requiring an explicit `limit` or documenting this
+prominently. A very high default (e.g., per-provider limit) could make the
+decision conscious.
+
+**`step > 100%`**: A step of `"200%"` triples the volume on each resize. Not
+validated by the webhook.
+
+**Recommendation:** Webhook should warn for `step > 100%`:
+`"step exceeds 100%; each resize will more than double the volume size"`.
+
+### Overshoot-Then-Cap Scenarios (Low Severity, Safe but Confusing)
+
+**`minStep > limit`**: A small percentage step is clamped up to `minStep`, which
+overshoots the limit; then the result is clamped back down to `limit`. The
+interaction is safe but the user may not understand why `minStep` appears to
+have no effect.
+
+**`minStep > (limit - currentSize)`**: Similar to above. The minimum step
+exceeds the remaining growth room, so limit always caps the result. `minStep`
+is effectively ignored.
+
+**Recommendation:** Document these interactions explicitly in the user guide.
+
+### Trigger Edge Cases (Low Severity)
+
+**`minAvailable > volumeSize`**: On a 1Gi volume with `minAvailable: "5Gi"`,
+the trigger fires immediately on every probe (available space is always < 5Gi).
+The volume resizes on every budget refresh until it exceeds 5Gi.
+
+**Both triggers undefined (`triggers: {}`)**: `usageThreshold` defaults to 80,
+`minAvailable` is disabled. Resize triggers at 80% usage. Users who expect
+"no triggers = never resize" may be surprised.
+
+**Recommendation:** Webhook should warn when `minAvailable > spec.storage.size`.
+
+### WAL Safety Policy Conflicts (Medium Severity)
+
+**`requireArchiveHealthy: true` without backup configured**: If the cluster has
+no backup stanza, there is no WAL archiving. `pg_stat_archiver.last_archived_time`
+is NULL. The health check may incorrectly report archiving as unhealthy, blocking
+all resizes indefinitely.
+
+**Recommendation:** Clarify semantics: if no backup is configured,
+`requireArchiveHealthy` should be a no-op (with warning) or explicitly documented.
+
+**`acknowledgeWALRisk: true` on a dual-volume cluster (with `walStorage`)**: The
+flag is accepted but has no effect — it is only relevant for single-volume clusters
+where data and WAL share a volume. Setting it on a dual-volume cluster is a
+misleading no-op.
+
+**Recommendation:** Webhook should warn: `"acknowledgeWALRisk has no effect when
+walStorage is configured"`.
+
+### Cross-Volume Independence (Documentation Gap)
+
+Users can configure different policies for data vs. WAL storage, including
+different `maxActionsPerDay` values. Each volume has independent rate limiting.
+This is correct per the RFC (cloud provider limits apply per-volume), but may
+surprise users who expect cluster-wide limits.
+
+**Recommendation:** Document this clearly in the user guide.
+
+### Budget Window Observability (UX Improvement)
+
+The 24-hour rolling window for `maxActionsPerDay` is hard to observe. A user
+seeing `budget_remaining: 0` has no easy way to know when the next slot opens
+without manually calculating from `AutoResizeEvents` timestamps.
+
+**Recommendation:** Add a `NextActionAt` timestamp field to the cluster status
+(derived from oldest event in the 24h window + 24h).
+
+### Event History Capping (Design Consideration)
+
+`appendResizeEvent` caps history at 50 events. On clusters with frequent resizes
+across multiple volumes/tablespaces, this history could rotate quickly, losing
+audit data needed for the 24-hour budget window calculation (when the rate
+limiter is made persistent per Phase 2).
+
+**Recommendation:** Ensure the cap (50) is sufficient for worst-case budget
+calculation: `maxActionsPerDay(10) × volumes × 2 days of history`. Consider
+making the cap configurable or sizing it per-volume.
+
+### GitOps Visibility (UX Consideration)
+
+The `acknowledgeWALRisk` webhook rejection is only visible if the user checks
+the admission response. GitOps tools (ArgoCD, Flux) may surface this as a
+generic `"Invalid"` error, and the specific reason (missing WAL risk
+acknowledgment) could be buried. This is a general Kubernetes UX issue, not
+specific to this feature.
+
+**Recommendation:** Ensure the webhook error message is descriptive enough to
+appear in the ArgoCD/Flux sync status. Consider also emitting a Kubernetes
+event on the cluster object for webhook rejections.
+
+### Summary of Validation Recommendations
+
+| Configuration | Current | Recommendation | Severity |
+|---|---|---|---|
+| `limit < currentSize` | Accepted | Warn | High |
+| `maxActionsPerDay: 0` + `enabled: true` | Accepted | Warn | Medium |
+| `usageThreshold: 0` | Accepted (default 80%) | Reject or document | Medium |
+| `step: 0` | Accepted (default 20%) | Reject (see Pre-Merge Issues) | Medium |
+| `step: 20` (integer) | Accepted (20 bytes) | Reject or document | Medium |
+| `step > 100%` | Accepted | Warn | Medium |
+| `minStep`/`maxStep` + absolute step | Accepted (ignored) | Warn | Medium |
+| `minAvailable > volumeSize` | Accepted | Warn | Low |
+| `minStep > limit` | Accepted (cap) | Document | Low |
+| `acknowledgeWALRisk` on dual-volume | Accepted (no-op) | Warn | Low |
+| `requireArchiveHealthy` without backup | Accepted (undefined) | Warn or no-op | Medium |
+
+---
+
 ## Open Questions
 
 1. **Should tablespace auto-resize be included in Phase 1?**

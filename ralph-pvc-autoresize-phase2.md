@@ -312,6 +312,102 @@ If `step: 0` should mean "use default", document this explicitly in
 
 ---
 
+## Phase 5.75: Webhook Validation Warnings (IMPORTANT)
+
+A comprehensive review identified multiple configurations that the webhook
+accepts but lead to surprising or broken runtime behavior. Implement webhook
+warnings for the highest-impact cases.
+
+### Context
+
+The full analysis is in `docs/src/design/pvc-autoresize.md` section
+"Configuration Conflicts & Validation Gaps". The summary table there lists
+all cases by severity.
+
+### Must-Have Validations (implement in this phase)
+
+**1. Reject `usageThreshold: 0`** — same zero-value ambiguity as `step: 0`.
+
+In `internal/webhook/v1/cluster_webhook.go`, `validateResizeTriggers()`:
+```go
+if triggers.UsageThreshold != nil && *triggers.UsageThreshold == 0 {
+    allErrs = append(allErrs, field.Invalid(fldPath.Child("usageThreshold"),
+        *triggers.UsageThreshold,
+        "usageThreshold must be between 1 and 99, not 0"))
+}
+```
+
+**2. Warn when `limit < spec.storage.size`** — silent no-op.
+
+In `validateExpansionPolicy()`:
+```go
+if limit != nil && currentSize != nil && limit.Cmp(*currentSize) < 0 {
+    // Emit warning (not error) — limit could be raised later
+    contextLogger.Warn("expansion.limit is less than current storage size; auto-resize will not trigger",
+        "limit", limit.String(), "currentSize", currentSize.String())
+}
+```
+
+**3. Warn when `minStep`/`maxStep` set with absolute `step`** — silently ignored.
+
+In `validateExpansionPolicy()`:
+```go
+if isAbsoluteStep && (minStep != nil || maxStep != nil) {
+    contextLogger.Warn("minStep and maxStep are only applied to percentage-based steps; ignored for absolute step",
+        "step", step.String())
+}
+```
+
+**4. Warn when `maxActionsPerDay: 0` with `enabled: true`** — effectively disabled.
+
+In `validateResizeStrategy()`:
+```go
+if strategy.MaxActionsPerDay != nil && *strategy.MaxActionsPerDay == 0 {
+    contextLogger.Warn("maxActionsPerDay: 0 effectively disables auto-resize despite enabled: true")
+}
+```
+
+**5. Reject bare integer step values** (e.g., `step: 20` → 20 bytes) — unit ambiguity.
+
+A user writing `step: 20` likely means 20%, but IntOrString integer values are
+parsed as `resource.ParseQuantity("20")` which yields 20 bytes. This is almost
+never the user's intent.
+
+In `validateExpansionStep()`:
+```go
+if stepVal.Type == intstr.Int && stepVal.IntVal > 0 {
+    return field.ErrorList{field.Invalid(fldPath.Child("step"), stepVal,
+        "integer step values are ambiguous; use a percentage string like '20%' or an absolute quantity like '5Gi'")}
+}
+```
+
+### Nice-to-Have Validations (implement if time permits)
+
+6. Warn for `step > 100%` (each resize more than doubles the volume)
+7. Warn when `minAvailable > spec.storage.size` (immediate trigger)
+8. Warn when `acknowledgeWALRisk` set on dual-volume cluster (no-op)
+9. Warn for `requireArchiveHealthy: true` without backup stanza
+
+### Unit Tests
+
+Add tests for each validation to
+`internal/webhook/v1/cluster_webhook_autoresize_conflicts_test.go`:
+
+```go
+It("should reject usageThreshold: 0", func() { ... })
+It("should warn when limit < current size", func() { ... })
+It("should warn when minStep/maxStep set with absolute step", func() { ... })
+It("should warn when maxActionsPerDay is 0", func() { ... })
+```
+
+### Verification
+
+1. `make test` passes
+2. Existing webhook tests still pass (no regressions)
+3. New conflict unit tests pass
+
+---
+
 ## Phase 6: E2E Test Gaps (P0 + P1)
 
 Read `docs/src/design/pvc-autoresize-e2e-requirements.md` in full. Address
@@ -483,6 +579,9 @@ ALL of the following must be true:
 - Metrics: `cnpg_disk_resizes_total`, `cnpg_disk_at_limit`, etc. are populated
 - WAL fail-open emits warning event
 - parseQuantityOrDefault logs on invalid input
+- `step: 0` and `usageThreshold: 0` rejected or documented
+- Webhook warnings for `limit < size`, `minStep`/`maxStep` with absolute step,
+  `maxActionsPerDay: 0`
 - All E2E tests pass on AKS (including stabilized slot test if feasible)
 - REQ-11 (minAvailable) and REQ-12 (AutoResizeEvent) E2E tests added
 - All commits have DCO sign-off

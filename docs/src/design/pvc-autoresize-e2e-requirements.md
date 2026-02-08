@@ -528,11 +528,21 @@ surprised:
 | Config | Behavior | Risk |
 |--------|----------|------|
 | `limit < size` | Reconciler never resizes (newSize ≤ currentSize) | **Silent no-op** — user thinks they have auto-resize but it will never fire. Consider adding a webhook warning. |
+| `maxActionsPerDay: 0` + `enabled: true` | Rate limiter blocks every resize | **Effectively disabled** — contradicts `enabled: true`. |
+| `usageThreshold: 0` | Treated as "use default 80%" | **Zero-value ambiguity** — user may expect "never trigger". |
+| `step: 0` | Treated as "use default 20%" | **Zero-value ambiguity** — user may expect "don't grow". |
+| `step: 20` (integer) | Parsed as 20 bytes via `resource.ParseQuantity` | **Unit ambiguity** — user likely means 20%, gets 20 bytes. |
+| `step: "200%"` | Triples volume on each resize | **Unbounded** — not validated, could cause massive cost. |
 | `step > limit` | Reconciler caps to limit | Safe but wasteful config. |
 | `minStep > limit` | MinStep clamp overshoots, then limit caps | Safe but confusing. |
+| `minStep > (limit - currentSize)` | MinStep exceeds remaining growth room | `minStep` is effectively ignored; limit always wins. |
 | `minStep`/`maxStep` with absolute step | Silently ignored at runtime | User may expect clamping but gets none. |
+| No `limit` specified | PVC grows without bound | Cloud provider limits are the only cap. |
 | `minAvailable > volume size` | Trigger fires immediately and perpetually | Could be intentional (force resize on first probe). |
 | `usageThreshold: 1` | Triggers at 1% usage (nearly always) | Could be intentional. |
+| Both triggers undefined (`triggers: {}`) | Defaults to `usageThreshold: 80` | User may expect "no triggers = never resize". |
+| `requireArchiveHealthy: true` without backup | Archive health check is undefined | May block all resizes if `pg_stat_archiver` is empty. |
+| `acknowledgeWALRisk: true` on dual-volume | Accepted but has no effect | Misleading no-op; only relevant for single-volume. |
 
 ### Semantic conflicts the webhook REJECTS today
 
@@ -545,14 +555,47 @@ surprised:
 
 ### Potential future webhook improvements
 
-These are NOT bugs — the current behavior is safe — but could improve UX:
+These are NOT bugs — the current behavior is safe — but could improve UX.
+Grouped by priority:
 
-1. **Warn when `limit < size`**: The config will never resize. A webhook
+**Should implement before PR (reduces confusion significantly):**
+
+1. **Reject `step: 0`**: Zero step is indistinguishable from "use default"
+   at the IntOrString level. Reject with a clear error. (See ralph Phase 5.5.)
+2. **Reject `usageThreshold: 0`**: Same zero-value ambiguity. Reject or
+   change to use pointer-based nil vs 0 semantics.
+3. **Warn when `limit < size`**: The config will never resize. A webhook
    warning (not rejection) would help users catch misconfiguration.
-2. **Warn when `minStep`/`maxStep` set with absolute step**: These fields
+4. **Warn when `minStep`/`maxStep` set with absolute step**: These fields
    are ignored. A warning would prevent confusion.
-3. **Warn when `maxActionsPerDay: 0`**: This effectively disables resize
+5. **Warn when `maxActionsPerDay: 0`**: This effectively disables resize
    despite `enabled: true`. A warning would help.
+
+**Should implement for UX polish (follow-up):**
+
+6. **Warn for `step > 100%`**: Each resize more than doubles the volume.
+7. **Warn when `minAvailable > spec.storage.size`**: Trigger fires
+   immediately on every probe.
+8. **Warn when `acknowledgeWALRisk` set on dual-volume cluster**: No-op.
+9. **Warn for `requireArchiveHealthy: true` without backup stanza**: May
+   block all resizes with no way to satisfy the condition.
+10. **Reject bare integer step values** (e.g., `step: 20`): These parse as
+    bytes, which is almost never the user's intent.
+
+### Cross-volume independence (documentation gap)
+
+Users can configure different policies for data vs. WAL storage, including
+different `maxActionsPerDay` values. Each volume has independent rate limiting
+(correct per cloud provider per-volume limits). This should be documented
+clearly.
+
+### Event history capping concern
+
+`appendResizeEvent` caps at 50 events. With persistent rate limiting (Phase 2),
+the 24-hour budget window depends on this history. On clusters with frequent
+resizes across multiple volumes, the cap could rotate faster than the 24h window.
+Ensure the cap is sufficient for worst case: `maxActionsPerDay(10) × volumes
+× 2 days`.
 
 ---
 
@@ -621,6 +664,13 @@ fixed before PR submission. See `docs/src/design/pvc-autoresize.md` section
 5. **parseQuantityOrDefault Silent Fallback (IMPORTANT)**: Invalid user
    quantities silently fall back to defaults with no warning.
 
+6. **Webhook Validation Gaps (IMPORTANT)**: Multiple configurations are
+   accepted that lead to surprising runtime behavior. See "Configuration
+   Conflicts" section above and RFC "Configuration Conflicts & Validation
+   Gaps" section for the full list. Priority items: reject `step: 0` and
+   `usageThreshold: 0`, warn on `limit < size`, warn on `minStep`/`maxStep`
+   with absolute step, warn on `maxActionsPerDay: 0`.
+
 ---
 
 ## Priority Summary
@@ -651,8 +701,19 @@ fixed before PR submission. See `docs/src/design/pvc-autoresize.md` section
 - **REQ-14**: MaxStep runtime clamping (webhook tested, runtime not)
 - **REQ-15**: MaxPendingWALFiles explicit test
 - **REQ-16**: Multi-instance resize verification
+- **Webhook warnings**: `limit < size`, `minStep`/`maxStep` with absolute step,
+  `maxActionsPerDay: 0`, `step > 100%`, `acknowledgeWALRisk` on dual-volume
+
+### Should Add Before PR (P1 validation)
+
+- **Reject `step: 0`** and **`usageThreshold: 0`**: Zero-value ambiguity
+- **Reject or warn `step: 20` (bare integer)**: Unit ambiguity (20 bytes ≠ 20%)
+- **Warn `requireArchiveHealthy` without backup**: Undefined semantics
 
 ### Follow-Up (P2)
 
 - REQ-18 through REQ-26: Additional metric assertions, alertOnResize event,
   acknowledgeWALRisk runtime test
+- `NextActionAt` status field for budget window observability
+- Event history cap sizing (ensure 50 is sufficient for persistent rate limiting)
+- Cross-volume rate limit documentation
