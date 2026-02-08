@@ -30,166 +30,99 @@ archiving fail in E2E tests, use a bogus `barmanObjectStore` endpoint.
 
 ---
 
-## Phase 1: Fix Status Persistence Bug (CRITICAL)
+## Phases 1-3: RESOLVED
 
-### The Bug
+Phase 1 (Status Persistence), Phase 2 (Persistent Rate Limiting), and
+Phase 3 (Resize Metrics) have been implemented:
 
-In `internal/controller/cluster_controller.go`, the autoresize reconciler is
-called at line ~815:
+- `cluster_controller.go`: `origCluster.DeepCopy()` → `Reconcile()` →
+  `Status().Patch()` before returning requeue result
+- `GlobalBudgetTracker` removed. Stateless `HasBudget()` derives budget
+  from `cluster.Status.AutoResizeEvents`. `PVCName` field added to events.
+- `ratelimit.go` and `ratelimit_test.go` deleted
+- `deriveDecisionMetrics()` in `disk.go` populates `ResizesTotal`,
+  `ResizeBudgetRemain`, and `AtLimit` from cluster status
+- Reconciler now accepts `record.EventRecorder` and emits K8s events
+  for rate limit blocks and WAL safety blocks
 
+**Remaining metrics gap:** `cnpg_disk_resize_blocked` is still not populated.
+The blocked condition is decided by the operator but the metric lives in the
+instance manager. Address in Phase 3.5 below.
+
+---
+
+## Phase 3.5: Remaining Code Issues from CNPG-Idiomatic Review
+
+### 3.5.1 Aggregate Errors in PVC Loop (Important)
+
+In `reconciler.go`, if 3 out of 5 PVCs fail, the function returns `nil` error.
+
+**Fix:**
 ```go
-if res, err := autoresize.Reconcile(ctx, r.Client, cluster, diskInfoByPod,
-    resources.pvcs.Items); err != nil || !res.IsZero() {
-    return res, err  // <-- EARLY RETURN
-}
-```
-
-When a resize occurs, `Reconcile` returns `ctrl.Result{RequeueAfter: 30s}`.
-The controller returns early, **skipping** `RegisterPhase` (line 866) and any
-status update. `AutoResizeEvents` appended during the resize are LOST.
-
-### The Fix
-
-After `autoresize.Reconcile` returns a non-zero result, patch the cluster
-status before returning. Follow the pattern in `scheduledbackup_controller.go`:
-
-```go
-// Auto-resize PVCs based on disk usage
-origCluster := cluster.DeepCopy()
-diskInfoByPod := buildDiskInfoByPod(instancesStatus)
-if res, err := autoresize.Reconcile(ctx, r.Client, cluster, diskInfoByPod,
-    resources.pvcs.Items); err != nil || !res.IsZero() {
-    // Persist status changes (AutoResizeEvents) even on early return
-    if statusErr := r.Client.Status().Patch(ctx, cluster,
-        client.MergeFrom(origCluster)); statusErr != nil {
-        contextLogger.Error(statusErr, "failed to persist auto-resize status")
+var errs []error
+for idx := range pvcs {
+    pvc := &pvcs[idx]
+    resized, err := reconcilePVC(ctx, c, recorder, cluster, diskInfoByPod, pvc)
+    if err != nil {
+        errs = append(errs, fmt.Errorf("PVC %s: %w", pvc.Name, err))
+        continue
     }
-    return res, err
+    if resized { resizedAny = true }
+}
+if len(errs) > 0 {
+    return ctrl.Result{RequeueAfter: RequeueDelay}, errors.Join(errs...)
 }
 ```
+
+### 3.5.2 Emit Event for "At Expansion Limit" (Important)
+
+Rate limit and WAL safety blocks now emit events. Expansion limit blocks
+do not. Add:
+
+```go
+if currentSize.Cmp(limit) >= 0 {
+    contextLogger.Info("auto-resize blocked: at expansion limit", "pvc", pvc.Name)
+    recorder.Eventf(cluster, corev1.EventTypeWarning, "AutoResizeAtLimit",
+        "Volume %s has reached expansion limit %s", pvc.Name, expansion.Limit)
+    return false, nil
+}
+```
+
+### 3.5.3 Named Constant for Event History Cap (Style)
+
+Replace magic number `50` in `reconciler.go`:
+```go
+const maxAutoResizeEventHistory = 50
+```
+
+### 3.5.4 Log Warning for Invalid minAvailable (Style)
+
+In `triggers.go`, `ShouldResize` silently ignores invalid `minAvailable`:
+```go
+minAvailableQty, err := resource.ParseQuantity(triggers.MinAvailable)
+if err != nil {
+    contextLogger.Warn("invalid minAvailable, using percentage trigger only",
+        "minAvailable", triggers.MinAvailable, "error", err)
+    return usedPercent > float64(usageThreshold)
+}
+```
+
+### 3.5.5 Fix ResizeBlocked Metric (Important)
+
+`cnpg_disk_resize_blocked` is still not populated. To keep it in the instance
+manager, the controller must write a blocked reason to cluster status that the
+instance manager can read. Alternatively, skip this metric for now and document
+it as a follow-up (move to operator metrics endpoint).
+
+### 3.5.6 Use %w for All Error Wrapping (Style)
+
+Grep for `fmt.Errorf.*%v` in the autoresize package and replace with `%w`.
 
 ### Verification
 
 1. `make test` passes
-2. After E2E basic resize test, verify:
-   ```bash
-   kubectl get cluster -n <ns> -o jsonpath='{.status.autoResizeEvents}'
-   ```
-   Must show at least one event with `result: success`.
-
----
-
-## Phase 2: Fix Non-Persistent Rate Limiting (CRITICAL)
-
-### The Bug
-
-`pkg/reconciler/autoresize/ratelimit.go` uses a global in-memory
-`BudgetTracker` (line 54: `var GlobalBudgetTracker = NewBudgetTracker()`).
-If the operator pod restarts, all resize history is lost. A cluster could
-exceed `maxActionsPerDay` immediately after restart.
-
-### The Fix
-
-Derive the budget from `cluster.Status.AutoResizeEvents` instead of the
-in-memory tracker. The reconciler already appends `AutoResizeEvent` structs
-(reconciler.go line ~283) with timestamps and volume info.
-
-**Option A (preferred): Replace GlobalBudgetTracker entirely**
-
-Add a new function that queries the cluster status:
-
-```go
-// HasBudgetFromStatus checks if a volume has remaining resize budget by
-// counting successful AutoResizeEvents in the last 24 hours.
-func HasBudgetFromStatus(cluster *apiv1.Cluster, volumeKey string,
-    maxActionsPerDay int) bool {
-    if maxActionsPerDay <= 0 {
-        return true
-    }
-    cutoff := time.Now().Add(-24 * time.Hour)
-    count := 0
-    for _, event := range cluster.Status.AutoResizeEvents {
-        if event.Timestamp.After(cutoff) &&
-            event.Result == "success" &&
-            matchesVolumeKey(event, volumeKey) {
-            count++
-        }
-    }
-    return count < maxActionsPerDay
-}
-```
-
-Then update `reconcilePVC()` in reconciler.go to call this instead of
-`GlobalBudgetTracker.HasBudget()`.
-
-**Option B: Hydrate the in-memory tracker from status on startup**
-
-If you prefer keeping the in-memory tracker for performance:
-- Add `HydrateFromEvents(events []AutoResizeEvent)` to BudgetTracker
-- Call it at the start of each `Reconcile()` call
-
-**Dependency:** Phase 1 (status persistence) must be done first, or the events
-won't exist in the API server to query.
-
-### Verification
-
-1. `make test` passes (update ratelimit_test.go)
-2. E2E rate-limit test still passes
-3. Manually verify: after a resize, restart the operator pod, check that the
-   budget is correctly reflected from status
-
----
-
-## Phase 3: Implement Resize Metrics (CRITICAL)
-
-### The Bug
-
-Four metrics are registered in `disk.go` but never set:
-- `cnpg_disk_at_limit` (GaugeVec) — defined line 92, never `.Set()`
-- `cnpg_disk_resize_blocked` (GaugeVec) — defined line 97, never `.Set()`
-- `cnpg_disk_resizes_total` (CounterVec) — defined line 102, never `.Inc()`
-- `cnpg_disk_resize_budget_remaining` (GaugeVec) — defined line 107, never `.Set()`
-
-PrometheusRules in `prometheusrule.yaml` reference these. Alerts never fire.
-
-### The Fix
-
-These are **operator-level decisions** (resize happens in the controller), but
-the metrics are registered in the **instance manager's** metric exporter. Two
-approaches:
-
-**Option A (simpler): Set metrics from cluster status in instance manager**
-
-The instance manager already reads disk status from the cluster CR. Add resize
-status fields to `ClusterDiskStatus` (or `VolumeDiskStatus`) that the controller
-sets, then have the instance manager read and export them:
-
-In `api/v1/cluster_types.go`, add to `VolumeDiskStatus`:
-```go
-AtLimit         bool   `json:"atLimit,omitempty"`
-ResizeBlocked   bool   `json:"resizeBlocked,omitempty"`
-BlockReason     string `json:"blockReason,omitempty"`
-BudgetRemaining int    `json:"budgetRemaining,omitempty"`
-ResizeCount     int    `json:"resizeCount,omitempty"`
-```
-
-Then in `disk.go`'s `updateDiskMetrics()`, read these fields and set the gauges.
-
-**Option B (preferred for operator metrics): Add operator-level Prometheus**
-
-Register and set these metrics in the controller manager's existing Prometheus
-endpoint. This is more architecturally correct since the controller makes the
-resize decisions. Look at how other CNPG controller metrics are registered.
-
-### Verification
-
-1. `make test` passes
-2. E2E metrics test: after a resize, verify:
-   ```
-   cnpg_disk_resizes_total{result="success"} > 0
-   cnpg_disk_resize_budget_remaining >= 0
-   ```
-3. E2E archive-block test: verify `cnpg_disk_resize_blocked == 1`
+2. `make lint` passes
+3. `make vet` passes
 
 ---
 
@@ -573,17 +506,30 @@ COMMITEOF
 ## Completion Criteria
 
 ALL of the following must be true:
+
+### Build & Test
 - `make generate && make manifests && make fmt && make lint && make test` exit 0
-- Status persistence: AutoResizeEvents are persisted after resize
-- Rate limiting: Budget is durable across operator restarts
-- Metrics: `cnpg_disk_resizes_total`, `cnpg_disk_at_limit`, etc. are populated
+- All E2E tests pass on AKS (including stabilized slot test if feasible)
+- All commits have DCO sign-off
+
+### Critical Bugs (RESOLVED)
+- ~~Status persistence: AutoResizeEvents are persisted after resize~~ ✅
+- ~~Rate limiting: Budget is durable across operator restarts~~ ✅
+- ~~Metrics: `cnpg_disk_resizes_total`, `cnpg_disk_at_limit` populated~~ ✅
+
+### Remaining Code Fixes
+- Error aggregation in PVC loop (`errors.Join`)
+- Event for "at expansion limit"
+- Named constant for event history cap (50)
 - WAL fail-open emits warning event
 - parseQuantityOrDefault logs on invalid input
 - `step: 0` and `usageThreshold: 0` rejected or documented
 - Webhook warnings for `limit < size`, `minStep`/`maxStep` with absolute step,
   `maxActionsPerDay: 0`
-- All E2E tests pass on AKS (including stabilized slot test if feasible)
+
+### E2E Test Gaps
 - REQ-11 (minAvailable) and REQ-12 (AutoResizeEvent) E2E tests added
-- All commits have DCO sign-off
+- REQ-14 (maxStep runtime clamping) E2E test added
+- REQ-16 (multi-instance resize verification) assertions added
 
 When ALL criteria are met, output: <promise>COMPLETE</promise>

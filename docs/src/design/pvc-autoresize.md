@@ -977,60 +977,87 @@ However, directory-based provisioners like [local-path-provisioner](https://gith
 The following issues were identified during internal review and must be resolved
 before submitting for upstream review.
 
-### Status Persistence Bug (Critical)
+### Status Persistence Bug — RESOLVED
 
-`autoresize.Reconcile()` is called from the main reconciliation loop in
-`cluster_controller.go`. When a resize occurs, `Reconcile` returns a non-zero
-`ctrl.Result{RequeueAfter: ...}`, which causes the controller to return early
-at line 822 — **before `RegisterPhase` and any status patch/update occurs**.
+`autoresize.Reconcile()` returned early from the controller loop, skipping
+status updates. **Fixed:** `cluster_controller.go` now calls
+`Status().Patch(ctx, cluster, client.MergeFrom(origCluster))` after
+`autoresize.Reconcile` returns, ensuring `AutoResizeEvents` are persisted.
 
-This means `AutoResizeEvents` appended to `cluster.Status.AutoResizeEvents`
-during the resize are **never persisted** to the Kubernetes API server. They
-exist only in the in-memory cluster object for that reconciliation cycle.
+### Non-Persistent Rate Limiting — RESOLVED
 
-**Fix:** After `autoresize.Reconcile` returns a non-zero result, patch
-`cluster.Status` before returning. Follow the pattern used by
-`scheduledbackup_controller.go:202` which calls `cli.Status().Patch()`.
+`GlobalBudgetTracker` was an in-memory map lost on restart. **Fixed:** Replaced
+with stateless `HasBudget()` that derives budget from persisted
+`cluster.Status.AutoResizeEvents`. `ratelimit.go` and `ratelimit_test.go`
+deleted. `PVCName` field added to `AutoResizeEvent`.
 
-### Non-Persistent Rate Limiting (Critical)
+### Resize Metrics — RESOLVED
 
-The `GlobalBudgetTracker` in `pkg/reconciler/autoresize/ratelimit.go` is an
-in-memory `map[string][]time.Time`. If the operator pod restarts, all resize
-history is lost. A cluster could exceed `maxActionsPerDay` immediately after
-restart because the operator has no memory of recent resizes.
+Four metrics were registered but never populated. **Fixed:**
+`deriveDecisionMetrics()` in `disk.go` now populates `ResizesTotal`,
+`ResizeBudgetRemain`, and `AtLimit` from cluster status history. Metrics are
+derived in the instance manager from cluster status (approach #2).
 
-**Fix:** Derive the budget from `cluster.Status.AutoResizeEvents` instead of
-the in-memory tracker. Filter events by volume key and timestamp (last 24h) to
-compute remaining budget. This makes rate limiting durable across restarts and
-consistent across operator replicas. The `GlobalBudgetTracker` can be removed
-or kept as a fast-path cache that is hydrated from status on startup.
+**Note:** `cnpg_disk_resize_blocked` is still not populated (the blocked
+metric requires operator-side tracking, not instance-manager-side). See
+"Remaining Issues" below.
 
-**Dependency:** The status persistence bug (above) must be fixed first, or the
-events used to compute budget will not exist in the API server.
+### Remaining Issues (from CNPG-idiomatic code review)
 
-### Resize Metrics Defined but Never Set (Critical)
+#### Swallowed Errors in PVC Loop (Important)
 
-Four operator-level metrics are registered in
-`pkg/management/postgres/webserver/metricserver/disk.go` but never populated:
+In `reconciler.go:78-80`, if 3 out of 5 PVCs fail to resize, the function
+returns `nil` error. The caller has no visibility into partial failures.
 
-- `cnpg_disk_at_limit` — never `.Set()`
-- `cnpg_disk_resize_blocked` — never `.Set()`
-- `cnpg_disk_resizes_total` — never `.Inc()`
-- `cnpg_disk_resize_budget_remaining` — never `.Set()`
+**Fix:** Aggregate errors with `errors.Join`:
+```go
+var errs []error
+for idx := range pvcs {
+    if err != nil {
+        errs = append(errs, fmt.Errorf("PVC %s: %w", pvc.Name, err))
+        continue
+    }
+}
+if len(errs) > 0 {
+    return ctrl.Result{RequeueAfter: RequeueDelay}, errors.Join(errs...)
+}
+```
 
-These metrics are referenced in the user documentation
-(`docs/src/storage_autoresize.md`), PrometheusRules
-(`docs/src/samples/monitoring/prometheusrule.yaml`), and the troubleshooting
-guide. Alerts based on these metrics will never fire.
+#### Missing Event for "At Expansion Limit" (Important)
 
-**Fix:** These are operator-level metrics (resize decisions happen in the
-controller, not the instance manager). Two approaches:
+Rate limit and WAL safety blocks emit events, but hitting the expansion limit
+does not. This is an important operational signal.
 
-1. **Preferred:** Move these metrics to the operator's own Prometheus exporter
-   and set them in `autoresize.Reconcile()` after each resize decision.
-2. **Alternative:** Expose the resize status via `cluster.Status` fields and
-   have the instance manager read and export them. This is less direct but
-   keeps all metrics in one exporter.
+**Fix:** Add `recorder.Eventf(cluster, corev1.EventTypeWarning, "AutoResizeAtLimit",
+"Volume %s has reached expansion limit %s", pvc.Name, expansion.Limit)`.
+
+#### Magic Number for Event History Cap (Style)
+
+`reconciler.go:295` uses a bare `50` for the event history cap.
+
+**Fix:** Use a named constant: `const maxAutoResizeEventHistory = 50`.
+
+#### ShouldResize Swallows Parse Error (Style)
+
+In `triggers.go:47-51`, an invalid `minAvailable` value is silently ignored
+and the function falls back to percentage-only evaluation.
+
+**Fix:** Log a warning when `minAvailable` fails to parse. The webhook should
+also validate this (belt-and-suspenders).
+
+#### Metric Ownership Consideration (Design)
+
+The current implementation derives logical metrics (resizes_total, budget)
+in the instance manager from cluster status. The CNPG-idiomatic approach
+separates concerns: Pod = raw disk data, Operator = decision metrics. Consider
+moving resize_blocked, resizes_total, and budget_remaining to the operator's
+metrics endpoint in a follow-up.
+
+#### Structured Error Wrapping (Style)
+
+Some error paths use `%v` instead of `%w` for error wrapping. All
+`fmt.Errorf` calls should use `%w` to preserve error chains for
+`errors.Is`/`errors.As` usage.
 
 ### WAL Safety Fail-Open Without Warning (Important)
 

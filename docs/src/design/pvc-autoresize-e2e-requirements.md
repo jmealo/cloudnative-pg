@@ -645,18 +645,15 @@ The following critical issues were found during internal review. These must be
 fixed before PR submission. See `docs/src/design/pvc-autoresize.md` section
 "Pre-Merge Implementation Issues" and the ralph prompt for detailed fix plans.
 
-1. **Status Persistence Bug (CRITICAL)**: `autoresize.Reconcile` returns early
-   from the controller loop, skipping status update. `AutoResizeEvents` are
-   never persisted. Rate limiting (which depends on events) is broken.
+1. ~~**Status Persistence Bug (CRITICAL)**~~ — **RESOLVED**: `cluster_controller.go`
+   now calls `Status().Patch()` after `autoresize.Reconcile` returns.
 
-2. **Non-Persistent Rate Limiting (CRITICAL)**: `GlobalBudgetTracker` is
-   in-memory. Budget is lost on operator restart. Must derive from persisted
-   `AutoResizeEvents` instead.
+2. ~~**Non-Persistent Rate Limiting (CRITICAL)**~~ — **RESOLVED**: `GlobalBudgetTracker`
+   removed. New stateless `HasBudget()` derives budget from persisted status.
 
-3. **Resize Metrics Never Set (CRITICAL)**: `cnpg_disk_at_limit`,
-   `cnpg_disk_resize_blocked`, `cnpg_disk_resizes_total`, and
-   `cnpg_disk_resize_budget_remaining` are registered but never populated.
-   PrometheusRules referencing them will never fire.
+3. ~~**Resize Metrics Never Set (CRITICAL)**~~ — **PARTIALLY RESOLVED**: `ResizesTotal`,
+   `ResizeBudgetRemain`, and `AtLimit` are now populated. `ResizeBlocked` is
+   still not set (requires operator-side tracking).
 
 4. **WAL Safety Fail-Open Without Warning (IMPORTANT)**: When `walHealth` is
    nil, resize proceeds without emitting any event or log warning.
@@ -667,9 +664,18 @@ fixed before PR submission. See `docs/src/design/pvc-autoresize.md` section
 6. **Webhook Validation Gaps (IMPORTANT)**: Multiple configurations are
    accepted that lead to surprising runtime behavior. See "Configuration
    Conflicts" section above and RFC "Configuration Conflicts & Validation
-   Gaps" section for the full list. Priority items: reject `step: 0` and
-   `usageThreshold: 0`, warn on `limit < size`, warn on `minStep`/`maxStep`
-   with absolute step, warn on `maxActionsPerDay: 0`.
+   Gaps" section for the full list.
+
+7. **Swallowed Errors in PVC Loop (IMPORTANT)**: Partial PVC resize failures
+   return `nil` error. Caller has no visibility. Fix with `errors.Join`.
+
+8. **Missing Event for "At Expansion Limit" (IMPORTANT)**: Expansion limit
+   blocks don't emit a Kubernetes event, unlike rate limit and WAL blocks.
+
+9. **Magic Number 50 for Event Cap (STYLE)**: Should be a named constant.
+
+10. **ShouldResize Swallows Parse Error (STYLE)**: Invalid `minAvailable`
+    silently falls back to percentage-only evaluation.
 
 ---
 
@@ -684,10 +690,13 @@ fixed before PR submission. See `docs/src/design/pvc-autoresize.md` section
 - **REQ-07**: Inactive slot blocks resize — E2E test is `PIt()` (flaky
   detection). Unit tests cover the blocking logic. See "Known Issue" above.
 
-### Must Fix Before PR (code bugs)
+### Must Fix Before PR (code bugs — 3 of 5 RESOLVED)
 
-- Status persistence, rate limit durability, and metrics implementation —
-  these are code bugs, not test gaps. See "Implementation Issues" above.
+- ~~Status persistence~~ — RESOLVED
+- ~~Rate limit durability~~ — RESOLVED
+- ~~Metrics implementation~~ — PARTIALLY RESOLVED (ResizeBlocked still needed)
+- Swallowed errors in PVC loop — needs `errors.Join`
+- Missing event for "at expansion limit" — needs `recorder.Eventf`
 
 ### Must Add Before PR (P0 test gaps)
 
