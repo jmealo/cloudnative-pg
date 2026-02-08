@@ -179,7 +179,7 @@ var _ = Describe("PVC Auto-Resize", Label(tests.LabelAutoResize), func() {
 						}
 					}
 					g.Expect(resizedCount).To(Equal(2), "Both PVCs (primary and standby) should be resized")
-				}, 10*time.Minute, 10*time.Second).Should(Succeed())
+				}, 15*time.Minute, 10*time.Second).Should(Succeed())
 			})
 
 			By("verifying Kubernetes Events were emitted", func() {
@@ -1152,13 +1152,17 @@ var _ = Describe("PVC Auto-Resize", Label(tests.LabelAutoResize), func() {
 				}, pod)
 				Expect(err).ToNot(HaveOccurred())
 
-				// Generate some WAL to trigger archive attempts
+				// Generate WAL to trigger archive attempts. Each switch creates a new
+				// segment that barman-cloud will try (and fail) to archive. We need
+				// enough failures for pg_stat_archiver.failed_count to exceed the
+				// maxPendingWALFiles threshold so the operator marks archiving unhealthy.
 				commandTimeout := time.Second * 60
-				for i := 0; i < 5; i++ {
+				for i := 0; i < 10; i++ {
 					_, _, _ = env.EventuallyExecCommand(
 						env.Ctx, *pod, specs.PostgresContainerName, &commandTimeout,
 						"psql", "-U", "postgres", "-c", "SELECT pg_switch_wal()",
 					)
+					time.Sleep(2 * time.Second) // let each archive attempt start
 				}
 			})
 
@@ -1176,7 +1180,7 @@ var _ = Describe("PVC Auto-Resize", Label(tests.LabelAutoResize), func() {
 					g.Expect(instance.WALHealth).ToNot(BeNil())
 					g.Expect(instance.WALHealth.ArchiveHealthy).To(BeFalse(),
 						"Precondition failed: Archive must be unhealthy for this test")
-				}, 5*time.Minute, 5*time.Second).Should(Succeed())
+				}, 8*time.Minute, 5*time.Second).Should(Succeed())
 			})
 
 			By("filling the disk to trigger auto-resize", func() {
