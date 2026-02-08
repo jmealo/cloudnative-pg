@@ -2688,6 +2688,10 @@ type AutoResizeEvent struct {
 	// +optional
 	InstanceName string `json:"instanceName,omitempty"`
 
+	// PVCName is the name of the PVC that was resized.
+	// +optional
+	PVCName string `json:"pvcName,omitempty"`
+
 	// VolumeType is the type of volume that was resized (data/wal/tablespace).
 	// +optional
 	VolumeType string `json:"volumeType,omitempty"`

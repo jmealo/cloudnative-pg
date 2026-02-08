@@ -44,6 +44,9 @@ const (
 	// did not have acknowledgeWALRisk set.
 	WALSafetyBlockSingleVolumeNoAck WALSafetyBlockReason = "single_volume_no_ack"
 
+	// WALSafetyBlockHealthUnavailable indicates WAL health data was unavailable.
+	WALSafetyBlockHealthUnavailable WALSafetyBlockReason = "wal_health_unavailable"
+
 	// DefaultMaxPendingWALFiles is the default maximum number of pending WAL files before blocking resize.
 	DefaultMaxPendingWALFiles = 100
 )
@@ -96,8 +99,13 @@ func EvaluateWALSafety(
 	}
 
 	// If no WAL health data is available, allow the resize (fail-open for health data)
+	// We set a reason so the caller can emit a warning event.
 	if walHealth == nil {
-		return WALSafetyResult{Allowed: true}
+		return WALSafetyResult{
+			Allowed:      true,
+			BlockReason:  WALSafetyBlockHealthUnavailable,
+			BlockMessage: "WAL health data unavailable, proceeding with fail-open resize",
+		}
 	}
 
 	// If no WAL safety policy is configured, use defaults

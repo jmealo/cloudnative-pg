@@ -195,7 +195,7 @@ var _ = Describe("WAL Health Checker", func() {
 			Expect(status.InactiveSlots).To(BeNil())
 		})
 
-		It("should handle ready WAL count errors gracefully", func() {
+		It("should return error when ready WAL count fails", func() {
 			db, mock, err := sqlmock.New()
 			Expect(err).NotTo(HaveOccurred())
 			defer func() { _ = db.Close() }()
@@ -210,8 +210,11 @@ var _ = Describe("WAL Health Checker", func() {
 			})
 
 			status, err := checker.Check(db, false)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(status.PendingWALFiles).To(Equal(0))
+			// When any check fails, the health check returns an incomplete error.
+			// Callers (like autoresize) should fail-open when status is nil.
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("incomplete"))
+			Expect(status).To(BeNil())
 		})
 	})
 })

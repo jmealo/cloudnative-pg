@@ -2513,6 +2513,7 @@ func (v *ClusterCustomValidator) getAdmissionWarnings(r *apiv1.Cluster) admissio
 	list = append(list, getInTreeBarmanWarnings(r)...)
 	list = append(list, getRetentionPolicyWarnings(r)...)
 	list = append(list, getStorageWarnings(r)...)
+	list = append(list, getAutoResizeWarnings(r)...)
 	list = append(list, getSharedBuffersWarnings(r)...)
 	list = append(list, getMonitoringFieldsWarnings(r)...)
 	return append(list, getDeprecatedMonitoringFieldsWarnings(r)...)
@@ -2578,6 +2579,139 @@ func getStorageWarnings(r *apiv1.Cluster) admission.Warnings {
 
 	walStoragePath := *field.NewPath("spec", "walStorage")
 	return append(result, generateWarningsFunc(walStoragePath, r.Spec.WalStorage)...)
+}
+
+func getAutoResizeWarnings(r *apiv1.Cluster) admission.Warnings {
+	var result admission.Warnings
+
+	storagePath := *field.NewPath("spec", "storage")
+	isSingleVolume := !r.ShouldCreateWalArchiveVolume()
+	result = append(result, getAutoResizeWarningsForStorage(
+		storagePath, &r.Spec.StorageConfiguration, r, isSingleVolume)...)
+
+	if r.Spec.WalStorage != nil {
+		walStoragePath := *field.NewPath("spec", "walStorage")
+		result = append(result, getAutoResizeWarningsForStorage(walStoragePath, r.Spec.WalStorage, r, false)...)
+	}
+
+	for idx, tbs := range r.Spec.Tablespaces {
+		tbsPath := field.NewPath("spec", "tablespaces").Index(idx).Child("storage")
+		result = append(result, getAutoResizeWarningsForStorage(*tbsPath, &tbs.Storage, r, false)...)
+	}
+
+	return result
+}
+
+//nolint:gocognit // complexity is inherent to checking multiple warning conditions
+func getAutoResizeWarningsForStorage(
+	path field.Path,
+	configuration *apiv1.StorageConfiguration,
+	cluster *apiv1.Cluster,
+	isSingleVolume bool,
+) admission.Warnings {
+	if configuration == nil || configuration.Resize == nil || !configuration.Resize.Enabled {
+		return nil
+	}
+
+	var warnings admission.Warnings
+
+	resize := configuration.Resize
+	sizeQty, sizeKnown := getConfiguredStorageSize(configuration)
+
+	// maxActionsPerDay: 0 effectively disables resize
+	if resize.Strategy != nil && resize.Strategy.MaxActionsPerDay == 0 {
+		warnings = append(warnings, fmt.Sprintf(
+			"%s is set to 0; this effectively disables auto-resize for this volume",
+			path.Child("resize", "strategy", "maxActionsPerDay").String(),
+		))
+	}
+
+	// minAvailable > size
+	if sizeKnown && resize.Triggers != nil && resize.Triggers.MinAvailable != "" {
+		minAvail, err := resource.ParseQuantity(resize.Triggers.MinAvailable)
+		if err == nil && minAvail.Cmp(*sizeQty) > 0 {
+			warnings = append(warnings, fmt.Sprintf(
+				"%s is greater than the configured volume size (%s); resize will trigger immediately",
+				path.Child("resize", "triggers", "minAvailable").String(),
+				sizeQty.String(),
+			))
+		}
+	}
+
+	// limit <= size
+	if sizeKnown && resize.Expansion != nil && resize.Expansion.Limit != "" {
+		limit, err := resource.ParseQuantity(resize.Expansion.Limit)
+		if err == nil && limit.Cmp(*sizeQty) <= 0 {
+			warnings = append(warnings, fmt.Sprintf(
+				"%s is less than or equal to the configured volume size (%s); auto-resize will never increase this volume",
+				path.Child("resize", "expansion", "limit").String(),
+				sizeQty.String(),
+			))
+		}
+	}
+
+	// minStep/maxStep with absolute step
+	if resize.Expansion != nil {
+		stepStr := resize.Expansion.Step.StrVal
+		if stepStr != "" && !strings.HasSuffix(stepStr, "%") {
+			if resize.Expansion.MinStep != "" || resize.Expansion.MaxStep != "" {
+				warnings = append(warnings, fmt.Sprintf(
+					"%s is an absolute quantity; %s and %s apply only to percentage-based steps and will be ignored",
+					path.Child("resize", "expansion", "step").String(),
+					path.Child("resize", "expansion", "minStep").String(),
+					path.Child("resize", "expansion", "maxStep").String(),
+				))
+			}
+		}
+	}
+
+	// WAL safety warnings
+	if resize.Strategy != nil && resize.Strategy.WALSafetyPolicy != nil {
+		policy := resize.Strategy.WALSafetyPolicy
+		if !isSingleVolume && policy.AcknowledgeWALRisk {
+			warnings = append(warnings, fmt.Sprintf(
+				"%s has no effect when a separate WAL volume is configured",
+				path.Child("resize", "strategy", "walSafetyPolicy", "acknowledgeWALRisk").String(),
+			))
+		}
+
+		requireArchiveHealthy := true
+		if policy.RequireArchiveHealthy != nil {
+			requireArchiveHealthy = *policy.RequireArchiveHealthy
+		}
+		noBackup := cluster.Spec.Backup == nil || cluster.Spec.Backup.BarmanObjectStore == nil
+		if requireArchiveHealthy && noBackup {
+			warnings = append(warnings, fmt.Sprintf(
+				"%s is enabled but no backup configuration is present; "+
+					"archive health will remain \"healthy\" even without archiving",
+				path.Child("resize", "strategy", "walSafetyPolicy", "requireArchiveHealthy").String(),
+			))
+		}
+	}
+
+	return warnings
+}
+
+func getConfiguredStorageSize(configuration *apiv1.StorageConfiguration) (*resource.Quantity, bool) {
+	if configuration == nil {
+		return nil, false
+	}
+
+	if configuration.Size != "" {
+		sizeQty, err := resource.ParseQuantity(configuration.Size)
+		if err == nil {
+			return &sizeQty, true
+		}
+	}
+
+	if configuration.PersistentVolumeClaimTemplate != nil {
+		requested := configuration.PersistentVolumeClaimTemplate.Resources.Requests[corev1.ResourceStorage]
+		if !requested.IsZero() {
+			return &requested, true
+		}
+	}
+
+	return nil, false
 }
 
 func getInTreeBarmanWarnings(r *apiv1.Cluster) admission.Warnings {
@@ -3079,11 +3213,20 @@ func validateWALSafetyPolicy(
 func validateExpansionStep(structPath field.Path, stepVal intstr.IntOrString) field.ErrorList {
 	var result field.ErrorList
 
-	if stepVal.StrVal == "" {
-		return result
+	if stepVal.Type == intstr.Int {
+		if stepVal.IntVal == 0 {
+			return result
+		}
+		return field.ErrorList{
+			field.Invalid(structPath.Child("step"), stepVal.IntVal,
+				"step must be a string quantity (e.g., '10Gi') or a percentage (e.g., '20%'), not an integer"),
+		}
 	}
 
 	stepStr := stepVal.StrVal
+	if stepStr == "" {
+		return result
+	}
 	if strings.HasSuffix(stepStr, "%") {
 		// Percentage validation
 		percentStr := strings.TrimSuffix(stepStr, "%")

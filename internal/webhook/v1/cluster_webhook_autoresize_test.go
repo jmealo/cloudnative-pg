@@ -266,6 +266,30 @@ var _ = Describe("auto-resize validation", func() {
 			Expect(errs[0].Field).To(ContainSubstring("step"))
 		})
 
+		It("should reject integer step values", func() {
+			cluster := &apiv1.Cluster{
+				Spec: apiv1.ClusterSpec{
+					StorageConfiguration: apiv1.StorageConfiguration{
+						Size: "10Gi",
+						Resize: &apiv1.ResizeConfiguration{
+							Enabled: true,
+							Expansion: &apiv1.ExpansionPolicy{
+								Step: intstr.FromInt(20),
+							},
+							Strategy: &apiv1.ResizeStrategy{
+								WALSafetyPolicy: &apiv1.WALSafetyPolicy{
+									AcknowledgeWALRisk: true,
+								},
+							},
+						},
+					},
+				},
+			}
+			errs := v.validateAutoResize(cluster)
+			Expect(errs).To(HaveLen(1))
+			Expect(errs[0].Field).To(ContainSubstring("step"))
+		})
+
 		It("should reject invalid limit", func() {
 			cluster := &apiv1.Cluster{
 				Spec: apiv1.ClusterSpec{

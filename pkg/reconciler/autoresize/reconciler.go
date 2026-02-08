@@ -21,6 +21,7 @@ package autoresize
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -28,6 +29,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -42,16 +44,16 @@ const (
 	RequeueDelay = 30 * time.Second
 
 	// MonitoringInterval is the interval for routine disk usage monitoring
-	// when auto-resize is enabled but no action was taken. This ensures we
-	// detect disk fills that happen asynchronously.
+	// when auto-resize is enabled but no action was taken.
 	MonitoringInterval = 30 * time.Second
 
 	// DefaultMaxActionsPerDay is the default rate limit for resize operations.
 	DefaultMaxActionsPerDay = 3
-)
 
-// GlobalBudgetTracker is the shared budget tracker across reconciliation cycles.
-var GlobalBudgetTracker = NewBudgetTracker()
+	// maxAutoResizeEventHistory is the maximum number of auto-resize events to retain in status.
+	// This must be sufficient to cover the rate limit budget window (24 hours × maxActionsPerDay).
+	maxAutoResizeEventHistory = 50
+)
 
 // InstanceDiskInfo holds the disk status info extracted from an instance's PostgresqlStatus.
 type InstanceDiskInfo struct {
@@ -59,50 +61,29 @@ type InstanceDiskInfo struct {
 	WALHealthStatus *postgres.WALHealthStatus
 }
 
-// Reconcile evaluates all PVCs in the cluster for auto-resize eligibility
-// and performs PVC patching when conditions are met.
-// Decision flow: trigger check -> budget check -> limit check -> WAL safety -> clamp -> patch PVC -> event.
+// Reconcile evaluates all PVCs in the cluster for auto-resize eligibility.
 func Reconcile(
 	ctx context.Context,
 	c client.Client,
+	recorder record.EventRecorder,
 	cluster *apiv1.Cluster,
 	diskInfoByPod map[string]*InstanceDiskInfo,
 	pvcs []corev1.PersistentVolumeClaim,
 ) (ctrl.Result, error) {
 	contextLogger := log.FromContext(ctx).WithName("autoresize")
 
-	// Check if any storage has resize enabled
 	if !IsAutoResizeEnabled(cluster) {
 		return ctrl.Result{}, nil
 	}
 
-	contextLogger.Debug("auto-resize reconciler running",
-		"pvcCount", len(pvcs),
-		"diskInfoPodCount", len(diskInfoByPod))
-
-	// Log disk info for debugging
-	for podName, info := range diskInfoByPod {
-		if info != nil && info.DiskStatus != nil && info.DiskStatus.DataVolume != nil {
-			contextLogger.Debug("pod disk status",
-				"pod", podName,
-				"percentUsed", info.DiskStatus.DataVolume.PercentUsed,
-				"availableBytes", info.DiskStatus.DataVolume.AvailableBytes)
-		} else {
-			contextLogger.Debug("pod disk status missing",
-				"pod", podName,
-				"hasInfo", info != nil,
-				"hasDiskStatus", info != nil && info.DiskStatus != nil)
-		}
-	}
-
 	var resizedAny bool
-
+	var errs []error
 	for idx := range pvcs {
 		pvc := &pvcs[idx]
-		resized, err := reconcilePVC(ctx, c, cluster, diskInfoByPod, pvc)
+		resized, err := reconcilePVC(ctx, c, recorder, cluster, diskInfoByPod, pvc)
 		if err != nil {
-			contextLogger.Error(err, "failed to auto-resize PVC",
-				"pvcName", pvc.Name)
+			contextLogger.Error(err, "failed to auto-resize PVC", "pvcName", pvc.Name)
+			errs = append(errs, fmt.Errorf("PVC %s: %w", pvc.Name, err))
 			continue
 		}
 		if resized {
@@ -110,26 +91,172 @@ func Reconcile(
 		}
 	}
 
-	// When a resize was performed, request a requeue after a short delay to
-	// verify the resize completed successfully.
-	//
-	// IMPORTANT: We do NOT return MonitoringInterval here, even when diskInfoByPod
-	// has entries. Returning non-zero at this point in the cluster_controller.go
-	// reconciliation (line 815) would cause an early return BEFORE reconcilePods
-	// and RegisterPhase, preventing the cluster from ever reaching healthy status.
-	//
-	// Instead, we rely on the cluster controller to manage the monitoring requeue
-	// at the end of its reconciliation loop, after the cluster is healthy.
+	// If any PVC had errors, aggregate and return them.
+	// We still requeue to retry and to ensure any successful resizes are persisted.
+	if len(errs) > 0 {
+		return ctrl.Result{RequeueAfter: RequeueDelay}, errors.Join(errs...)
+	}
+
 	if resizedAny {
+		// We successfully patched one or more PVCs. We MUST ensure the cluster status
+		// update is saved by the controller before returning this requeue.
 		return ctrl.Result{RequeueAfter: RequeueDelay}, nil
 	}
 
 	return ctrl.Result{}, nil
 }
 
+// HasBudget calculates remaining budget from status history (Stateless/Restart-proof)
+func HasBudget(cluster *apiv1.Cluster, pvcName string, maxActions int) bool {
+	if maxActions <= 0 {
+		return false
+	}
+	cutoff := time.Now().Add(-24 * time.Hour)
+	count := 0
+	for _, event := range cluster.Status.AutoResizeEvents {
+		if event.PVCName == pvcName && event.Timestamp.After(cutoff) {
+			count++
+		}
+	}
+	return count < maxActions
+}
+
+func reconcilePVC(
+	ctx context.Context,
+	c client.Client,
+	recorder record.EventRecorder,
+	cluster *apiv1.Cluster,
+	diskInfoByPod map[string]*InstanceDiskInfo,
+	pvc *corev1.PersistentVolumeClaim,
+) (bool, error) {
+	contextLogger := log.FromContext(ctx)
+
+	pvcRole := pvc.Labels[utils.PvcRoleLabelName]
+	resizeConfig := getResizeConfigForPVC(cluster, pvc)
+	if resizeConfig == nil || !resizeConfig.Enabled {
+		return false, nil
+	}
+
+	podName := pvc.Labels[utils.InstanceNameLabelName]
+	diskInfo, ok := diskInfoByPod[podName]
+	if !ok || diskInfo == nil || diskInfo.DiskStatus == nil {
+		return false, nil
+	}
+
+	volumeStats := getVolumeStatsForPVC(diskInfo.DiskStatus, pvcRole, pvc)
+	if volumeStats == nil {
+		return false, nil
+	}
+
+	triggers := resizeConfig.Triggers
+	if triggers == nil {
+		triggers = &apiv1.ResizeTriggers{UsageThreshold: 80}
+	}
+
+	//nolint:gosec // G115 - disk sizes cannot exceed MaxInt64 (8 exabytes)
+	if !ShouldResize(volumeStats.PercentUsed, int64(volumeStats.AvailableBytes), triggers) {
+		return false, nil
+	}
+
+	// Rate limiting - derived from persisted status
+	maxActions := DefaultMaxActionsPerDay
+	if resizeConfig.Strategy != nil {
+		if resizeConfig.Strategy.MaxActionsPerDay == 0 {
+			maxActions = 0
+		} else if resizeConfig.Strategy.MaxActionsPerDay > 0 {
+			maxActions = resizeConfig.Strategy.MaxActionsPerDay
+		}
+	}
+
+	if !HasBudget(cluster, pvc.Name, maxActions) {
+		contextLogger.Info("auto-resize blocked: rate limit exceeded", "pvc", pvc.Name)
+		recorder.Eventf(cluster, corev1.EventTypeWarning, "AutoResizeBlocked",
+			"Rate limit exceeded for volume %s", pvc.Name)
+		return false, nil
+	}
+
+	expansion := resizeConfig.Expansion
+	if expansion == nil {
+		expansion = &apiv1.ExpansionPolicy{}
+	}
+
+	currentSize := pvc.Spec.Resources.Requests[corev1.ResourceStorage]
+	if expansion.Limit != "" {
+		limit, err := resource.ParseQuantity(expansion.Limit)
+		if err != nil {
+			return false, fmt.Errorf("invalid expansion limit %q: %w", expansion.Limit, err)
+		}
+		if currentSize.Cmp(limit) >= 0 {
+			contextLogger.Info("auto-resize blocked: at expansion limit", "pvc", pvc.Name)
+			recorder.Eventf(cluster, corev1.EventTypeWarning, "AutoResizeBlocked",
+				"Expansion limit reached for volume %s", pvc.Name)
+			return false, nil
+		}
+	}
+
+	isSingleVolume := !cluster.ShouldCreateWalArchiveVolume()
+	var walSafety *apiv1.WALSafetyPolicy
+	if resizeConfig.Strategy != nil {
+		walSafety = resizeConfig.Strategy.WALSafetyPolicy
+	}
+
+	walSafetyResult := EvaluateWALSafety(pvcRole, isSingleVolume, walSafety, diskInfo.WALHealthStatus)
+	if walSafetyResult.Allowed && walSafetyResult.BlockReason == WALSafetyBlockHealthUnavailable {
+		recorder.Event(cluster, corev1.EventTypeWarning, "AutoResizeWALHealthUnknown", walSafetyResult.BlockMessage)
+	}
+	if !walSafetyResult.Allowed {
+		recorder.Event(cluster, corev1.EventTypeWarning, "AutoResizeBlocked", walSafetyResult.BlockMessage)
+		return false, nil
+	}
+
+	newSize, err := CalculateNewSize(currentSize, expansion)
+	if err != nil {
+		return false, fmt.Errorf("failed to calculate new size: %w", err)
+	}
+
+	if newSize.Cmp(currentSize) <= 0 {
+		return false, nil
+	}
+
+	contextLogger.Info("auto-resizing PVC", "pvc", pvc.Name, "from", currentSize.String(), "to", newSize.String())
+
+	oldPVC := pvc.DeepCopy()
+	updatedPVC := pvcresources.NewPersistentVolumeClaimBuilderFromPVC(pvc).
+		WithRequests(corev1.ResourceList{corev1.ResourceStorage: newSize}).
+		Build()
+
+	if err := c.Patch(ctx, updatedPVC, client.MergeFrom(oldPVC)); err != nil {
+		return false, fmt.Errorf("failed to patch PVC %s: %w", pvc.Name, err)
+	}
+
+	// Record standard Kubernetes Event
+	recorder.Eventf(cluster, corev1.EventTypeNormal, "AutoResizeSuccess",
+		"Expanded volume %s from %s to %s", pvc.Name, currentSize.String(), newSize.String())
+
+	// Mutation for the Cluster Status (caller must persist)
+	event := apiv1.AutoResizeEvent{
+		Timestamp:    metav1.Now(),
+		InstanceName: podName,
+		PVCName:      pvc.Name,
+		VolumeType:   pvcRole,
+		PreviousSize: currentSize.String(),
+		NewSize:      newSize.String(),
+		Result:       "success",
+	}
+	if pvcRole == string(utils.PVCRolePgTablespace) {
+		event.Tablespace = pvc.Labels[utils.TablespaceNameLabelName]
+	}
+	appendResizeEvent(cluster, event)
+
+	if shouldAlertOnResize(pvcRole, isSingleVolume, walSafety) {
+		recorder.Eventf(cluster, corev1.EventTypeWarning, "AutoResizeWALRisk",
+			"Auto-resize occurred on WAL-related volume %s", pvc.Name)
+	}
+
+	return true, nil
+}
+
 // IsAutoResizeEnabled checks if auto-resize is enabled for any storage in the cluster.
-// This is exported so the cluster controller can use it to determine if monitoring
-// reconciliation is needed.
 func IsAutoResizeEnabled(cluster *apiv1.Cluster) bool {
 	if cluster.Spec.StorageConfiguration.Resize != nil &&
 		cluster.Spec.StorageConfiguration.Resize.Enabled {
@@ -149,148 +276,6 @@ func IsAutoResizeEnabled(cluster *apiv1.Cluster) bool {
 	}
 
 	return false
-}
-
-// reconcilePVC evaluates a single PVC for auto-resize.
-func reconcilePVC(
-	ctx context.Context,
-	c client.Client,
-	cluster *apiv1.Cluster,
-	diskInfoByPod map[string]*InstanceDiskInfo,
-	pvc *corev1.PersistentVolumeClaim,
-) (bool, error) {
-	contextLogger := log.FromContext(ctx)
-
-	// Determine the PVC role and get the corresponding resize configuration
-	pvcRole := pvc.Labels[utils.PvcRoleLabelName]
-	resizeConfig := getResizeConfigForPVC(cluster, pvc)
-	if resizeConfig == nil || !resizeConfig.Enabled {
-		return false, nil
-	}
-
-	// Get the pod name for this PVC
-	podName := pvc.Labels[utils.InstanceNameLabelName]
-	if podName == "" {
-		return false, nil
-	}
-
-	// Get disk status for this instance
-	diskInfo, ok := diskInfoByPod[podName]
-	if !ok || diskInfo == nil || diskInfo.DiskStatus == nil {
-		return false, nil
-	}
-
-	// Get volume stats for this PVC
-	volumeStats := getVolumeStatsForPVC(diskInfo.DiskStatus, pvcRole, pvc)
-	if volumeStats == nil {
-		return false, nil
-	}
-
-	// 1. Trigger check
-	triggers := resizeConfig.Triggers
-	if triggers == nil {
-		triggers = &apiv1.ResizeTriggers{UsageThreshold: 80}
-	}
-
-	// nolint:gosec // G115: disk sizes won't exceed int64 limits (9.2 EB)
-	if !ShouldResize(volumeStats.PercentUsed, int64(volumeStats.AvailableBytes), triggers) {
-		return false, nil
-	}
-
-	contextLogger.Info("auto-resize trigger fired",
-		"pvc", pvc.Name,
-		"percentUsed", volumeStats.PercentUsed,
-		"availableBytes", volumeStats.AvailableBytes,
-	)
-
-	// 2. Budget check
-	maxActionsPerDay := DefaultMaxActionsPerDay
-	if resizeConfig.Strategy != nil && resizeConfig.Strategy.MaxActionsPerDay > 0 {
-		maxActionsPerDay = resizeConfig.Strategy.MaxActionsPerDay
-	}
-
-	volumeKey := fmt.Sprintf("%s/%s", cluster.Namespace, pvc.Name)
-	if !GlobalBudgetTracker.HasBudget(volumeKey, maxActionsPerDay) {
-		contextLogger.Info("auto-resize blocked: rate limit exceeded",
-			"pvc", pvc.Name, "maxActionsPerDay", maxActionsPerDay)
-		return false, nil
-	}
-
-	// 3. Limit check
-	expansion := resizeConfig.Expansion
-	if expansion == nil {
-		expansion = &apiv1.ExpansionPolicy{}
-	}
-
-	currentSize := pvc.Spec.Resources.Requests[corev1.ResourceStorage]
-	if expansion.Limit != "" {
-		limit, err := resource.ParseQuantity(expansion.Limit)
-		if err == nil && currentSize.Cmp(limit) >= 0 {
-			contextLogger.Info("auto-resize blocked: at expansion limit",
-				"pvc", pvc.Name, "currentSize", currentSize.String(), "limit", limit.String())
-			return false, nil
-		}
-	}
-
-	// 4. WAL safety check
-	isSingleVolume := !cluster.ShouldCreateWalArchiveVolume()
-	var walSafety *apiv1.WALSafetyPolicy
-	if resizeConfig.Strategy != nil {
-		walSafety = resizeConfig.Strategy.WALSafetyPolicy
-	}
-
-	walSafetyResult := EvaluateWALSafety(pvcRole, isSingleVolume, walSafety, diskInfo.WALHealthStatus)
-	if !walSafetyResult.Allowed {
-		contextLogger.Info(walSafetyResult.BlockMessage,
-			"pvc", pvc.Name,
-			"reason", string(walSafetyResult.BlockReason),
-		)
-		return false, nil
-	}
-
-	// 5. Calculate new size (clamp)
-	newSize, err := CalculateNewSize(currentSize, expansion)
-	if err != nil {
-		return false, fmt.Errorf("failed to calculate new size: %w", err)
-	}
-
-	if newSize.Cmp(currentSize) <= 0 {
-		contextLogger.Debug("auto-resize: no size change needed",
-			"pvc", pvc.Name, "currentSize", currentSize.String(), "newSize", newSize.String())
-		return false, nil
-	}
-
-	// 6. Patch PVC
-	contextLogger.Info("auto-resizing PVC",
-		"pvc", pvc.Name,
-		"from", currentSize.String(),
-		"to", newSize.String(),
-	)
-
-	oldPVC := pvc.DeepCopy()
-	pvc = pvcresources.NewPersistentVolumeClaimBuilderFromPVC(pvc).
-		WithRequests(corev1.ResourceList{corev1.ResourceStorage: newSize}).
-		Build()
-
-	if err := c.Patch(ctx, pvc, client.MergeFrom(oldPVC)); err != nil {
-		return false, fmt.Errorf("failed to patch PVC %s: %w", pvc.Name, err)
-	}
-
-	// 7. Record the resize
-	GlobalBudgetTracker.RecordResize(volumeKey)
-
-	// Record event in cluster status
-	event := apiv1.AutoResizeEvent{
-		Timestamp:    metav1.Now(),
-		InstanceName: podName,
-		VolumeType:   pvcRole,
-		PreviousSize: currentSize.String(),
-		NewSize:      newSize.String(),
-		Result:       "success",
-	}
-	appendResizeEvent(cluster, event)
-
-	return true, nil
 }
 
 // getResizeConfigForPVC returns the resize configuration for the given PVC.
@@ -338,10 +323,36 @@ func getVolumeStatsForPVC(
 }
 
 // appendResizeEvent appends a resize event to the cluster status.
-// It keeps at most 50 events in the history.
+// Events older than 25 hours are pruned (budget window is 24h + 1h buffer).
+// Additionally, the history is capped at maxAutoResizeEventHistory entries.
 func appendResizeEvent(cluster *apiv1.Cluster, event apiv1.AutoResizeEvent) {
-	cluster.Status.AutoResizeEvents = append(cluster.Status.AutoResizeEvents, event)
-	if len(cluster.Status.AutoResizeEvents) > 50 {
-		cluster.Status.AutoResizeEvents = cluster.Status.AutoResizeEvents[len(cluster.Status.AutoResizeEvents)-50:]
+	cutoff := time.Now().Add(-25 * time.Hour)
+	retained := make([]apiv1.AutoResizeEvent, 0, len(cluster.Status.AutoResizeEvents)+1)
+	for _, existing := range cluster.Status.AutoResizeEvents {
+		if existing.Timestamp.IsZero() {
+			continue
+		}
+		if existing.Timestamp.After(cutoff) {
+			retained = append(retained, existing)
+		}
 	}
+	retained = append(retained, event)
+
+	// Apply hard cap to prevent unbounded growth
+	if len(retained) > maxAutoResizeEventHistory {
+		retained = retained[len(retained)-maxAutoResizeEventHistory:]
+	}
+	cluster.Status.AutoResizeEvents = retained
+}
+
+func shouldAlertOnResize(pvcRole string, isSingleVolume bool, walSafety *apiv1.WALSafetyPolicy) bool {
+	if pvcRole == string(utils.PVCRolePgWal) ||
+		(pvcRole == string(utils.PVCRolePgData) && isSingleVolume) {
+		if walSafety == nil || walSafety.AlertOnResize == nil {
+			return true
+		}
+		return *walSafety.AlertOnResize
+	}
+
+	return false
 }

@@ -189,6 +189,10 @@ The expansion policy controls how much the volume grows on each resize:
 | `maxStep` | Maximum growth per resize | Not set |
 | `limit` | Maximum total volume size | Not set |
 
+Notes:
+- `step` must be a string quantity or percentage (e.g., `"10Gi"` or `"20%"`). Integer values are rejected.
+- `minStep` and `maxStep` only apply to percentage-based steps.
+
 ### Clamping Logic
 
 The expansion amount is calculated as:
@@ -217,6 +221,8 @@ strategy:
 When the daily budget is exhausted, resize requests are blocked until the
 budget resets (rolling 24-hour window). The `cnpg_disk_resize_budget_remaining`
 metric tracks the remaining budget.
+
+Setting `maxActionsPerDay: 0` disables auto-resize for that volume.
 
 ## WAL Safety
 

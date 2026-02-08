@@ -189,5 +189,14 @@ var _ = Describe("CalculateNewSize", func() {
 			Expect(err).To(HaveOccurred())
 			Expect(err.Error()).To(ContainSubstring("failed to parse limit"))
 		})
+
+		It("should return error for integer step values", func() {
+			currentSize = resource.MustParse("100Gi")
+			policy.Step = intstr.FromInt(20)
+
+			_, err := CalculateNewSize(currentSize, policy)
+
+			Expect(err).To(HaveOccurred())
+		})
 	})
 })

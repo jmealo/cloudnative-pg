@@ -20,6 +20,7 @@ SPDX-License-Identifier: Apache-2.0
 package autoresize
 
 import (
+	"github.com/cloudnative-pg/machinery/pkg/log"
 	"k8s.io/apimachinery/pkg/api/resource"
 
 	apiv1 "github.com/cloudnative-pg/cloudnative-pg/api/v1"
@@ -46,7 +47,8 @@ func ShouldResize(usedPercent float64, availableBytes int64, triggers *apiv1.Res
 	if triggers.MinAvailable != "" {
 		minAvailableQty, err := resource.ParseQuantity(triggers.MinAvailable)
 		if err != nil {
-			// If we can't parse minAvailable, ignore this trigger
+			log.Warning("invalid minAvailable, using percentage trigger only",
+				"minAvailable", triggers.MinAvailable, "error", err)
 			return usedPercent > float64(usageThreshold)
 		}
 

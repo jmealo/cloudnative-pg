@@ -21,14 +21,16 @@ package metricserver
 
 import (
 	"database/sql"
+	"time"
 
 	"github.com/cloudnative-pg/machinery/pkg/log"
 	"github.com/prometheus/client_golang/prometheus"
+	"k8s.io/apimachinery/pkg/api/resource"
 
+	apiv1 "github.com/cloudnative-pg/cloudnative-pg/api/v1"
 	"github.com/cloudnative-pg/cloudnative-pg/pkg/management/postgres"
 	"github.com/cloudnative-pg/cloudnative-pg/pkg/management/postgres/disk"
 	"github.com/cloudnative-pg/cloudnative-pg/pkg/management/postgres/wal"
-	"github.com/cloudnative-pg/cloudnative-pg/pkg/management/postgres/webserver/client/local"
 	"github.com/cloudnative-pg/cloudnative-pg/pkg/specs"
 )
 
@@ -43,7 +45,7 @@ type DiskMetrics struct {
 	InodesFree            *prometheus.GaugeVec
 	AtLimit               *prometheus.GaugeVec
 	ResizeBlocked         *prometheus.GaugeVec
-	ResizesTotal          *prometheus.CounterVec
+	ResizesTotal          *prometheus.GaugeVec // Changed from Counter to Gauge to allow manual derivation from history
 	ResizeBudgetRemain    *prometheus.GaugeVec
 	WALArchiveHealthy     prometheus.Gauge
 	WALPendingFiles       prometheus.Gauge
@@ -99,9 +101,10 @@ func newDiskMetrics() *DiskMetrics {
 			Name:      "disk_resize_blocked",
 			Help:      "1 if auto-resize is blocked, with reason label.",
 		}, []string{"volume_type", "tablespace", "reason"}),
-		ResizesTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+		ResizesTotal: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: PrometheusNamespace,
-			Name:      "disk_resizes_total",
+			Subsystem: "disk",
+			Name:      "resizes_total",
 			Help:      "Total number of auto-resize operations.",
 		}, []string{"volume_type", "tablespace", "result"}),
 		ResizeBudgetRemain: prometheus.NewGaugeVec(prometheus.GaugeOpts{
@@ -221,22 +224,27 @@ func collectDiskUsageMetrics(e *Exporter) {
 	contextLogger := log.WithName("disk_metrics")
 	probe := disk.NewProbe()
 
+	cluster, clusterErr := e.getCluster()
+
 	// Probe PGDATA volume
 	dataResult, err := probe.ProbeVolume(specs.PgDataPath, disk.VolumeTypeData, "")
 	if err != nil {
 		contextLogger.Error(err, "failed to probe PGDATA volume")
 	} else {
 		e.Metrics.DiskMetrics.setVolumeStats(dataResult)
+		if clusterErr == nil {
+			e.Metrics.DiskMetrics.deriveDecisionMetrics(cluster, dataResult)
+		}
 	}
 
 	// Probe WAL volume if it exists (separate from PGDATA)
-	cluster, clusterErr := local.NewClient().Cache().GetCluster()
 	if clusterErr == nil && cluster.ShouldCreateWalArchiveVolume() {
 		walResult, err := probe.ProbeVolume(specs.PgWalVolumePath, disk.VolumeTypeWAL, "")
 		if err != nil {
 			contextLogger.Error(err, "failed to probe WAL volume")
 		} else {
 			e.Metrics.DiskMetrics.setVolumeStats(walResult)
+			e.Metrics.DiskMetrics.deriveDecisionMetrics(cluster, walResult)
 		}
 	}
 
@@ -250,7 +258,77 @@ func collectDiskUsageMetrics(e *Exporter) {
 					"tablespace", tbsConfig.Name)
 			} else {
 				e.Metrics.DiskMetrics.setVolumeStats(tbsResult)
+				e.Metrics.DiskMetrics.deriveDecisionMetrics(cluster, tbsResult)
 			}
 		}
 	}
+}
+
+// deriveDecisionMetrics populates logical metrics (totals, budget) from cluster status history.
+func (dm *DiskMetrics) deriveDecisionMetrics(cluster *apiv1.Cluster, probe *disk.VolumeProbeResult) {
+	volType := string(probe.VolumeType)
+	ts := probe.Tablespace
+
+	// 1. Calculate totals from history
+	successCount := 0
+	for _, event := range cluster.Status.AutoResizeEvents {
+		if event.VolumeType != volType || event.Tablespace != ts {
+			continue
+		}
+		if event.Result == "success" {
+			successCount++
+		}
+	}
+	dm.ResizesTotal.WithLabelValues(volType, ts, "success").Set(float64(successCount))
+
+	// 2. Calculate remaining budget (24h window)
+	maxActions := 3 // default
+	resizeConfig := getResizeConfig(cluster, probe.VolumeType, ts)
+	if resizeConfig != nil && resizeConfig.Strategy != nil && resizeConfig.Strategy.MaxActionsPerDay > 0 {
+		maxActions = resizeConfig.Strategy.MaxActionsPerDay
+	}
+
+	cutoff := time.Now().Add(-24 * time.Hour)
+	recentCount := 0
+	for _, event := range cluster.Status.AutoResizeEvents {
+		if event.VolumeType == volType && event.Tablespace == ts &&
+			event.Timestamp.After(cutoff) && event.Result == "success" {
+			recentCount++
+		}
+	}
+
+	budgetRemain := maxActions - recentCount
+	if budgetRemain < 0 {
+		budgetRemain = 0
+	}
+	dm.ResizeBudgetRemain.WithLabelValues(volType, ts).Set(float64(budgetRemain))
+
+	// 3. At Limit metric
+	if resizeConfig != nil && resizeConfig.Expansion != nil && resizeConfig.Expansion.Limit != "" {
+		limit, err := resource.ParseQuantity(resizeConfig.Expansion.Limit)
+		//nolint:gosec // G115 - limit sizes cannot be negative in practice
+		if err == nil && uint64(limit.Value()) <= probe.Stats.TotalBytes {
+			dm.AtLimit.WithLabelValues(volType, ts).Set(1)
+		} else {
+			dm.AtLimit.WithLabelValues(volType, ts).Set(0)
+		}
+	}
+}
+
+func getResizeConfig(cluster *apiv1.Cluster, volType disk.VolumeType, tsName string) *apiv1.ResizeConfiguration {
+	switch volType {
+	case disk.VolumeTypeData:
+		return cluster.Spec.StorageConfiguration.Resize
+	case disk.VolumeTypeWAL:
+		if cluster.Spec.WalStorage != nil {
+			return cluster.Spec.WalStorage.Resize
+		}
+	case disk.VolumeTypeTablespace:
+		for _, tbs := range cluster.Spec.Tablespaces {
+			if tbs.Name == tsName {
+				return tbs.Storage.Resize
+			}
+		}
+	}
+	return nil
 }

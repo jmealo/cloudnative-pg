@@ -22,6 +22,7 @@ package wal
 
 import (
 	"database/sql"
+	"fmt"
 	"time"
 
 	"github.com/cloudnative-pg/machinery/pkg/log"
@@ -90,12 +91,13 @@ func (h *HealthChecker) Check(db DBQuerier, isPrimary bool) (*HealthStatus, erro
 	status := &HealthStatus{
 		ArchiveHealthy: true,
 	}
+	encounteredError := false
 
 	// Count .ready WAL files
 	readyCount, err := h.getReadyWALCount()
 	if err != nil {
 		contextLogger.Error(err, "failed to count ready WAL files")
-		// Non-fatal: continue with other checks
+		encounteredError = true
 	} else {
 		status.PendingWALFiles = readyCount
 	}
@@ -103,14 +105,14 @@ func (h *HealthChecker) Check(db DBQuerier, isPrimary bool) (*HealthStatus, erro
 	// Query pg_stat_archiver
 	if err := h.queryArchiverStatus(db, status); err != nil {
 		contextLogger.Error(err, "failed to query archiver status")
-		// Non-fatal: continue with other checks
+		encounteredError = true
 	}
 
 	// Query inactive replication slots (only on primary)
 	if isPrimary {
 		if err := h.queryInactiveSlots(db, status); err != nil {
 			contextLogger.Error(err, "failed to query inactive replication slots")
-			// Non-fatal: continue with other checks
+			encounteredError = true
 		}
 		contextLogger.Info("queried inactive replication slots",
 			"isPrimary", isPrimary,
@@ -118,6 +120,10 @@ func (h *HealthChecker) Check(db DBQuerier, isPrimary bool) (*HealthStatus, erro
 	} else {
 		contextLogger.Info("skipping inactive slot query (not primary)",
 			"isPrimary", isPrimary)
+	}
+
+	if encounteredError {
+		return nil, fmt.Errorf("wal health check incomplete")
 	}
 
 	return status, nil

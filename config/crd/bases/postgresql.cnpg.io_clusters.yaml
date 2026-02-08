@@ -7043,6 +7043,9 @@ spec:
                       description: PreviousSize is the size of the PVC before the
                         resize.
                       type: string
+                    pvcName:
+                      description: PVCName is the name of the PVC that was resized.
+                      type: string
                     result:
                       description: Result is the outcome of the resize operation (success/failure).
                       type: string

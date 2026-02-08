@@ -27,6 +27,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/cloudnative-pg/machinery/pkg/log"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/util/intstr"
 
@@ -79,6 +80,12 @@ func CalculateNewSize(currentSize resource.Quantity, policy *apiv1.ExpansionPoli
 		(stepVal.Type == intstr.Int && stepVal.IntVal == 0) {
 		stepVal = intstr.FromString(defaultStepPercent)
 	}
+
+	normalizedStep, err := normalizeStep(stepVal)
+	if err != nil {
+		return currentSize, err
+	}
+	stepVal = normalizedStep
 
 	var expansionStep resource.Quantity
 
@@ -141,9 +148,27 @@ func parseQuantityOrDefault(qtyStr string, defaultStr string) *resource.Quantity
 
 	qty, err := resource.ParseQuantity(qtyStr)
 	if err != nil {
+		log.Warning("invalid quantity in auto-resize config, using default",
+			"provided", qtyStr, "default", defaultStr, "error", err)
 		fallback, _ := resource.ParseQuantity(defaultStr)
 		return &fallback
 	}
 
 	return &qty
+}
+
+// normalizeStep validates step values and rejects integer inputs.
+// Integer values are ambiguous; users must provide a percentage string (e.g., "20%")
+// or a quantity (e.g., "10Gi").
+func normalizeStep(step intstr.IntOrString) (intstr.IntOrString, error) {
+	if step.Type != intstr.Int {
+		return step, nil
+	}
+
+	if step.IntVal == 0 {
+		return step, nil
+	}
+
+	return step, fmt.Errorf(
+		"integer step is not supported; use a percentage string (e.g., \"20%%\") or a quantity (e.g., \"10Gi\")")
 }

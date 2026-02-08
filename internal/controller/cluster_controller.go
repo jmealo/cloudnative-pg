@@ -812,14 +812,31 @@ func (r *ClusterReconciler) reconcileResources(
 
 	// Auto-resize PVCs based on disk usage
 	diskInfoByPod := buildDiskInfoByPod(instancesStatus)
-	if res, err := autoresize.Reconcile(
+	origCluster := cluster.DeepCopy()
+	autoResizeRes, err := autoresize.Reconcile(
 		ctx,
 		r.Client,
+		r.Recorder,
 		cluster,
 		diskInfoByPod,
 		resources.pvcs.Items,
-	); err != nil || !res.IsZero() {
-		return res, err
+	)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	// If the autoresize logic added events or changed status, persist it now.
+	// This is CRITICAL because if we return autoResizeRes (requeue), the
+	// rest of the loop is skipped and memory changes are lost.
+	if !reflect.DeepEqual(origCluster.Status, cluster.Status) {
+		if err := r.Status().Patch(ctx, cluster, client.MergeFrom(origCluster)); err != nil {
+			contextLogger.Error(err, "failed to persist auto-resize status changes")
+			return ctrl.Result{}, err
+		}
+	}
+
+	if !autoResizeRes.IsZero() {
+		return autoResizeRes, nil
 	}
 
 	// In-place Postgres major version upgrades
