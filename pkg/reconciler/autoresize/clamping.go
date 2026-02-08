@@ -17,9 +17,6 @@ limitations under the License.
 SPDX-License-Identifier: Apache-2.0
 */
 
-// Package autoresize implements automatic PVC resizing for CloudNativePG clusters.
-// It monitors disk usage and triggers PVC expansion when configured thresholds
-// are reached, respecting rate limits and WAL safety policies.
 package autoresize
 
 import (
@@ -27,7 +24,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/cloudnative-pg/machinery/pkg/log"
 	"gopkg.in/inf.v0"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -160,15 +156,25 @@ func calculatePercentageStep(
 // parseQuantityOrDefault attempts to parse a quantity string, returning a default if empty or invalid.
 func parseQuantityOrDefault(qtyStr string, defaultStr string) *resource.Quantity {
 	if qtyStr == "" {
-		qty, _ := resource.ParseQuantity(defaultStr)
+		qty, err := resource.ParseQuantity(defaultStr)
+		if err != nil {
+			// This should never happen with hardcoded defaults
+			autoresizeLog.Error(err, "BUG: invalid hardcoded default quantity", "default", defaultStr)
+			panic(fmt.Sprintf("invalid hardcoded default quantity: %s", defaultStr))
+		}
 		return &qty
 	}
 
 	qty, err := resource.ParseQuantity(qtyStr)
 	if err != nil {
-		log.Warning("invalid quantity in auto-resize config, using default",
-			"provided", qtyStr, "default", defaultStr, "error", err)
-		fallback, _ := resource.ParseQuantity(defaultStr)
+		autoresizeLog.Info("invalid quantity in auto-resize config, using default",
+			"provided", qtyStr, "default", defaultStr, "error", err.Error())
+		fallback, err := resource.ParseQuantity(defaultStr)
+		if err != nil {
+			// This should never happen with hardcoded defaults
+			autoresizeLog.Error(err, "BUG: invalid hardcoded default quantity", "default", defaultStr)
+			panic(fmt.Sprintf("invalid hardcoded default quantity: %s", defaultStr))
+		}
 		return &fallback
 	}
 

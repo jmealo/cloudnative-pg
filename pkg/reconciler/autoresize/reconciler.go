@@ -17,6 +17,9 @@ limitations under the License.
 SPDX-License-Identifier: Apache-2.0
 */
 
+// Package autoresize implements automatic PVC resizing for CloudNativePG clusters.
+// It monitors disk usage and triggers PVC expansion when configured thresholds
+// are reached, respecting rate limits and WAL safety policies.
 package autoresize
 
 import (
@@ -39,6 +42,8 @@ import (
 	"github.com/cloudnative-pg/cloudnative-pg/pkg/utils"
 )
 
+var autoresizeLog = log.WithName("autoresize")
+
 const (
 	// RequeueDelay is the delay after a resize operation before the next check.
 	RequeueDelay = 30 * time.Second
@@ -57,11 +62,16 @@ const (
 
 // InstanceDiskInfo holds the disk status info extracted from an instance's PostgresqlStatus.
 type InstanceDiskInfo struct {
-	DiskStatus      *postgres.DiskStatus
+	// DiskStatus contains filesystem-level disk usage statistics for all volumes.
+	DiskStatus *postgres.DiskStatus
+	// WALHealthStatus contains WAL archive health and replication slot information.
 	WALHealthStatus *postgres.WALHealthStatus
 }
 
 // Reconcile evaluates all PVCs in the cluster for auto-resize eligibility.
+// It checks triggers, rate limits, WAL safety, and calculates new sizes for eligible PVCs.
+// Returns a requeue result if any PVC was resized (to allow status persistence) or if errors occurred (to retry).
+// The cluster status is mutated in-place with resize events but the caller must persist it.
 func Reconcile(
 	ctx context.Context,
 	c client.Client,
@@ -168,7 +178,7 @@ func reconcilePVC(
 
 	if !HasBudget(cluster, pvc.Name, maxActions) {
 		contextLogger.Info("auto-resize blocked: rate limit exceeded", "pvc", pvc.Name)
-		recorder.Eventf(cluster, corev1.EventTypeWarning, "ResizePVCBlocked",
+		recorder.Eventf(cluster, corev1.EventTypeWarning, "AutoResizeBlocked",
 			"Rate limit exceeded for volume %s", pvc.Name)
 		return false, nil
 	}
@@ -186,7 +196,7 @@ func reconcilePVC(
 		}
 		if currentSize.Cmp(limit) >= 0 {
 			contextLogger.Info("auto-resize blocked: at expansion limit", "pvc", pvc.Name)
-			recorder.Eventf(cluster, corev1.EventTypeWarning, "ResizePVCBlocked",
+			recorder.Eventf(cluster, corev1.EventTypeWarning, "AutoResizeBlocked",
 				"Expansion limit reached for volume %s", pvc.Name)
 			return false, nil
 		}
@@ -203,7 +213,7 @@ func reconcilePVC(
 		recorder.Event(cluster, corev1.EventTypeWarning, "ResizePVCWALHealthUnknown", walSafetyResult.BlockMessage)
 	}
 	if !walSafetyResult.Allowed {
-		recorder.Event(cluster, corev1.EventTypeWarning, "ResizePVCBlocked", walSafetyResult.BlockMessage)
+		recorder.Event(cluster, corev1.EventTypeWarning, "AutoResizeBlocked", walSafetyResult.BlockMessage)
 		return false, nil
 	}
 
@@ -236,10 +246,10 @@ func reconcilePVC(
 		Timestamp:    metav1.Now(),
 		InstanceName: podName,
 		PVCName:      pvc.Name,
-		VolumeType:   pvcRole,
+		VolumeType:   mapPVCRoleToVolumeType(pvcRole),
 		PreviousSize: currentSize.String(),
 		NewSize:      newSize.String(),
-		Result:       "success",
+		Result:       apiv1.ResizeResultSuccess,
 	}
 	if pvcRole == string(utils.PVCRolePgTablespace) {
 		event.Tablespace = pvc.Labels[utils.TablespaceNameLabelName]
@@ -252,6 +262,19 @@ func reconcilePVC(
 	}
 
 	return true, nil
+}
+
+func mapPVCRoleToVolumeType(role string) apiv1.ResizeVolumeType {
+	switch role {
+	case string(utils.PVCRolePgData):
+		return apiv1.ResizeVolumeTypeData
+	case string(utils.PVCRolePgWal):
+		return apiv1.ResizeVolumeTypeWAL
+	case string(utils.PVCRolePgTablespace):
+		return apiv1.ResizeVolumeTypeTablespace
+	default:
+		return apiv1.ResizeVolumeType(role)
+	}
 }
 
 // IsAutoResizeEnabled checks if auto-resize is enabled for any storage in the cluster.

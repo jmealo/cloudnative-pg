@@ -199,9 +199,9 @@ var _ = Describe("PVC Auto-Resize", Label(tests.LabelAutoResize), func() {
 					g.Expect(cluster.Status.AutoResizeEvents).ToNot(BeEmpty(),
 						"AutoResizeEvents should not be empty after a resize")
 					latest := cluster.Status.AutoResizeEvents[len(cluster.Status.AutoResizeEvents)-1]
-					g.Expect(latest.Result).To(Equal("success"),
+					g.Expect(latest.Result).To(Equal(apiv1.ResizeResultSuccess),
 						"Last resize event should have result=success")
-					g.Expect(latest.VolumeType).To(Equal("PG_DATA"),
+					g.Expect(latest.VolumeType).To(Equal(apiv1.ResizeVolumeTypeData),
 						"Last resize event should be for data volume")
 				}, 60*time.Second, 5*time.Second).Should(Succeed())
 			})

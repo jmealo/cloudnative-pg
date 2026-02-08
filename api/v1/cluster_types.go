@@ -2086,11 +2086,36 @@ const (
 	ResizeModeStandard ResizeMode = "Standard"
 )
 
+// ResizeVolumeType represents the type of volume in a resize operation.
+// +kubebuilder:validation:Enum=data;wal;tablespace
+type ResizeVolumeType string
+
+const (
+	// ResizeVolumeTypeData represents a PostgreSQL data volume.
+	ResizeVolumeTypeData ResizeVolumeType = "data"
+	// ResizeVolumeTypeWAL represents a PostgreSQL WAL volume.
+	ResizeVolumeTypeWAL ResizeVolumeType = "wal"
+	// ResizeVolumeTypeTablespace represents a PostgreSQL tablespace volume.
+	ResizeVolumeTypeTablespace ResizeVolumeType = "tablespace"
+)
+
+// ResizeResult represents the outcome of a resize operation.
+// +kubebuilder:validation:Enum=success;failure
+type ResizeResult string
+
+const (
+	// ResizeResultSuccess indicates the resize operation succeeded.
+	ResizeResultSuccess ResizeResult = "success"
+	// ResizeResultFailure indicates the resize operation failed.
+	ResizeResultFailure ResizeResult = "failure"
+)
+
 // ResizeConfiguration defines the automatic PVC resize behavior.
 type ResizeConfiguration struct {
 	// Enabled activates automatic PVC resizing.
 	// +optional
-	Enabled bool `json:"enabled"`
+	// +kubebuilder:default:=false
+	Enabled bool `json:"enabled,omitempty"`
 
 	// Triggers defines the conditions that trigger a resize operation.
 	// +optional
@@ -2135,12 +2160,14 @@ type ExpansionPolicy struct {
 	// Prevents tiny expansions on small volumes. Defaults to "2Gi".
 	// Ignored when step is an absolute value.
 	// +optional
+	// +kubebuilder:default:="2Gi"
 	MinStep string `json:"minStep,omitempty"`
 
 	// MaxStep is the maximum expansion step when using percentage-based steps.
 	// Prevents oversized expansions on large volumes. Defaults to "500Gi".
 	// Ignored when step is an absolute value.
 	// +optional
+	// +kubebuilder:default:="500Gi"
 	MaxStep string `json:"maxStep,omitempty"`
 
 	// Limit is the maximum size the PVC can be expanded to.
@@ -2153,7 +2180,7 @@ type ExpansionPolicy struct {
 type ResizeStrategy struct {
 	// Mode defines the resize mode. Currently only "Standard" is supported.
 	// +optional
-	// +kubebuilder:default=Standard
+	// +kubebuilder:default:=Standard
 	Mode ResizeMode `json:"mode,omitempty"`
 
 	// MaxActionsPerDay is the maximum number of resize operations per volume
@@ -2184,13 +2211,13 @@ type WALSafetyPolicy struct {
 	// RequireArchiveHealthy blocks resize when WAL archiving is unhealthy
 	// (last_failed_time > last_archived_time). Defaults to true.
 	// +optional
-	// +kubebuilder:default=true
+	// +kubebuilder:default:=true
 	RequireArchiveHealthy *bool `json:"requireArchiveHealthy,omitempty"`
 
 	// MaxPendingWALFiles blocks resize when the number of pending WAL files
 	// (.ready files in archive_status) exceeds this threshold. Defaults to 100.
 	// +optional
-	// +kubebuilder:default=100
+	// +kubebuilder:default:=100
 	MaxPendingWALFiles *int `json:"maxPendingWALFiles,omitempty"`
 
 	// MaxSlotRetentionBytes blocks resize when any inactive physical
@@ -2201,7 +2228,7 @@ type WALSafetyPolicy struct {
 	// AlertOnResize emits a Kubernetes warning event when a WAL-related
 	// resize occurs. Defaults to true.
 	// +optional
-	// +kubebuilder:default=true
+	// +kubebuilder:default:=true
 	AlertOnResize *bool `json:"alertOnResize,omitempty"`
 }
 
@@ -2692,7 +2719,7 @@ type AutoResizeEvent struct {
 
 	// VolumeType is the type of volume that was resized (data/wal/tablespace).
 	// +optional
-	VolumeType string `json:"volumeType,omitempty"`
+	VolumeType ResizeVolumeType `json:"volumeType,omitempty"`
 
 	// Tablespace is the tablespace name if VolumeType is tablespace.
 	// +optional
@@ -2708,7 +2735,7 @@ type AutoResizeEvent struct {
 
 	// Result is the outcome of the resize operation (success/failure).
 	// +optional
-	Result string `json:"result,omitempty"`
+	Result ResizeResult `json:"result,omitempty"`
 }
 
 // RoleConfiguration is the representation, in Kubernetes, of a PostgreSQL role

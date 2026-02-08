@@ -324,14 +324,32 @@ func (dm *DiskMetrics) deriveDecisionMetrics(cluster *apiv1.Cluster, probe *disk
 	}
 	dm.ResizeBudgetRemain.WithLabelValues(volType, ts).Set(float64(budgetRemain))
 
-	// 3. At Limit metric
+	// 3. At Limit metric and blocked status
+	atLimit := false
 	if resizeConfig != nil && resizeConfig.Expansion != nil && resizeConfig.Expansion.Limit != "" {
 		limit, err := resource.ParseQuantity(resizeConfig.Expansion.Limit)
 		//nolint:gosec // G115 - limit sizes cannot be negative in practice
 		if err == nil && uint64(limit.Value()) <= probe.Stats.TotalBytes {
 			dm.AtLimit.WithLabelValues(volType, ts).Set(1)
+			atLimit = true
 		} else {
 			dm.AtLimit.WithLabelValues(volType, ts).Set(0)
+		}
+	}
+
+	// 4. Resize blocked metric - set when auto-resize cannot proceed
+	// Only populate if auto-resize is enabled for this volume
+	if resizeConfig != nil && resizeConfig.Enabled {
+		if budgetRemain == 0 {
+			dm.ResizeBlocked.WithLabelValues(volType, ts, "rate_limit").Set(1)
+		} else {
+			dm.ResizeBlocked.WithLabelValues(volType, ts, "rate_limit").Set(0)
+		}
+
+		if atLimit {
+			dm.ResizeBlocked.WithLabelValues(volType, ts, "expansion_limit").Set(1)
+		} else {
+			dm.ResizeBlocked.WithLabelValues(volType, ts, "expansion_limit").Set(0)
 		}
 	}
 }

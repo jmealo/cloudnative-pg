@@ -20,14 +20,15 @@ SPDX-License-Identifier: Apache-2.0
 package autoresize
 
 import (
-	"github.com/cloudnative-pg/machinery/pkg/log"
 	"k8s.io/apimachinery/pkg/api/resource"
 
 	apiv1 "github.com/cloudnative-pg/cloudnative-pg/api/v1"
 )
 
-// ShouldResize evaluates if a PVC should be resized based on the provided triggers
-// It returns true if either the usage threshold is exceeded OR the available space is below minAvailable
+// ShouldResize evaluates if a PVC should be resized based on the provided triggers.
+// Returns true if either:
+// - usedPercent is strictly greater than (not equal to) the usage threshold, OR
+// - availableBytes is strictly less than the minAvailable threshold
 func ShouldResize(usedPercent float64, availableBytes int64, triggers *apiv1.ResizeTriggers) bool {
 	if triggers == nil {
 		return false
@@ -47,8 +48,8 @@ func ShouldResize(usedPercent float64, availableBytes int64, triggers *apiv1.Res
 	if triggers.MinAvailable != "" {
 		minAvailableQty, err := resource.ParseQuantity(triggers.MinAvailable)
 		if err != nil {
-			log.Warning("invalid minAvailable, using percentage trigger only",
-				"minAvailable", triggers.MinAvailable, "error", err)
+			autoresizeLog.Info("invalid minAvailable, using percentage trigger only",
+				"minAvailable", triggers.MinAvailable, "error", err.Error())
 			return usedPercent > float64(usageThreshold)
 		}
 

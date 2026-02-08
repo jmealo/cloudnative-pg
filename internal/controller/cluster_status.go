@@ -791,13 +791,13 @@ func (r *ClusterReconciler) updateClusterStatusThatRequiresInstancesState(
 }
 
 // updateDiskStatus populates cluster.Status.DiskStatus from instance statuses.
+// The Instances map is rebuilt on each update to ensure stale entries for removed pods are cleared.
 func updateDiskStatus(cluster *apiv1.Cluster, statuses postgres.PostgresqlStatusList) {
 	if cluster.Status.DiskStatus == nil {
 		cluster.Status.DiskStatus = &apiv1.ClusterDiskStatus{}
 	}
-	if cluster.Status.DiskStatus.Instances == nil {
-		cluster.Status.DiskStatus.Instances = make(map[string]*apiv1.InstanceDiskStatus)
-	}
+	// Reinitialize the map on each update to clear entries for pods that no longer exist
+	cluster.Status.DiskStatus.Instances = make(map[string]*apiv1.InstanceDiskStatus, len(statuses.Items))
 
 	for _, item := range statuses.Items {
 		if item.Pod == nil || item.DiskStatus == nil {

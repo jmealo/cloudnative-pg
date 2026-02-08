@@ -5973,6 +5973,7 @@ spec:
                       expand PVCs when configured thresholds are reached.
                     properties:
                       enabled:
+                        default: false
                         description: Enabled activates automatic PVC resizing.
                         type: boolean
                       expansion:
@@ -6349,6 +6350,7 @@ spec:
                             expand PVCs when configured thresholds are reached.
                           properties:
                             enabled:
+                              default: false
                               description: Enabled activates automatic PVC resizing.
                               type: boolean
                             expansion:
@@ -6877,6 +6879,7 @@ spec:
                       expand PVCs when configured thresholds are reached.
                     properties:
                       enabled:
+                        default: false
                         description: Enabled activates automatic PVC resizing.
                         type: boolean
                       expansion:

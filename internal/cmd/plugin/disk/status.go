@@ -245,13 +245,13 @@ func printAutoResizeEvents(events []apiv1.AutoResizeEvent) {
 
 	for i := len(events) - 1; i >= start; i-- {
 		event := events[i]
-		volumeDesc := event.VolumeType
+		volumeDesc := string(event.VolumeType)
 		if event.Tablespace != "" {
 			volumeDesc = fmt.Sprintf("%s (%s)", event.VolumeType, event.Tablespace)
 		}
 
 		resultColor := aurora.Green
-		if event.Result != "success" {
+		if event.Result != apiv1.ResizeResultSuccess {
 			resultColor = aurora.Red
 		}
 

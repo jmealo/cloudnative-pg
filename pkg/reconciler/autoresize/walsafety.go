@@ -56,7 +56,9 @@ type WALSafetyResult struct {
 	// Allowed is true if the resize is allowed to proceed.
 	Allowed bool
 
-	// BlockReason is the reason the resize was blocked (empty if Allowed is true).
+	// BlockReason indicates the reason for blocking or a warning condition.
+	// Set to a specific reason when Allowed is false (hard block).
+	// May be set to WALSafetyBlockHealthUnavailable when Allowed is true (warning).
 	BlockReason WALSafetyBlockReason
 
 	// BlockMessage is a human-readable description of why the resize was blocked.

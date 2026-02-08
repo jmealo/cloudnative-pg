@@ -28,17 +28,17 @@ import (
 
 	"github.com/cloudnative-pg/cloudnative-pg/pkg/management/postgres/disk"
 	"github.com/cloudnative-pg/cloudnative-pg/pkg/management/postgres/wal"
-	"github.com/cloudnative-pg/cloudnative-pg/pkg/postgres"
+	postgresSpec "github.com/cloudnative-pg/cloudnative-pg/pkg/postgres"
 	"github.com/cloudnative-pg/cloudnative-pg/pkg/specs"
 )
 
 // fillDiskStatus probes the filesystem for PGDATA, WAL, and tablespace volumes
 // and populates the disk status in the result.
-func (instance *Instance) fillDiskStatus(result *postgres.PostgresqlStatus) {
+func (instance *Instance) fillDiskStatus(result *postgresSpec.PostgresqlStatus) {
 	contextLogger := log.WithName("disk_status")
 
 	probe := disk.NewProbe()
-	diskStatus := &postgres.DiskStatus{}
+	diskStatus := &postgresSpec.DiskStatus{}
 
 	// Probe PGDATA volume
 	dataStats, err := probe.GetVolumeStats(specs.PgDataPath)
@@ -70,7 +70,7 @@ func (instance *Instance) fillDiskStatus(result *postgres.PostgresqlStatus) {
 				continue
 			}
 			if diskStatus.Tablespaces == nil {
-				diskStatus.Tablespaces = make(map[string]*postgres.VolumeStatus)
+				diskStatus.Tablespaces = make(map[string]*postgresSpec.VolumeStatus)
 			}
 			diskStatus.Tablespaces[tbsConfig.Name] = volumeStatusFromStats(tbsStats)
 		}
@@ -80,8 +80,8 @@ func (instance *Instance) fillDiskStatus(result *postgres.PostgresqlStatus) {
 }
 
 // volumeStatusFromStats converts disk.VolumeStats to postgres.VolumeStatus.
-func volumeStatusFromStats(stats *disk.VolumeStats) *postgres.VolumeStatus {
-	return &postgres.VolumeStatus{
+func volumeStatusFromStats(stats *disk.VolumeStats) *postgresSpec.VolumeStatus {
+	return &postgresSpec.VolumeStatus{
 		TotalBytes:     stats.TotalBytes,
 		UsedBytes:      stats.UsedBytes,
 		AvailableBytes: stats.AvailableBytes,
@@ -93,7 +93,7 @@ func volumeStatusFromStats(stats *disk.VolumeStats) *postgres.VolumeStatus {
 }
 
 // fillWALHealthStatus checks WAL archive health and populates the WAL health status in the result.
-func (instance *Instance) fillWALHealthStatus(db *sql.DB, result *postgres.PostgresqlStatus) {
+func (instance *Instance) fillWALHealthStatus(db *sql.DB, result *postgresSpec.PostgresqlStatus) {
 	contextLogger := log.WithName("wal_health_status")
 
 	archiveStatusPath := filepath.Join(specs.PgWalPath, "archive_status")
@@ -113,7 +113,7 @@ func (instance *Instance) fillWALHealthStatus(db *sql.DB, result *postgres.Postg
 		"archiveHealthy", healthStatus.ArchiveHealthy,
 		"inactiveSlotCount", len(healthStatus.InactiveSlots))
 
-	walHealthStatus := &postgres.WALHealthStatus{
+	walHealthStatus := &postgresSpec.WALHealthStatus{
 		ArchiveHealthy:      healthStatus.ArchiveHealthy,
 		PendingWALFiles:     healthStatus.PendingWALFiles,
 		ArchiverFailedCount: healthStatus.ArchiverFailedCount,
@@ -121,7 +121,7 @@ func (instance *Instance) fillWALHealthStatus(db *sql.DB, result *postgres.Postg
 	}
 
 	for _, slot := range healthStatus.InactiveSlots {
-		walHealthStatus.InactiveSlots = append(walHealthStatus.InactiveSlots, postgres.WALInactiveSlotInfo{
+		walHealthStatus.InactiveSlots = append(walHealthStatus.InactiveSlots, postgresSpec.WALInactiveSlotInfo{
 			SlotName:       slot.SlotName,
 			RetentionBytes: slot.RetentionBytes,
 		})
