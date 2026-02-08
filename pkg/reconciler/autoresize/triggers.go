@@ -48,6 +48,9 @@ func ShouldResize(usedPercent float64, availableBytes int64, triggers *apiv1.Res
 	if triggers.MinAvailable != "" {
 		minAvailableQty, err := resource.ParseQuantity(triggers.MinAvailable)
 		if err != nil {
+			// The usage threshold was already checked above (line 43) and did not trigger,
+			// so we return false. The webhook validates minAvailable at admission time,
+			// so this path should not be reached in practice.
 			autoresizeLog.Info("invalid minAvailable, using percentage trigger only",
 				"minAvailable", triggers.MinAvailable, "error", err.Error())
 			return false
