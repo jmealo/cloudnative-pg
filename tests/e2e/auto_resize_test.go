@@ -129,39 +129,46 @@ var _ = Describe("PVC Auto-Resize", Label(tests.LabelAutoResize), func() {
 				Expect(cluster.Spec.StorageConfiguration.Resize.Enabled).To(BeTrue())
 			})
 
-			By("filling the disk to trigger auto-resize", func() {
-				podName := clusterName + "-1"
-				pod := &corev1.Pod{}
-				err := env.Client.Get(env.Ctx, types.NamespacedName{
-					Namespace: namespace,
-					Name:      podName,
-				}, pod)
-				Expect(err).ToNot(HaveOccurred())
+			By("filling the disk on ALL instances to trigger auto-resize", func() {
+				// Fill disk on both instances since each PVC is evaluated independently
+				for _, suffix := range []string{"-1", "-2"} {
+					podName := clusterName + suffix
+					pod := &corev1.Pod{}
+					err := env.Client.Get(env.Ctx, types.NamespacedName{
+						Namespace: namespace,
+						Name:      podName,
+					}, pod)
+					Expect(err).ToNot(HaveOccurred())
 
-				// Fill the disk to exceed the 80% usage threshold
-				commandTimeout := time.Second * 120
-				_, _, err = env.EventuallyExecCommand(
-					env.Ctx, *pod, specs.PostgresContainerName, &commandTimeout,
-					"sh", "-c",
-					"dd if=/dev/zero of=/var/lib/postgresql/data/pgdata/fill_file bs=1M count=1800",
-				)
-				Expect(err).ToNot(HaveOccurred())
+					// Fill the disk to exceed the 80% usage threshold
+					commandTimeout := time.Second * 120
+					_, _, err = env.EventuallyExecCommand(
+						env.Ctx, *pod, specs.PostgresContainerName, &commandTimeout,
+						"sh", "-c",
+						"dd if=/dev/zero of=/var/lib/postgresql/data/pgdata/fill_file bs=1M count=1800 || true",
+					)
+					Expect(err).ToNot(HaveOccurred())
+				}
 
-				// PROOF: Verify percent_used > 80 via status before checking for resize
+				// PROOF: Verify percent_used > 80 on both instances via status before checking for resize
 				Eventually(func(g Gomega) {
 					cluster, err := clusterutils.Get(env.Ctx, env.Client, namespace, clusterName)
 					g.Expect(err).ToNot(HaveOccurred())
 					g.Expect(cluster.Status.DiskStatus).ToNot(BeNil())
-					instance, ok := cluster.Status.DiskStatus.Instances[podName]
-					g.Expect(ok).To(BeTrue())
-					g.Expect(instance.DataVolume).ToNot(BeNil())
-					g.Expect(instance.DataVolume.PercentUsed).To(BeNumerically(">", 80),
-						"Disk usage must exceed threshold to trigger resize")
-				}, 60*time.Second, 5*time.Second).Should(Succeed())
+					for _, suffix := range []string{"-1", "-2"} {
+						podName := clusterName + suffix
+						instance, ok := cluster.Status.DiskStatus.Instances[podName]
+						g.Expect(ok).To(BeTrue(), "DiskStatus should contain instance %s", podName)
+						g.Expect(instance.DataVolume).ToNot(BeNil())
+						g.Expect(instance.DataVolume.PercentUsed).To(BeNumerically(">", 80),
+							"Disk usage on %s must exceed threshold to trigger resize", podName)
+					}
+				}, 120*time.Second, 5*time.Second).Should(Succeed())
 			})
 
 			By("waiting for ALL instance PVCs to be resized (REQ-16)", func() {
 				// The fixture has instances: 2. Both should be resized eventually.
+				// Azure Disk resize can take 5-10 minutes per PVC, so use generous timeout.
 				Eventually(func(g Gomega) {
 					pvcList, err := storage.GetPVCList(env.Ctx, env.Client, namespace)
 					g.Expect(err).ToNot(HaveOccurred())
@@ -179,7 +186,7 @@ var _ = Describe("PVC Auto-Resize", Label(tests.LabelAutoResize), func() {
 						}
 					}
 					g.Expect(resizedCount).To(Equal(2), "Both PVCs (primary and standby) should be resized")
-				}, 15*time.Minute, 10*time.Second).Should(Succeed())
+				}, 25*time.Minute, 10*time.Second).Should(Succeed())
 			})
 
 			By("verifying Kubernetes Events were emitted", func() {
@@ -206,20 +213,25 @@ var _ = Describe("PVC Auto-Resize", Label(tests.LabelAutoResize), func() {
 				}, 60*time.Second, 5*time.Second).Should(Succeed())
 			})
 
-			By("cleaning up the fill file", func() {
-				podName := clusterName + "-1"
-				pod := &corev1.Pod{}
-				err := env.Client.Get(env.Ctx, types.NamespacedName{
-					Namespace: namespace,
-					Name:      podName,
-				}, pod)
-				Expect(err).ToNot(HaveOccurred())
+			By("cleaning up the fill files", func() {
+				// Clean up fill files on both instances
+				for _, suffix := range []string{"-1", "-2"} {
+					podName := clusterName + suffix
+					pod := &corev1.Pod{}
+					err := env.Client.Get(env.Ctx, types.NamespacedName{
+						Namespace: namespace,
+						Name:      podName,
+					}, pod)
+					if err != nil {
+						continue // Pod may not exist
+					}
 
-				commandTimeout := time.Second * 30
-				_, _, _ = env.EventuallyExecCommand(
-					env.Ctx, *pod, specs.PostgresContainerName, &commandTimeout,
-					"rm", "-f", "/var/lib/postgresql/data/pgdata/fill_file",
-				)
+					commandTimeout := time.Second * 30
+					_, _, _ = env.EventuallyExecCommand(
+						env.Ctx, *pod, specs.PostgresContainerName, &commandTimeout,
+						"rm", "-f", "/var/lib/postgresql/data/pgdata/fill_file",
+					)
+				}
 			})
 		})
 	})
@@ -727,20 +739,21 @@ var _ = Describe("PVC Auto-Resize", Label(tests.LabelAutoResize), func() {
 				}, pod)
 				Expect(err).ToNot(HaveOccurred())
 
-				// Remove old fill file
+				// Remove old fill file and sync to ensure deletion is reflected in filesystem stats
 				commandTimeout := time.Second * 30
 				_, _, _ = env.EventuallyExecCommand(
 					env.Ctx, *pod, specs.PostgresContainerName, &commandTimeout,
-					"rm", "-f", "/var/lib/postgresql/data/pgdata/fill_file",
+					"sh", "-c", "rm -f /var/lib/postgresql/data/pgdata/fill_file && sync",
 				)
 
 				// Wait for DiskStatus to reflect the cleanup before proceeding
+				// After resize (2Gi -> 2.5Gi) and fill file deletion, usage should drop significantly
 				Eventually(func(g Gomega) {
 					cluster, err := clusterutils.Get(env.Ctx, env.Client, namespace, clusterName)
 					g.Expect(err).ToNot(HaveOccurred())
 					instance := cluster.Status.DiskStatus.Instances[podName]
 					g.Expect(instance.DataVolume.PercentUsed).To(BeNumerically("<", 80))
-				}, 3*time.Minute, 5*time.Second).Should(Succeed())
+				}, 5*time.Minute, 5*time.Second).Should(Succeed())
 
 				// Now fill it again to trigger threshold
 				commandTimeout = time.Second * 120
@@ -773,7 +786,7 @@ var _ = Describe("PVC Auto-Resize", Label(tests.LabelAutoResize), func() {
 								"PVC size should remain unchanged due to rate limit")
 						}
 					}
-				}, 30*time.Second, 5*time.Second).Should(Succeed())
+				}, 2*time.Minute, 5*time.Second).Should(Succeed())
 
 				// Verify a blocking event was recorded
 				Eventually(func(g Gomega) {
@@ -782,7 +795,7 @@ var _ = Describe("PVC Auto-Resize", Label(tests.LabelAutoResize), func() {
 					})
 					g.Expect(err).ToNot(HaveOccurred())
 					g.Expect(events.Items).ToNot(BeEmpty(), "Should have emitted AutoResizeBlocked event for rate limit")
-				}, 60*time.Second, 5*time.Second).Should(Succeed())
+				}, 2*time.Minute, 5*time.Second).Should(Succeed())
 			})
 
 			By("cleaning up the fill files", func() {
@@ -1154,15 +1167,23 @@ var _ = Describe("PVC Auto-Resize", Label(tests.LabelAutoResize), func() {
 
 				// Generate WAL to trigger archive attempts. Each switch creates a new
 				// segment that barman-cloud will try (and fail) to archive. We need
-				// enough failures for pg_stat_archiver.failed_count to exceed the
-				// maxPendingWALFiles threshold so the operator marks archiving unhealthy.
+				// the archive command to fail so pg_stat_archiver records failures.
+				// Generate more WAL switches to ensure multiple archive attempts fail.
 				commandTimeout := time.Second * 60
-				for i := 0; i < 10; i++ {
+				for i := 0; i < 20; i++ {
+					// Insert some data to generate meaningful WAL
+					_, _, _ = env.EventuallyExecCommand(
+						env.Ctx, *pod, specs.PostgresContainerName, &commandTimeout,
+						"psql", "-U", "postgres", "-c",
+						"CREATE TABLE IF NOT EXISTS wal_gen_test (id serial, data text); "+
+							"INSERT INTO wal_gen_test (data) SELECT md5(random()::text) FROM generate_series(1,1000);",
+					)
+					// Force WAL segment switch
 					_, _, _ = env.EventuallyExecCommand(
 						env.Ctx, *pod, specs.PostgresContainerName, &commandTimeout,
 						"psql", "-U", "postgres", "-c", "SELECT pg_switch_wal()",
 					)
-					time.Sleep(2 * time.Second) // let each archive attempt start
+					time.Sleep(3 * time.Second) // let archive command execute and fail
 				}
 			})
 
@@ -1170,9 +1191,10 @@ var _ = Describe("PVC Auto-Resize", Label(tests.LabelAutoResize), func() {
 				// PROOF: Verify the operator sees the archive as unhealthy
 				// Archive health detection can take time as it depends on:
 				// - WAL generation triggering archive attempts
-				// - barman-cloud failing to connect
+				// - barman-cloud failing to connect to the bogus endpoint
 				// - pg_stat_archiver updating failure counts
 				// - Instance manager collecting and reporting status
+				// Use longer timeout for AKS where network timeouts may be slower
 				Eventually(func(g Gomega) {
 					cluster, err := clusterutils.Get(env.Ctx, env.Client, namespace, clusterName)
 					g.Expect(err).ToNot(HaveOccurred())
@@ -1180,7 +1202,7 @@ var _ = Describe("PVC Auto-Resize", Label(tests.LabelAutoResize), func() {
 					g.Expect(instance.WALHealth).ToNot(BeNil())
 					g.Expect(instance.WALHealth.ArchiveHealthy).To(BeFalse(),
 						"Precondition failed: Archive must be unhealthy for this test")
-				}, 8*time.Minute, 5*time.Second).Should(Succeed())
+				}, 12*time.Minute, 5*time.Second).Should(Succeed())
 			})
 
 			By("filling the disk to trigger auto-resize", func() {

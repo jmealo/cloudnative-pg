@@ -17,10 +17,10 @@ spec:
       database: app
       owner: app
 
-  # Configure backup pointing to a non-existent endpoint.
-  # This causes the wal-archive command (managed by CNPG, not user-configurable)
-  # to fail when barman-cloud tries to connect, which makes pg_stat_archiver
-  # record failures and the WAL health checker report unhealthy status.
+  # Configure backup pointing to a localhost port with nothing listening.
+  # Connection is refused instantly (no DNS lookup delay), which makes
+  # barman-cloud fail fast. pg_stat_archiver records the failure and the
+  # WAL health checker reports unhealthy status.
   #
   # NOTE: archive_command is a FIXED parameter in CNPG — you cannot set it
   # directly. The operator always sets it to "/controller/manager wal-archive ...".
@@ -29,7 +29,7 @@ spec:
   backup:
     barmanObjectStore:
       destinationPath: s3://nonexistent-bucket/archive-block-test/
-      endpointURL: http://nonexistent-archive-endpoint:9000
+      endpointURL: http://127.0.0.1:19999
       s3Credentials:
         accessKeyId:
           name: archive-block-dummy-creds
