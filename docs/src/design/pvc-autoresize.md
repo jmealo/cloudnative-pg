@@ -1021,6 +1021,21 @@ However, directory-based provisioners like [local-path-provisioner](https://gith
 
 **Mitigation:** Auto-resize requires a CSI driver that provides isolated filesystems per PVC. This should be validated in documentation and could be detected at runtime by comparing device IDs across mount points. Directory-based provisioners (commonly used in development/test environments) are not suitable for this feature.
 
+### Cluster Spec Not Updated After Resize
+
+Auto-resize patches PVCs directly but does **not** update `spec.storage.size` (or `spec.walStorage.size` / tablespace sizes) in the Cluster CR. After auto-resize grows a PVC from 10Gi to 15Gi, the Cluster CR still declares `size: 10Gi`.
+
+**Consequences:**
+
+- New replicas added via scale-up are created with PVCs at the original spec size (10Gi). They will be auto-resized on their next probe cycle, but there is a window where the new replica has less storage than existing instances.
+- Volume snapshot restores are affected: a snapshot taken from a resized PVC (15Gi) may fail or produce unexpected results when restored into a PVC whose spec declares the original smaller size (10Gi). Behavior is CSI-driver-dependent — some drivers refuse the restore, others silently create the larger volume regardless of the spec size. This is particularly relevant for CNPG's snapshot-based replica creation and backup restore workflows, where the snapshot source volume may have been auto-resized beyond the declared spec.
+- GitOps tools (ArgoCD, Flux) see no spec drift, which is desirable.
+- The existing manual resize flow (`reconcilePVCQuantity`) uses `spec.storage.size` as a floor — PVCs are grown to match spec, never shrunk. If auto-resize wrote back to spec, this floor would permanently ratchet upward, preventing any future PVC shrink workflow (e.g., recreating replicas with a smaller spec to reclaim space).
+
+**Design rationale:** The Cluster CR spec represents the user's declarative intent. The operator should not mutate it. Resize outcomes are recorded in `cluster.Status.AutoResizeEvents` for observability. This follows the Kubernetes convention where controllers write to `.status`, not `.spec`.
+
+**Future consideration:** A configurable `updateSpecOnResize` option could allow users who don't use GitOps to opt into spec updates, ensuring new replicas start at the current size. However, this interacts with potential PVC shrink support and requires careful design. See Open Questions.
+
 ---
 
 ## Pre-Merge Implementation Issues
@@ -1333,6 +1348,9 @@ event on the cluster object for webhook rejections.
 
 8. **Should `maxActionsPerDay` be per-volume or per-cluster?**
    *Recommendation: Per-volume. Cloud provider rate limits typically apply per-volume (e.g., each EBS volume has its own modification cooldown), not per-cluster.*
+
+9. **Should auto-resize optionally update `spec.storage.size` after a successful resize?**
+   *Currently, auto-resize patches only the PVC. New replicas added after resize start at the original spec size and must be auto-resized. Volume snapshot restores from resized PVCs may also behave unexpectedly when the target PVC spec declares the original smaller size (behavior is CSI-driver-dependent). An `updateSpecOnResize` option would keep the spec in sync, ensuring new replicas and snapshot restores use the current size. However, this permanently ratchets the spec floor upward, which would block any future PVC shrink workflow (recreating replicas at a smaller size). It also causes GitOps drift. Recommendation: Defer. Document the current behavior clearly and revisit when PVC shrink support is designed. Users who need immediate parity can manually update `spec.storage.size` after observing resize events.*
 
 ---
 

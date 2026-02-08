@@ -368,6 +368,17 @@ support PVC shrinking. To reclaim space:
 ## Known Limitations
 
 - **No shrinking**: PVCs can only grow, not shrink
+- **Cluster spec not updated**: After auto-resize, `spec.storage.size` (and
+  `spec.walStorage.size`) retain their original values. The PVC is larger than
+  what the spec declares. This means new replicas added after a resize start
+  with the original spec size and are auto-resized on their next probe cycle.
+  This is intentional: the operator does not modify the user's declarative spec,
+  which preserves GitOps compatibility and avoids permanently ratcheting up the
+  size floor (which would prevent future PVC shrink workflows).
+  This also affects volume snapshot restores: a snapshot taken from a resized
+  PVC (e.g. 15Gi) may fail or behave unexpectedly when restored into a new
+  PVC whose spec declares the original smaller size (e.g. 10Gi), depending
+  on the CSI driver
 - **Directory-based provisioners**: Local-path-provisioner and similar
   directory-based storage do not support volume expansion
 - **Offline resize**: Some CSI drivers require pod restart for resize;
