@@ -50,7 +50,7 @@ func ShouldResize(usedPercent float64, availableBytes int64, triggers *apiv1.Res
 		if err != nil {
 			autoresizeLog.Info("invalid minAvailable, using percentage trigger only",
 				"minAvailable", triggers.MinAvailable, "error", err.Error())
-			return usedPercent > float64(usageThreshold)
+			return false
 		}
 
 		minAvailableBytes := minAvailableQty.Value()

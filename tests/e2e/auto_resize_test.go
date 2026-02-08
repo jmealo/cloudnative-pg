@@ -743,7 +743,10 @@ var _ = Describe("PVC Auto-Resize", Label(tests.LabelAutoResize), func() {
 				Eventually(func(g Gomega) {
 					cluster, err := clusterutils.Get(env.Ctx, env.Client, namespace, clusterName)
 					g.Expect(err).ToNot(HaveOccurred())
-					instance := cluster.Status.DiskStatus.Instances[podName]
+					g.Expect(cluster.Status.DiskStatus).ToNot(BeNil())
+					instance, ok := cluster.Status.DiskStatus.Instances[podName]
+					g.Expect(ok).To(BeTrue(), "DiskStatus should contain instance %s", podName)
+					g.Expect(instance.DataVolume).ToNot(BeNil())
 					g.Expect(instance.DataVolume.PercentUsed).To(BeNumerically(">", 80),
 						"Trigger condition must still be met (filesystem expansion may be slow)")
 				}, 2*time.Minute, 5*time.Second).Should(Succeed())
@@ -1201,7 +1204,9 @@ var _ = Describe("PVC Auto-Resize", Label(tests.LabelAutoResize), func() {
 				Eventually(func(g Gomega) {
 					cluster, err := clusterutils.Get(env.Ctx, env.Client, namespace, clusterName)
 					g.Expect(err).ToNot(HaveOccurred())
-					instance := cluster.Status.DiskStatus.Instances[clusterName+"-1"]
+					g.Expect(cluster.Status.DiskStatus).ToNot(BeNil())
+					instance, ok := cluster.Status.DiskStatus.Instances[clusterName+"-1"]
+					g.Expect(ok).To(BeTrue(), "DiskStatus should contain instance")
 					g.Expect(instance.WALHealth).ToNot(BeNil())
 					g.Expect(instance.WALHealth.ArchiveHealthy).To(BeFalse(),
 						"Archive should be unhealthy when there are recent failures")
@@ -1230,7 +1235,10 @@ var _ = Describe("PVC Auto-Resize", Label(tests.LabelAutoResize), func() {
 				Eventually(func(g Gomega) {
 					cluster, err := clusterutils.Get(env.Ctx, env.Client, namespace, clusterName)
 					g.Expect(err).ToNot(HaveOccurred())
-					instance := cluster.Status.DiskStatus.Instances[podName]
+					g.Expect(cluster.Status.DiskStatus).ToNot(BeNil())
+					instance, ok := cluster.Status.DiskStatus.Instances[podName]
+					g.Expect(ok).To(BeTrue(), "DiskStatus should contain instance %s", podName)
+					g.Expect(instance.DataVolume).ToNot(BeNil())
 					g.Expect(instance.DataVolume.PercentUsed).To(BeNumerically(">", 80))
 				}, 60*time.Second, 5*time.Second).Should(Succeed())
 			})
