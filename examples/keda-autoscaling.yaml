@@ -1,0 +1,233 @@
+# KEDA Autoscaling Example for CloudNativePG
+#
+# This example demonstrates how to use KEDA to autoscale a CloudNativePG cluster
+# based on various PostgreSQL metrics. No changes to CNPG are required.
+#
+# Prerequisites:
+# - KEDA installed in your cluster
+# - Prometheus scraping CNPG metrics
+# - CloudNativePG cluster with scale subresource
+
+---
+# Example CloudNativePG Cluster
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: postgres-cluster
+spec:
+  instances: 3  # This will be managed by KEDA
+  
+  # Ensure we have at least one sync replica
+  minSyncReplicas: 1
+  maxSyncReplicas: 2
+  
+  # PostgreSQL configuration
+  postgresql:
+    parameters:
+      max_connections: "200"
+      shared_buffers: "256MB"
+  
+  # Enable metrics collection
+  monitoring:
+    enabled: true
+
+---
+# KEDA ScaledObject for connection-based scaling
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: postgres-connection-scaler
+spec:
+  # Target the CNPG Cluster
+  scaleTargetRef:
+    apiVersion: postgresql.cnpg.io/v1
+    kind: Cluster
+    name: postgres-cluster
+  
+  # Scaling boundaries
+  minReplicaCount: 2  # Never go below 2 instances
+  maxReplicaCount: 8  # Maximum 8 instances
+  
+  # Cool down period to prevent flapping
+  cooldownPeriod: 300  # 5 minutes
+  
+  triggers:
+  # Scale based on connection saturation
+  - type: prometheus
+    metadata:
+      serverAddress: http://prometheus:9090
+      metricName: connection_saturation
+      threshold: '70'  # Scale up when connections reach 70%
+      query: |
+        (sum(cnpg_postgres_connections_total{cluster="postgres-cluster"}) / 
+         sum(cnpg_postgres_connections_max{cluster="postgres-cluster"})) * 100
+
+---
+# Alternative: Scale based on replication lag
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: postgres-lag-scaler
+spec:
+  scaleTargetRef:
+    apiVersion: postgresql.cnpg.io/v1
+    kind: Cluster
+    name: postgres-cluster
+  
+  minReplicaCount: 2
+  maxReplicaCount: 8
+  
+  # Advanced scaling behavior
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleUp:
+          stabilizationWindowSeconds: 60
+          policies:
+          - type: Percent
+            value: 100  # Double the replicas
+            periodSeconds: 60
+        scaleDown:
+          stabilizationWindowSeconds: 300
+          policies:
+          - type: Pods
+            value: 1  # Remove 1 replica at a time
+            periodSeconds: 300
+  
+  triggers:
+  # Scale based on replication lag
+  - type: prometheus
+    metadata:
+      serverAddress: http://prometheus:9090
+      metricName: replication_lag
+      threshold: '10'  # Scale up when lag exceeds 10 seconds
+      query: |
+        max(cnpg_postgres_replication_lag_seconds{cluster="postgres-cluster"})
+
+---
+# Multi-metric scaling example
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: postgres-multi-metric-scaler
+spec:
+  scaleTargetRef:
+    apiVersion: postgresql.cnpg.io/v1
+    kind: Cluster
+    name: postgres-cluster
+  
+  minReplicaCount: 3
+  maxReplicaCount: 10
+  
+  # Polling interval for metrics
+  pollingInterval: 30
+  
+  triggers:
+  # Connection-based scaling
+  - type: prometheus
+    metadata:
+      serverAddress: http://prometheus:9090
+      metricName: connection_pressure
+      threshold: '60'
+      query: |
+        (sum(cnpg_postgres_connections_total{cluster="postgres-cluster"}) / 
+         sum(cnpg_postgres_connections_max{cluster="postgres-cluster"})) * 100
+  
+  # CPU-based scaling
+  - type: cpu
+    metadataFromEnv: []
+    metadata:
+      type: Utilization
+      value: '70'
+  
+  # Memory-based scaling  
+  - type: memory
+    metadataFromEnv: []
+    metadata:
+      type: Utilization
+      value: '80'
+  
+  # Transaction rate scaling
+  - type: prometheus
+    metadata:
+      serverAddress: http://prometheus:9090
+      metricName: transaction_rate
+      threshold: '1000'  # Scale up when exceeding 1000 tx/s
+      query: |
+        sum(rate(cnpg_postgres_stat_database_xact_commit{cluster="postgres-cluster"}[1m])) +
+        sum(rate(cnpg_postgres_stat_database_xact_rollback{cluster="postgres-cluster"}[1m]))
+
+---
+# PostgreSQL-specific scaling with query performance
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: postgres-query-performance-scaler
+spec:
+  scaleTargetRef:
+    apiVersion: postgresql.cnpg.io/v1
+    kind: Cluster
+    name: postgres-cluster
+  
+  minReplicaCount: 2
+  maxReplicaCount: 6
+  
+  triggers:
+  # Scale based on slow queries
+  - type: prometheus
+    metadata:
+      serverAddress: http://prometheus:9090
+      metricName: slow_queries
+      threshold: '50'  # Scale when more than 50 slow queries per minute
+      query: |
+        sum(rate(pg_stat_statements_mean_time_seconds{cluster="postgres-cluster",mean_time_seconds>="1"}[1m])) * 60
+  
+  # Scale based on lock wait time
+  - type: prometheus
+    metadata:
+      serverAddress: http://prometheus:9090
+      metricName: lock_wait_time
+      threshold: '5'  # Scale when average lock wait exceeds 5 seconds
+      query: |
+        avg(pg_stat_database_blks_lock_wait_time{cluster="postgres-cluster"})
+
+---
+# Time-based scaling for predictable workloads
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: postgres-scheduled-scaler
+spec:
+  scaleTargetRef:
+    apiVersion: postgresql.cnpg.io/v1
+    kind: Cluster
+    name: postgres-cluster
+  
+  minReplicaCount: 2
+  maxReplicaCount: 8
+  
+  triggers:
+  # Cron-based scaling for business hours
+  - type: cron
+    metadata:
+      timezone: America/New_York
+      start: 0 8 * * 1-5  # 8 AM weekdays
+      end: 0 18 * * 1-5   # 6 PM weekdays
+      desiredReplicas: "6"
+  
+  # Weekend scaling
+  - type: cron
+    metadata:
+      timezone: America/New_York
+      start: 0 0 * * 6,0  # Midnight Saturday/Sunday
+      end: 0 0 * * 1      # Midnight Monday
+      desiredReplicas: "3"
+  
+  # Combined with metrics for dynamic adjustment
+  - type: prometheus
+    metadata:
+      serverAddress: http://prometheus:9090
+      metricName: active_connections
+      threshold: '150'
+      query: |
+        sum(cnpg_postgres_connections_total{cluster="postgres-cluster",state="active"})

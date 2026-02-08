@@ -62,6 +62,7 @@ import (
 	"github.com/cloudnative-pg/cloudnative-pg/pkg/reconciler/majorupgrade"
 	"github.com/cloudnative-pg/cloudnative-pg/pkg/reconciler/persistentvolumeclaim"
 	"github.com/cloudnative-pg/cloudnative-pg/pkg/reconciler/replicaclusterswitch"
+	"github.com/cloudnative-pg/cloudnative-pg/pkg/resources/status"
 	"github.com/cloudnative-pg/cloudnative-pg/pkg/specs"
 	"github.com/cloudnative-pg/cloudnative-pg/pkg/utils"
 )

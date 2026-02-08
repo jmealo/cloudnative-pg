@@ -532,7 +532,7 @@ var _ = Describe("PVC Auto-Resize", Label(tests.LabelAutoResize), func() {
 				cluster, err := clusterutils.Get(env.Ctx, env.Client, namespace, clusterName)
 				Expect(err).ToNot(HaveOccurred())
 				Expect(cluster.Spec.StorageConfiguration.Resize.Strategy).ToNot(BeNil())
-				Expect(cluster.Spec.StorageConfiguration.Resize.Strategy.MaxActionsPerDay).To(Equal(1))
+				Expect(cluster.Spec.StorageConfiguration.Resize.Strategy.MaxActionsPerDay).To(HaveValue(Equal(1)))
 			})
 
 			By("filling the disk to trigger first auto-resize", func() {
@@ -650,7 +650,7 @@ var _ = Describe("PVC Auto-Resize", Label(tests.LabelAutoResize), func() {
 					pvc := &pvcList.Items[idx]
 					if pvc.Labels[utils.ClusterLabelName] == clusterName &&
 						pvc.Labels[utils.PvcRoleLabelName] == string(utils.PVCRolePgData) {
-						gomega.Expect(pvc.Spec.Resources.Requests.Storage().String()).To(Equal(sizeAfterFirstResize.String()))
+						Expect(pvc.Spec.Resources.Requests.Storage().String()).To(Equal(sizeAfterFirstResize.String()))
 					}
 				}
 			})

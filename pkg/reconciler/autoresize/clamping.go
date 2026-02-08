@@ -91,29 +91,11 @@ func CalculateNewSize(currentSize resource.Quantity, policy *apiv1.ExpansionPoli
 	currentDec := currentSize.AsDec()
 	var expansionStepDec *inf.Dec
 
+	//nolint:nestif // logic is straightforward: percentage vs absolute step calculation
 	if isPercentageStep(stepVal) {
-		// Handle percentage-based step
-		percent, err := parsePercentage(stepVal)
+		expansionStepDec, err = calculatePercentageStep(currentDec, stepVal, policy)
 		if err != nil {
-			return currentSize, fmt.Errorf("invalid percentage step: %w", err)
-		}
-
-		// expansionStep = currentSize * (percent / 100)
-		expansionStepDec = new(inf.Dec).Mul(currentDec, inf.NewDec(int64(percent), 0))
-		expansionStepDec = new(inf.Dec).QuoRound(expansionStepDec, inf.NewDec(100, 0), 0, inf.RoundDown)
-
-		// Parse min and max step constraints
-		minStepQty := parseQuantityOrDefault(policy.MinStep, defaultMinStep)
-		maxStepQty := parseQuantityOrDefault(policy.MaxStep, defaultMaxStep)
-
-		minStepDec := minStepQty.AsDec()
-		maxStepDec := maxStepQty.AsDec()
-
-		// Clamp the step: max(minStep, min(rawStep, maxStep))
-		if expansionStepDec.Cmp(minStepDec) < 0 {
-			expansionStepDec = minStepDec
-		} else if expansionStepDec.Cmp(maxStepDec) > 0 {
-			expansionStepDec = maxStepDec
+			return currentSize, err
 		}
 	} else {
 		// Absolute value step
@@ -141,6 +123,38 @@ func CalculateNewSize(currentSize resource.Quantity, policy *apiv1.ExpansionPoli
 	}
 
 	return *resource.NewDecimalQuantity(*newSizeDec, currentSize.Format), nil
+}
+
+// calculatePercentageStep computes and clamps a percentage-based expansion step.
+func calculatePercentageStep(
+	currentDec *inf.Dec,
+	stepVal intstr.IntOrString,
+	policy *apiv1.ExpansionPolicy,
+) (*inf.Dec, error) {
+	percent, err := parsePercentage(stepVal)
+	if err != nil {
+		return nil, fmt.Errorf("invalid percentage step: %w", err)
+	}
+
+	// expansionStep = currentSize * (percent / 100)
+	expansionStepDec := new(inf.Dec).Mul(currentDec, inf.NewDec(int64(percent), 0))
+	expansionStepDec = new(inf.Dec).QuoRound(expansionStepDec, inf.NewDec(100, 0), 0, inf.RoundDown)
+
+	// Parse min and max step constraints
+	minStepQty := parseQuantityOrDefault(policy.MinStep, defaultMinStep)
+	maxStepQty := parseQuantityOrDefault(policy.MaxStep, defaultMaxStep)
+
+	minStepDec := minStepQty.AsDec()
+	maxStepDec := maxStepQty.AsDec()
+
+	// Clamp the step: max(minStep, min(rawStep, maxStep))
+	if expansionStepDec.Cmp(minStepDec) < 0 {
+		expansionStepDec = minStepDec
+	} else if expansionStepDec.Cmp(maxStepDec) > 0 {
+		expansionStepDec = maxStepDec
+	}
+
+	return expansionStepDec, nil
 }
 
 // parseQuantityOrDefault attempts to parse a quantity string, returning a default if empty or invalid.

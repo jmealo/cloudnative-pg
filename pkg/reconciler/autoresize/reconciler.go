@@ -155,6 +155,7 @@ func reconcilePVC(
 	}
 
 	// Trigger Check
+	//nolint:gosec // G115: disk sizes won't exceed int64 limits (9.2 EB)
 	if !ShouldResize(volumeStats.PercentUsed, int64(volumeStats.AvailableBytes), triggers) {
 		return false, nil
 	}
