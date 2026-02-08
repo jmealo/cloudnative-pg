@@ -974,8 +974,12 @@ However, directory-based provisioners like [local-path-provisioner](https://gith
 
 ## Pre-Merge Implementation Issues
 
-The following issues were identified during internal review and must be resolved
-before submitting for upstream review.
+The following issues were identified during internal review. Items are split
+into two categories based on PR scope:
+
+- **This PR:** Must be resolved before submitting the initial feature PR.
+- **Follow-up PR:** Will be addressed in focused follow-up PRs after the core
+  feature merges. This keeps the initial PR (55 files, 11.5k+ lines) reviewable.
 
 ### Status Persistence Bug — RESOLVED
 
@@ -1002,83 +1006,73 @@ derived in the instance manager from cluster status (approach #2).
 metric requires operator-side tracking, not instance-manager-side). See
 "Remaining Issues" below.
 
-### Remaining Issues (from CNPG-idiomatic code review)
+### Remaining Issues — This PR
 
 #### Swallowed Errors in PVC Loop (Important)
 
-In `reconciler.go:78-80`, if 3 out of 5 PVCs fail to resize, the function
+In `reconciler.go`, if 3 out of 5 PVCs fail to resize, the function
 returns `nil` error. The caller has no visibility into partial failures.
 
-**Fix:** Aggregate errors with `errors.Join`:
-```go
-var errs []error
-for idx := range pvcs {
-    if err != nil {
-        errs = append(errs, fmt.Errorf("PVC %s: %w", pvc.Name, err))
-        continue
-    }
-}
-if len(errs) > 0 {
-    return ctrl.Result{RequeueAfter: RequeueDelay}, errors.Join(errs...)
-}
-```
+**Fix:** Aggregate errors with `errors.Join`.
 
 #### Missing Event for "At Expansion Limit" (Important)
 
 Rate limit and WAL safety blocks emit events, but hitting the expansion limit
 does not. This is an important operational signal.
 
-**Fix:** Add `recorder.Eventf(cluster, corev1.EventTypeWarning, "AutoResizeAtLimit",
-"Volume %s has reached expansion limit %s", pvc.Name, expansion.Limit)`.
+**Fix:** Add `recorder.Eventf(cluster, corev1.EventTypeWarning, "AutoResizeAtLimit", ...)`.
 
 #### Magic Number for Event History Cap (Style)
-
-`reconciler.go:295` uses a bare `50` for the event history cap.
 
 **Fix:** Use a named constant: `const maxAutoResizeEventHistory = 50`.
 
 #### ShouldResize Swallows Parse Error (Style)
 
-In `triggers.go:47-51`, an invalid `minAvailable` value is silently ignored
-and the function falls back to percentage-only evaluation.
-
-**Fix:** Log a warning when `minAvailable` fails to parse. The webhook should
-also validate this (belt-and-suspenders).
-
-#### Metric Ownership Consideration (Design)
-
-The current implementation derives logical metrics (resizes_total, budget)
-in the instance manager from cluster status. The CNPG-idiomatic approach
-separates concerns: Pod = raw disk data, Operator = decision metrics. Consider
-moving resize_blocked, resizes_total, and budget_remaining to the operator's
-metrics endpoint in a follow-up.
+**Fix:** Log a warning when `minAvailable` fails to parse.
 
 #### Structured Error Wrapping (Style)
 
-Some error paths use `%v` instead of `%w` for error wrapping. All
-`fmt.Errorf` calls should use `%w` to preserve error chains for
-`errors.Is`/`errors.As` usage.
+All `fmt.Errorf` calls should use `%w` to preserve error chains.
 
 #### AlertOnResize Field Unused (Should Fix)
 
-`AlertOnResize` exists in the `ResizeStrategy` API type but is never read by
-the reconciler. Either wire it to emit a Kubernetes event on each resize or
-remove the field.
+`AlertOnResize` (`*bool`, default `true`) exists in `WALSafetyPolicy` but is
+never read. **Fix:** Wire to event recorder.
 
-#### resizeInUseVolumes Ignored (Should Fix)
+### Remaining Issues — Follow-Up PRs
 
-Auto-resize currently ignores `storageConfiguration.resizeInUseVolumes`. If a
-user explicitly sets this to `false`, auto-resize should respect it and skip
-resize (or log a warning). This aligns with the existing manual resize behavior.
+#### Metric Ownership (Follow-Up PR #2)
 
-### WAL Safety Fail-Open Without Warning (Important)
+The current implementation derives logical metrics in the instance manager from
+cluster status. The CNPG-idiomatic approach separates concerns: Pod = raw disk
+data, Operator = decision metrics. Move resize_blocked, resizes_total, and
+budget_remaining to the operator's metrics endpoint.
 
-When `walHealth` is nil in `walsafety.go:98`, resize is silently allowed. This
-is the correct default (fail-open for availability), but no warning is emitted.
+#### resizeInUseVolumes Ignored (Follow-Up PR #3)
 
-**Fix:** Emit a Kubernetes warning event when WAL health data is unavailable:
+Auto-resize currently ignores `storageConfiguration.resizeInUseVolumes`. Needs
+design discussion: does this flag control manual resize, auto-resize, or both?
+
+#### Pointer Fields for Zero-Value Semantics (Follow-Up PR #3)
+
+`UsageThreshold int` and `MaxActionsPerDay int` use bare values. Changing to
+`*int` would allow distinguishing "not set" from "explicitly zero" but is an
+API surface change that should be a separate PR.
+
+### WAL Safety Fail-Open Without Warning (Important) — This PR
+
+When `walHealth` is nil in `walsafety.go:98`, resize is silently allowed.
+
+**Design rationale: Fail-open is correct.** The primary threat is disk full →
+PostgreSQL crashes → data unavailable. If WAL health data is missing (instance
+manager busy, query timeout, etc.), blocking the resize is MORE dangerous than
+allowing it — the disk may be about to fill up. Fail-closed would mean "if we
+can't verify WAL health, let the database crash." That's wrong for a storage
+safety feature.
+
+**Fix:** Keep fail-open but emit a Kubernetes warning event:
 `"auto-resize permitted without WAL health verification (data unavailable)"`.
-This ensures operators can detect when the safety check is being bypassed.
+This gives operators visibility without sacrificing availability.
 
 ### parseQuantityOrDefault Silent Fallback (Important)
 

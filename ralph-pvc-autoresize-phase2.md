@@ -1,7 +1,10 @@
 You are finishing the PVC Auto-Resize feature for CloudNativePG before PR
 submission. Phases 1-3 (status persistence, rate limiting, metrics) are RESOLVED.
-Focus is now on: remaining code fixes (Phase 3.5), webhook validation (Phase 5.5
-and 5.75), E2E test gaps (Phase 6), and slot test stabilization (Phase 7).
+
+**CRITICAL SCOPE RULE:** This PR already changes 55 files with 11,500+ insertions.
+Every additional change makes it harder to review. Only implement items marked
+"SHIP IN THIS PR" below. Items marked "FOLLOW-UP PR" should NOT be implemented —
+they will be separate, focused PRs after the core feature merges.
 
 Ref: docs/src/design/pvc-autoresize.md (see "Pre-Merge Implementation Issues"
      and "Configuration Conflicts & Validation Gaps")
@@ -48,18 +51,62 @@ Phase 3 (Resize Metrics) have been implemented:
   for rate limit blocks and WAL safety blocks
 
 **Remaining metrics gap:** `cnpg_disk_resize_blocked` is still not populated.
-The blocked condition is decided by the operator but the metric lives in the
-instance manager. Address in Phase 3.5 below.
+See follow-up items below.
 
 ---
 
-## Phase 3.5: Remaining Code Issues from CNPG-Idiomatic Review
+## SHIP IN THIS PR: Code Fixes
 
-### 3.5.1 Aggregate Errors in PVC Loop (Important)
+### Fix 1: Reject int step values in webhook (Must Fix)
 
-In `reconciler.go`, if 3 out of 5 PVCs fail, the function returns `nil` error.
+If `step` is provided as an int (e.g., `step: 20`), `resource.ParseQuantity("20")`
+returns 20 bytes, not 20%. This is almost never the user's intent.
 
-**Fix:**
+In `internal/webhook/v1/cluster_webhook.go`, `validateExpansionStep()`:
+```go
+if stepVal.Type == intstr.Int && stepVal.IntVal > 0 {
+    return field.ErrorList{field.Invalid(fldPath.Child("step"), stepVal,
+        "integer step values are ambiguous; use a percentage string like '20%' or an absolute quantity like '5Gi'")}
+}
+```
+
+Also reject `step: 0`:
+```go
+if stepVal.Type == intstr.Int && stepVal.IntVal == 0 {
+    return field.ErrorList{field.Invalid(fldPath.Child("step"), stepVal,
+        "step must be a positive quantity or percentage, not 0")}
+}
+```
+
+Add unit tests to `cluster_webhook_autoresize_conflicts_test.go`.
+
+### Fix 2: WAL health fail-open warning event (Must Fix)
+
+**IMPORTANT: Keep fail-open.** The primary threat is disk full → database crash.
+If WAL health data is unavailable, blocking the resize is MORE dangerous than
+allowing it. The RFC design is correct. We just need a warning event.
+
+In `walsafety.go`:
+```go
+if walHealth == nil {
+    return WALSafetyResult{
+        Allowed: true,
+        Reason:  "wal_health_unavailable",
+    }
+}
+```
+
+In `reconcilePVC()`:
+```go
+if walSafetyResult.Reason == "wal_health_unavailable" {
+    recorder.Eventf(cluster, corev1.EventTypeWarning, "AutoResizeWALHealthUnavailable",
+        "Auto-resize permitted without WAL health verification for PVC %s", pvc.Name)
+}
+```
+
+### Fix 3: Aggregate errors in PVC loop (Should Fix)
+
+In `reconciler.go`, partial PVC failures are silently swallowed:
 ```go
 var errs []error
 for idx := range pvcs {
@@ -76,11 +123,9 @@ if len(errs) > 0 {
 }
 ```
 
-### 3.5.2 Emit Event for "At Expansion Limit" (Important)
+### Fix 4: Emit event for "at expansion limit" (Should Fix)
 
-Rate limit and WAL safety blocks now emit events. Expansion limit blocks
-do not. Add:
-
+Rate limit and WAL safety blocks emit events, but expansion limit does not:
 ```go
 if currentSize.Cmp(limit) >= 0 {
     contextLogger.Info("auto-resize blocked: at expansion limit", "pvc", pvc.Name)
@@ -90,127 +135,13 @@ if currentSize.Cmp(limit) >= 0 {
 }
 ```
 
-### 3.5.3 Named Constant for Event History Cap (Style)
+### Fix 5: Named constant for event history cap (Style)
 
-Replace magic number `50` in `reconciler.go`:
 ```go
 const maxAutoResizeEventHistory = 50
 ```
 
-### 3.5.4 Log Warning for Invalid minAvailable (Style)
-
-In `triggers.go`, `ShouldResize` silently ignores invalid `minAvailable`:
-```go
-minAvailableQty, err := resource.ParseQuantity(triggers.MinAvailable)
-if err != nil {
-    contextLogger.Warn("invalid minAvailable, using percentage trigger only",
-        "minAvailable", triggers.MinAvailable, "error", err)
-    return usedPercent > float64(usageThreshold)
-}
-```
-
-### 3.5.5 Fix ResizeBlocked Metric (Important)
-
-`cnpg_disk_resize_blocked` is still not populated. To keep it in the instance
-manager, the controller must write a blocked reason to cluster status that the
-instance manager can read. Alternatively, skip this metric for now and document
-it as a follow-up (move to operator metrics endpoint).
-
-### 3.5.6 Use %w for All Error Wrapping (Style)
-
-Grep for `fmt.Errorf.*%v` in the autoresize package and replace with `%w`.
-
-### 3.5.7 Fix step IntOrString Handling (Must Fix)
-
-If `step` is provided as an int (e.g., `step: 20`), it currently fails at
-runtime because `resource.ParseQuantity("20")` returns 20 bytes, not 20%.
-Either:
-- Reject int steps in webhook validation (preferred — see Phase 5.75)
-- Or convert ints to percentage strings in `clamping.go`
-
-### 3.5.8 Wire AlertOnResize or Remove (Should Fix)
-
-`AlertOnResize` field exists in `cluster_types.go` API but is never read.
-Either:
-- Wire it to emit a Kubernetes event on each resize (use `recorder.Eventf`)
-- Or remove the field from the API (breaking change if already released)
-
-### 3.5.9 Consider resizeInUseVolumes Flag (Should Fix)
-
-Auto-resize currently ignores `storageConfiguration.resizeInUseVolumes`.
-This is counterintuitive — if a user explicitly set it to `false`, they
-don't want volumes resized while in use. The reconciler should check this
-flag and skip resize if it's `false` (or log a warning).
-
-### 3.5.10 maxActionsPerDay: 0 Semantics (Should Fix)
-
-Current behavior: `maxActionsPerDay: 0` silently uses default (3).
-Options:
-- Treat 0 as "disable rate limiting" (unlimited resizes)
-- Reject 0 in webhook (prefer this — see Phase 5.75)
-- Document the behavior
-
-### Verification
-
-1. `make test` passes
-2. `make lint` passes
-3. `make vet` passes
-
----
-
-## Phase 4: Add WAL Health Fail-Open Warning (IMPORTANT)
-
-### The Issue
-
-In `pkg/reconciler/autoresize/walsafety.go:98`:
-```go
-if walHealth == nil {
-    return WALSafetyResult{Allowed: true}
-}
-```
-
-Resize proceeds silently when WAL health data is unavailable.
-
-### The Fix
-
-Emit a Kubernetes warning event before returning:
-
-```go
-if walHealth == nil {
-    contextLogger.Info("WAL health data unavailable, allowing resize (fail-open)")
-    return WALSafetyResult{
-        Allowed: true,
-        Reason:  "wal_health_unavailable",
-    }
-}
-```
-
-Then in `reconcilePVC()` (reconciler.go), when the WAL safety result has
-`Reason == "wal_health_unavailable"`, record a warning event:
-
-```go
-if walResult.Reason == "wal_health_unavailable" {
-    r.Recorder.Eventf(cluster, corev1.EventTypeWarning, "AutoResizeWALHealthUnavailable",
-        "Auto-resize permitted without WAL health verification for PVC %s", pvc.Name)
-}
-```
-
-### Verification
-
-1. `make test` passes (update walsafety_test.go to check Reason field)
-2. No regression in E2E tests
-
----
-
-## Phase 5: Add parseQuantityOrDefault Warning Log (IMPORTANT)
-
-### The Issue
-
-`pkg/reconciler/autoresize/clamping.go:136` silently falls back to defaults
-when user quantities fail to parse. A typo like `minStep: "2XGi"` silently
-becomes `minStep: "2Gi"`.
-
-### The Fix
+### Fix 6: Log warning for parseQuantityOrDefault (Style)
 
 ```go
 func parseQuantityOrDefault(qtyStr string, defaultStr string) *resource.Quantity {
@@ -229,159 +160,46 @@ func parseQuantityOrDefault(qtyStr string, defaultStr string) *resource.Quantity
 }
 ```
 
-### Verification
+### Fix 7: Log warning for invalid minAvailable in ShouldResize (Style)
 
-1. `make test` passes
-2. `make lint` passes (may need to add `log` import)
-
----
-
-## Phase 5.5: Reject or Document `step: 0` Zero-Value (IMPORTANT)
-
-### The Issue
-
-In `pkg/reconciler/autoresize/clamping.go:77-81`:
 ```go
-if (stepVal.Type == intstr.String && stepVal.StrVal == "") ||
-    (stepVal.Type == intstr.Int && stepVal.IntVal == 0) {
-    stepVal = intstr.FromString(defaultStepPercent)
+minAvailableQty, err := resource.ParseQuantity(triggers.MinAvailable)
+if err != nil {
+    contextLogger.Warn("invalid minAvailable, using percentage trigger only",
+        "minAvailable", triggers.MinAvailable, "error", err)
+    return usedPercent > float64(usageThreshold)
 }
 ```
 
-`IntOrString{Type: intstr.Int, IntVal: 0}` (i.e. `step: 0`) is treated as
-"use default 20%" rather than "0 step = don't resize". If someone explicitly
-sets `step: 0` thinking it disables resize, they get 20% resizes instead.
+### Fix 8: Wire AlertOnResize to event recorder (Should Fix)
 
-### The Fix (choose one)
+`AlertOnResize` (`*bool`, default `true`) exists in `WALSafetyPolicy` but is
+never read. In `reconcilePVC()`, check it before emitting resize events:
 
-**Option A: Reject `step: 0` in webhook validation** (preferred)
-
-In `internal/webhook/v1/cluster_webhook.go`, `validateExpansionStep()`:
 ```go
-if stepVal.Type == intstr.Int && stepVal.IntVal == 0 {
-    return field.ErrorList{field.Invalid(fldPath.Child("step"), stepVal,
-        "step must be a positive quantity or percentage, not 0")}
+if walSafety != nil && (walSafety.AlertOnResize == nil || *walSafety.AlertOnResize) {
+    recorder.Eventf(cluster, corev1.EventTypeNormal, "AutoResizeSuccess",
+        "Expanded volume %s from %s to %s", pvc.Name, currentSize.String(), newSize.String())
 }
 ```
 
-**Option B: Document the behavior**
+### Fix 9: Use %w for error wrapping (Style)
 
-If `step: 0` should mean "use default", document this explicitly in
-`docs/src/storage_autoresize.md` in the expansion section. Add a note:
-"If `step` is omitted or set to `0`, the default step of 20% is used."
+Grep for `fmt.Errorf.*%v` in the autoresize package and replace with `%w`.
 
 ### Verification
 
 1. `make test` passes
-2. If Option A: add webhook unit test for `step: 0` rejection
+2. `make lint` passes
+3. `make vet` passes
 
 ---
 
-## Phase 5.75: Webhook Validation Warnings (IMPORTANT)
+## SHIP IN THIS PR: E2E Test Fixes
 
-A comprehensive review identified multiple configurations that the webhook
-accepts but lead to surprising or broken runtime behavior. Implement webhook
-warnings for the highest-impact cases.
+### E2E 1: REQ-12 AutoResizeEvent Verification (Critical)
 
-### Context
-
-The full analysis is in `docs/src/design/pvc-autoresize.md` section
-"Configuration Conflicts & Validation Gaps". The summary table there lists
-all cases by severity.
-
-### Must-Have Validations (implement in this phase)
-
-**1. Reject `usageThreshold: 0`** — same zero-value ambiguity as `step: 0`.
-
-In `internal/webhook/v1/cluster_webhook.go`, `validateResizeTriggers()`:
-```go
-if triggers.UsageThreshold != nil && *triggers.UsageThreshold == 0 {
-    allErrs = append(allErrs, field.Invalid(fldPath.Child("usageThreshold"),
-        *triggers.UsageThreshold,
-        "usageThreshold must be between 1 and 99, not 0"))
-}
-```
-
-**2. Warn when `limit < spec.storage.size`** — silent no-op.
-
-In `validateExpansionPolicy()`:
-```go
-if limit != nil && currentSize != nil && limit.Cmp(*currentSize) < 0 {
-    // Emit warning (not error) — limit could be raised later
-    contextLogger.Warn("expansion.limit is less than current storage size; auto-resize will not trigger",
-        "limit", limit.String(), "currentSize", currentSize.String())
-}
-```
-
-**3. Warn when `minStep`/`maxStep` set with absolute `step`** — silently ignored.
-
-In `validateExpansionPolicy()`:
-```go
-if isAbsoluteStep && (minStep != nil || maxStep != nil) {
-    contextLogger.Warn("minStep and maxStep are only applied to percentage-based steps; ignored for absolute step",
-        "step", step.String())
-}
-```
-
-**4. Warn when `maxActionsPerDay: 0` with `enabled: true`** — effectively disabled.
-
-In `validateResizeStrategy()`:
-```go
-if strategy.MaxActionsPerDay != nil && *strategy.MaxActionsPerDay == 0 {
-    contextLogger.Warn("maxActionsPerDay: 0 effectively disables auto-resize despite enabled: true")
-}
-```
-
-**5. Reject bare integer step values** (e.g., `step: 20` → 20 bytes) — unit ambiguity.
-
-A user writing `step: 20` likely means 20%, but IntOrString integer values are
-parsed as `resource.ParseQuantity("20")` which yields 20 bytes. This is almost
-never the user's intent.
-
-In `validateExpansionStep()`:
-```go
-if stepVal.Type == intstr.Int && stepVal.IntVal > 0 {
-    return field.ErrorList{field.Invalid(fldPath.Child("step"), stepVal,
-        "integer step values are ambiguous; use a percentage string like '20%' or an absolute quantity like '5Gi'")}
-}
-```
-
-### Nice-to-Have Validations (implement if time permits)
-
-6. Warn for `step > 100%` (each resize more than doubles the volume)
-7. Warn when `minAvailable > spec.storage.size` (immediate trigger)
-8. Warn when `acknowledgeWALRisk` set on dual-volume cluster (no-op)
-9. Warn for `requireArchiveHealthy: true` without backup stanza
-
-### Unit Tests
-
-Add tests for each validation to
-`internal/webhook/v1/cluster_webhook_autoresize_conflicts_test.go`:
-
-```go
-It("should reject usageThreshold: 0", func() { ... })
-It("should warn when limit < current size", func() { ... })
-It("should warn when minStep/maxStep set with absolute step", func() { ... })
-It("should warn when maxActionsPerDay is 0", func() { ... })
-```
-
-### Verification
-
-1. `make test` passes
-2. Existing webhook tests still pass (no regressions)
-3. New conflict unit tests pass
-
----
-
-## Phase 6: E2E Test Gaps (P0 + P1)
-
-Read `docs/src/design/pvc-autoresize-e2e-requirements.md` in full. Address
-these gaps IN ORDER of priority:
-
-### 6.1 REQ-12: AutoResizeEvent Verification (P1, now CRITICAL)
-
-After fixing status persistence (Phase 1), add verification to Test #1:
-
+After fixing status persistence (Phase 1), add to Test #1:
 ```go
 By("verifying an auto-resize event was recorded in cluster status", func() {
     Eventually(func(g Gomega) {
@@ -395,9 +213,7 @@ By("verifying an auto-resize event was recorded in cluster status", func() {
 })
 ```
 
-This test validates Phase 1 actually works.
-
-### 6.2 REQ-11: MinAvailable Trigger (P0)
+### E2E 2: REQ-11 MinAvailable Trigger (P0)
 
 New fixture `cluster-autoresize-minavailable.yaml.template`:
 - `triggers.minAvailable: "300Mi"` (no usageThreshold or set to 99)
@@ -405,27 +221,7 @@ New fixture `cluster-autoresize-minavailable.yaml.template`:
 
 New test: fill disk until <300Mi remain, verify PVC grows.
 
-### 6.3 REQ-14: MaxStep Runtime Clamping (P1)
-
-New fixture `cluster-autoresize-maxstep-runtime.yaml.template`:
-- `size: 10Gi`, `step: "50%"`, `maxStep: "2Gi"`
-
-New test: fill disk, verify PVC grows by at most 2Gi (to 12Gi, not 15Gi).
-
-### 6.4 REQ-16: Multi-Instance Resize (P1)
-
-The basic fixture already has `instances: 2`. Add assertions for pod -2:
-
-```go
-By("verifying ALL instance PVCs were resized", func() {
-    for i := 1; i <= 2; i++ {
-        pvcName := fmt.Sprintf("%s-%d", clusterName, i)
-        // ... check PVC size > original
-    }
-})
-```
-
-### 6.5 Replace time.Sleep with Eventually (P1)
+### E2E 3: Replace time.Sleep with Eventually/Consistently (P1)
 
 Several tests use `time.Sleep(2 * time.Minute)`. Replace with:
 ```go
@@ -434,92 +230,67 @@ Consistently(func(g Gomega) {
 }, 2*time.Minute, 10*time.Second).Should(Succeed())
 ```
 
-This speeds up passing tests and makes assertions explicit.
+### E2E 4: Slot Retention Test — Keep as PIt() (Pending)
+
+The slot detection issue has multiple root cause candidates (isPrimary gating,
+error swallowing, missing WAL health serialization). Do NOT attempt to fix this
+in the current PR. Keep as `PIt()` with a clear comment explaining the issue.
+Stabilization is a follow-up.
 
 ---
 
-## Phase 7: Stabilize Slot Retention Test (IMPORTANT)
+## SHIP IN THIS PR: Branch Cleanup
 
-### VictoriaLogs Findings
-
-The test creates the slot and verifies it via psql (`128MB retention`), but
-cluster status shows `InactiveSlotCount=0`. VictoriaLogs shows disk status
-fields but NO WAL health fields are being propagated.
-
-### Root Cause Candidates
-
-1. **isPrimary gating**: `queryInactiveSlots` only runs when `isPrimary == true`
-   (`wal/health.go:110`). If the instance is transiently in recovery during the
-   status probe, slot checks are silently skipped.
-
-2. **Non-fatal error swallowing**: Query errors at `wal/health.go:113` are
-   logged but not returned. If `queryInactiveSlots` fails, `InactiveSlots` = nil.
-
-3. **Missing WAL health in status**: VictoriaLogs shows NO WAL health fields.
-   Check if `fillWALHealthStatus` is silently failing (line 106-109 in
-   `disk_status.go` returns early on error).
-
-### Fix Strategy
-
-1. Add structured logging to `queryInactiveSlots`:
-   ```go
-   contextLogger.Info("querying inactive replication slots",
-       "isPrimary", isPrimary, "resultCount", len(status.InactiveSlots))
-   ```
-
-2. In `fillWALHealthStatus`, add logging on success too (not just error):
-   ```go
-   contextLogger.Debug("WAL health check complete",
-       "archiveHealthy", healthStatus.ArchiveHealthy,
-       "inactiveSlots", len(healthStatus.InactiveSlots))
-   ```
-
-3. Make the slot query timeout explicit (5s context deadline).
-
-4. After fixes, re-enable the test by changing `PIt` → `It` and re-run on AKS.
-
----
-
-## Phase 8: Build and Verify
-
-### Local verification
-
-```bash
-make generate && make manifests && make fmt && make lint && make test
-```
-
-### E2E on AKS
-
-```bash
-hack/e2e/run-e2e-aks-autoresize.sh
-```
-
-All 12 tests should pass (including the stabilized slot test).
-
-### Fast iteration with --focus
-
-```bash
-hack/e2e/run-e2e-aks-autoresize.sh --focus "basic auto-resize" --skip-build --skip-deploy
-hack/e2e/run-e2e-aks-autoresize.sh --focus "inactive slot" --skip-build --skip-deploy
-```
-
----
-
-## Phase 9: Branch Cleanup
-
-### 9.1 Revert unnecessary platform-specific build tag split
+### Cleanup 1: Revert build tag split
 
 If `probe_linux.go` and `probe_other.go` exist, merge back to `probe.go`.
 
-### 9.2 Remove untracked dev artifacts
+### Cleanup 2: Remove dev artifacts
 
 Do NOT commit: `.claude/`, `*.pdf`, `ralph-*.md`, `*SUMMARY.md`, etc.
 
-### 9.3 Final local verification
+### Cleanup 3: Final verification
 
 ```bash
 make generate && make manifests && make fmt && make lint && make test
 ```
+
+---
+
+## FOLLOW-UP PR #1: Webhook Validation Warnings
+
+These are safe UX improvements but NOT bugs. Ship separately to keep the
+core PR reviewable.
+
+Items:
+- Warn when `limit < spec.storage.size` (silent no-op)
+- Warn when `minStep`/`maxStep` set with absolute step (silently ignored)
+- Warn when `maxActionsPerDay: 0` with `enabled: true` (effectively disabled)
+- Warn for `step > 100%` (massive resize)
+- Warn when `minAvailable > spec.storage.size` (immediate trigger)
+- Warn when `acknowledgeWALRisk` on dual-volume cluster (no-op)
+- Warn for `requireArchiveHealthy: true` without backup stanza
+- Reject `usageThreshold: 0` (zero-value ambiguity)
+
+## FOLLOW-UP PR #2: Metrics Refactoring
+
+Items:
+- Move `cnpg_disk_resize_blocked` to operator metrics endpoint (or populate
+  from status)
+- Consider moving all resize-action metrics to operator endpoint
+- Add `NextActionAt` or `BudgetResetAt` status field for observability
+
+## FOLLOW-UP PR #3: Design Improvements
+
+Items:
+- Pointer fields for `UsageThreshold` and `MaxActionsPerDay` (API change)
+- `resizeInUseVolumes` flag gating (needs design discussion)
+- `requireArchiveHealthy` behavior when no backup configured
+- `maxActionsPerDay: 0` semantics (reject vs "unlimited")
+- Event history cap sizing (ensure 50 is sufficient for budget window)
+- Cross-volume rate limit documentation
+- OR-trigger semantics documentation
+- Slot retention test stabilization (after WAL health investigation)
 
 ---
 
@@ -541,27 +312,35 @@ ALL of the following must be true:
 
 ### Build & Test
 - `make generate && make manifests && make fmt && make lint && make test` exit 0
-- All E2E tests pass on AKS (including stabilized slot test if feasible)
+- All E2E tests pass on AKS (slot test stays as PIt)
 - All commits have DCO sign-off
 
 ### Critical Bugs (RESOLVED)
-- ~~Status persistence: AutoResizeEvents are persisted after resize~~ ✅
-- ~~Rate limiting: Budget is durable across operator restarts~~ ✅
-- ~~Metrics: `cnpg_disk_resizes_total`, `cnpg_disk_at_limit` populated~~ ✅
+- ~~Status persistence~~ ✅
+- ~~Durable rate limiting~~ ✅
+- ~~Metrics population~~ ✅
 
-### Remaining Code Fixes
-- Error aggregation in PVC loop (`errors.Join`)
+### Code Fixes (this PR)
+- Int step values rejected in webhook
+- WAL fail-open emits warning event (STAYS fail-open)
+- Error aggregation in PVC loop
 - Event for "at expansion limit"
-- Named constant for event history cap (50)
-- WAL fail-open emits warning event
+- AlertOnResize wired to recorder
+- Named constant for event cap
 - parseQuantityOrDefault logs on invalid input
-- `step: 0` and `usageThreshold: 0` rejected or documented
-- Webhook warnings for `limit < size`, `minStep`/`maxStep` with absolute step,
-  `maxActionsPerDay: 0`
+- ShouldResize logs on invalid minAvailable
+- %w error wrapping
 
-### E2E Test Gaps
-- REQ-11 (minAvailable) and REQ-12 (AutoResizeEvent) E2E tests added
-- REQ-14 (maxStep runtime clamping) E2E test added
-- REQ-16 (multi-instance resize verification) assertions added
+### E2E (this PR)
+- REQ-12: AutoResizeEvent status verification
+- REQ-11: MinAvailable trigger test
+- time.Sleep replaced with Eventually/Consistently
 
-When ALL criteria are met, output: <promise>COMPLETE</promise>
+### NOT in this PR (follow-up)
+- Webhook warnings (limit < size, minStep/maxStep with absolute step, etc.)
+- Metrics refactoring (operator endpoint, ResizeBlocked, NextActionAt)
+- Pointer field API changes
+- resizeInUseVolumes gating
+- Slot test stabilization
+
+When ALL "this PR" criteria are met, output: <promise>COMPLETE</promise>

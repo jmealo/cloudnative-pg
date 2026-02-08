@@ -690,39 +690,45 @@ fixed before PR submission. See `docs/src/design/pvc-autoresize.md` section
 - **REQ-07**: Inactive slot blocks resize — E2E test is `PIt()` (flaky
   detection). Unit tests cover the blocking logic. See "Known Issue" above.
 
-### Must Fix Before PR (code bugs — 3 of 5 RESOLVED)
+### This PR — Code Fixes
 
 - ~~Status persistence~~ — RESOLVED
 - ~~Rate limit durability~~ — RESOLVED
-- ~~Metrics implementation~~ — PARTIALLY RESOLVED (ResizeBlocked still needed)
+- ~~Metrics implementation~~ — PARTIALLY RESOLVED (ResizeBlocked → follow-up)
 - Swallowed errors in PVC loop — needs `errors.Join`
 - Missing event for "at expansion limit" — needs `recorder.Eventf`
+- Reject int step values in webhook (`step: 20` → 20 bytes ambiguity)
+- Reject `step: 0` in webhook (zero-value ambiguity)
+- WAL fail-open warning event (keep fail-open, add event)
+- Wire AlertOnResize to recorder
+- parseQuantityOrDefault log on invalid input
+- ShouldResize log on invalid minAvailable
 
-### Must Add Before PR (P0 test gaps)
+### This PR — E2E Tests
 
 - **REQ-11**: MinAvailable trigger — untested trigger mode
-- **REQ-12**: AutoResizeEvent status recording (upgraded to P0 — validates
-  the status persistence fix)
+- **REQ-12**: AutoResizeEvent status recording (validates persistence fix)
+- Replace `time.Sleep` with `Eventually`/`Consistently`
+- Keep slot retention test as `PIt()` (pending)
 
-### Should Add Before PR (P1 test gaps)
+### Follow-Up PR #1 — Webhook Validation Warnings
 
-- **REQ-13**: resize_blocked metric verification
-- **REQ-14**: MaxStep runtime clamping (webhook tested, runtime not)
-- **REQ-15**: MaxPendingWALFiles explicit test
-- **REQ-16**: Multi-instance resize verification
-- **Webhook warnings**: `limit < size`, `minStep`/`maxStep` with absolute step,
+- Warn `limit < size`, `minStep`/`maxStep` with absolute step,
   `maxActionsPerDay: 0`, `step > 100%`, `acknowledgeWALRisk` on dual-volume
+- Reject `usageThreshold: 0`
+- Warn `requireArchiveHealthy` without backup
 
-### Should Add Before PR (P1 validation)
+### Follow-Up PR #2 — Metrics Refactoring
 
-- **Reject `step: 0`** and **`usageThreshold: 0`**: Zero-value ambiguity
-- **Reject or warn `step: 20` (bare integer)**: Unit ambiguity (20 bytes ≠ 20%)
-- **Warn `requireArchiveHealthy` without backup**: Undefined semantics
-
-### Follow-Up (P2)
-
-- REQ-18 through REQ-26: Additional metric assertions, alertOnResize event,
-  acknowledgeWALRisk runtime test
+- Move ResizeBlocked to operator metrics endpoint
 - `NextActionAt` status field for budget window observability
-- Event history cap sizing (ensure 50 is sufficient for persistent rate limiting)
+- Event history cap sizing
+
+### Follow-Up PR #3 — Design Improvements
+
+- Pointer fields for zero-value semantics (API change)
+- `resizeInUseVolumes` gating (design discussion needed)
+- REQ-13/14/15/16: Additional E2E tests (maxStep runtime, multi-instance)
+- REQ-18 through REQ-26: metric assertions, acknowledgeWALRisk runtime
 - Cross-volume rate limit documentation
+- Slot retention test stabilization
