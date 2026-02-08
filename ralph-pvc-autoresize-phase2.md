@@ -1,8 +1,10 @@
-You are fixing critical bugs in the PVC Auto-Resize feature for CloudNativePG
-before PR submission. The feature is implemented and 11/12 E2E tests pass on
-AKS, but internal review found critical persistence and metrics bugs.
+You are finishing the PVC Auto-Resize feature for CloudNativePG before PR
+submission. Phases 1-3 (status persistence, rate limiting, metrics) are RESOLVED.
+Focus is now on: remaining code fixes (Phase 3.5), webhook validation (Phase 5.5
+and 5.75), E2E test gaps (Phase 6), and slot test stabilization (Phase 7).
 
-Ref: docs/src/design/pvc-autoresize.md (see "Pre-Merge Implementation Issues")
+Ref: docs/src/design/pvc-autoresize.md (see "Pre-Merge Implementation Issues"
+     and "Configuration Conflicts & Validation Gaps")
 E2E Requirements: docs/src/design/pvc-autoresize-e2e-requirements.md
 
 ## Project Context
@@ -117,6 +119,36 @@ it as a follow-up (move to operator metrics endpoint).
 ### 3.5.6 Use %w for All Error Wrapping (Style)
 
 Grep for `fmt.Errorf.*%v` in the autoresize package and replace with `%w`.
+
+### 3.5.7 Fix step IntOrString Handling (Must Fix)
+
+If `step` is provided as an int (e.g., `step: 20`), it currently fails at
+runtime because `resource.ParseQuantity("20")` returns 20 bytes, not 20%.
+Either:
+- Reject int steps in webhook validation (preferred — see Phase 5.75)
+- Or convert ints to percentage strings in `clamping.go`
+
+### 3.5.8 Wire AlertOnResize or Remove (Should Fix)
+
+`AlertOnResize` field exists in `cluster_types.go` API but is never read.
+Either:
+- Wire it to emit a Kubernetes event on each resize (use `recorder.Eventf`)
+- Or remove the field from the API (breaking change if already released)
+
+### 3.5.9 Consider resizeInUseVolumes Flag (Should Fix)
+
+Auto-resize currently ignores `storageConfiguration.resizeInUseVolumes`.
+This is counterintuitive — if a user explicitly set it to `false`, they
+don't want volumes resized while in use. The reconciler should check this
+flag and skip resize if it's `false` (or log a warning).
+
+### 3.5.10 maxActionsPerDay: 0 Semantics (Should Fix)
+
+Current behavior: `maxActionsPerDay: 0` silently uses default (3).
+Options:
+- Treat 0 as "disable rate limiting" (unlimited resizes)
+- Reject 0 in webhook (prefer this — see Phase 5.75)
+- Document the behavior
 
 ### Verification
 

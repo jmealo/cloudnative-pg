@@ -1059,6 +1059,18 @@ Some error paths use `%v` instead of `%w` for error wrapping. All
 `fmt.Errorf` calls should use `%w` to preserve error chains for
 `errors.Is`/`errors.As` usage.
 
+#### AlertOnResize Field Unused (Should Fix)
+
+`AlertOnResize` exists in the `ResizeStrategy` API type but is never read by
+the reconciler. Either wire it to emit a Kubernetes event on each resize or
+remove the field.
+
+#### resizeInUseVolumes Ignored (Should Fix)
+
+Auto-resize currently ignores `storageConfiguration.resizeInUseVolumes`. If a
+user explicitly sets this to `false`, auto-resize should respect it and skip
+resize (or log a warning). This aligns with the existing manual resize behavior.
+
 ### WAL Safety Fail-Open Without Warning (Important)
 
 When `walHealth` is nil in `walsafety.go:98`, resize is silently allowed. This
