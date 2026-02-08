@@ -20,6 +20,8 @@ SPDX-License-Identifier: Apache-2.0
 package e2e
 
 import (
+	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -40,6 +42,58 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 )
+
+func getDiskUsage(pod *corev1.Pod, path string) (percentUsed int, availableBytes int64, err error) {
+	commandTimeout := time.Second * 20
+	command := fmt.Sprintf("df -P -B1 %s | awk 'NR==2 {gsub(\"%%\",\"\",$5); print $4\" \"$5}'", path)
+	out, _, err := env.EventuallyExecCommand(
+		env.Ctx, *pod, specs.PostgresContainerName, &commandTimeout,
+		"sh", "-c", command,
+	)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	fields := strings.Fields(strings.TrimSpace(out))
+	if len(fields) < 2 {
+		return 0, 0, fmt.Errorf("unexpected df output: %q", out)
+	}
+
+	availableBytes, err = strconv.ParseInt(fields[0], 10, 64)
+	if err != nil {
+		return 0, 0, err
+	}
+	percentUsed, err = strconv.Atoi(fields[1])
+	if err != nil {
+		return 0, 0, err
+	}
+
+	return percentUsed, availableBytes, nil
+}
+
+func assertPercentUsedOver(pod *corev1.Pod, path string, threshold int) {
+	Eventually(func() (int, error) {
+		percentUsed, _, err := getDiskUsage(pod, path)
+		return percentUsed, err
+	}, 2*time.Minute, 5*time.Second).Should(BeNumerically(">", threshold),
+		fmt.Sprintf("percent used on %s should exceed %d%%", path, threshold))
+}
+
+func assertPercentUsedUnder(pod *corev1.Pod, path string, threshold int) {
+	Eventually(func() (int, error) {
+		percentUsed, _, err := getDiskUsage(pod, path)
+		return percentUsed, err
+	}, 2*time.Minute, 5*time.Second).Should(BeNumerically("<", threshold),
+		fmt.Sprintf("percent used on %s should stay under %d%%", path, threshold))
+}
+
+func assertAvailableBelow(pod *corev1.Pod, path string, minBytes int64) {
+	Eventually(func() (int64, error) {
+		_, availableBytes, err := getDiskUsage(pod, path)
+		return availableBytes, err
+	}, 2*time.Minute, 5*time.Second).Should(BeNumerically("<", minBytes),
+		fmt.Sprintf("available bytes on %s should drop below %d", path, minBytes))
+}
 
 var _ = Describe("PVC Auto-Resize", Label(tests.LabelAutoResize), func() {
 	const (
@@ -195,15 +249,19 @@ var _ = Describe("PVC Auto-Resize", Label(tests.LabelAutoResize), func() {
 				}, pod)
 				Expect(err).ToNot(HaveOccurred())
 
-				// The volume is 2Gi and minAvailable is 1500Mi.
-				// Writing ~600Mi should leave <1500Mi available without crossing 80% usage.
+				// The volume is 2Gi, minAvailable is 500Mi, and usageThreshold is 99.
+				// Writing ~1.7Gi should leave <500Mi available while staying under 99% usage.
 				commandTimeout := time.Second * 120
 				_, _, err = env.EventuallyExecCommand(
 					env.Ctx, *pod, specs.PostgresContainerName, &commandTimeout,
 					"sh", "-c",
-					"dd if=/dev/zero of=/var/lib/postgresql/data/pgdata/fill_file bs=1M count=600",
+					"dd if=/dev/zero of=/var/lib/postgresql/data/pgdata/fill_file bs=1M count=1700",
 				)
 				Expect(err).ToNot(HaveOccurred())
+
+				assertPercentUsedUnder(pod, specs.PgDataPath, 99)
+				minAvailable := resource.MustParse("500Mi")
+				assertAvailableBelow(pod, specs.PgDataPath, minAvailable.Value())
 			})
 
 			By("waiting for PVC to be resized", func() {
@@ -316,6 +374,8 @@ var _ = Describe("PVC Auto-Resize", Label(tests.LabelAutoResize), func() {
 					"dd if=/dev/zero of=/var/lib/postgresql/wal/pg_wal/fill_file bs=1M count=1700",
 				)
 				Expect(err).ToNot(HaveOccurred())
+
+				assertPercentUsedOver(pod, specs.PgWalVolumePath, 80)
 			})
 
 			By("waiting for WAL PVC to be resized", func() {
@@ -404,6 +464,8 @@ var _ = Describe("PVC Auto-Resize", Label(tests.LabelAutoResize), func() {
 					"dd if=/dev/zero of=/var/lib/postgresql/data/pgdata/fill_file bs=1M count=1700",
 				)
 				Expect(err).ToNot(HaveOccurred())
+
+				assertPercentUsedOver(pod, specs.PgDataPath, 80)
 			})
 
 			By("waiting for PVC to be resized to 2.5Gi (the clamped limit)", func() {
