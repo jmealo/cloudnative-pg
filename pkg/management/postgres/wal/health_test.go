@@ -20,6 +20,7 @@ SPDX-License-Identifier: Apache-2.0
 package wal
 
 import (
+	"context"
 	"fmt"
 	"time"
 
@@ -53,7 +54,7 @@ var _ = Describe("WAL Health Checker", func() {
 				return 5, nil
 			})
 
-			status, err := checker.Check(db, true)
+			status, err := checker.Check(context.Background(), db, true)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(status.ArchiveHealthy).To(BeTrue())
 			Expect(status.PendingWALFiles).To(Equal(5))
@@ -84,7 +85,7 @@ var _ = Describe("WAL Health Checker", func() {
 				return 150, nil
 			})
 
-			status, err := checker.Check(db, true)
+			status, err := checker.Check(context.Background(), db, true)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(status.ArchiveHealthy).To(BeFalse())
 			Expect(status.PendingWALFiles).To(Equal(150))
@@ -112,7 +113,7 @@ var _ = Describe("WAL Health Checker", func() {
 				return 0, nil
 			})
 
-			status, err := checker.Check(db, true)
+			status, err := checker.Check(context.Background(), db, true)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(status.ArchiveHealthy).To(BeFalse())
 		})
@@ -138,7 +139,7 @@ var _ = Describe("WAL Health Checker", func() {
 				return 0, nil
 			})
 
-			status, err := checker.Check(db, true)
+			status, err := checker.Check(context.Background(), db, true)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(status.ArchiveHealthy).To(BeTrue())
 			Expect(status.ArchiverFailedCount).To(Equal(int64(0)))
@@ -165,7 +166,7 @@ var _ = Describe("WAL Health Checker", func() {
 				return 10, nil
 			})
 
-			status, err := checker.Check(db, true)
+			status, err := checker.Check(context.Background(), db, true)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(status.InactiveSlots).To(HaveLen(2))
 			Expect(status.InactiveSlots[0].SlotName).To(Equal("stale_slot_1"))
@@ -190,7 +191,7 @@ var _ = Describe("WAL Health Checker", func() {
 				return 0, nil
 			})
 
-			status, err := checker.Check(db, false)
+			status, err := checker.Check(context.Background(), db, false)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(status.InactiveSlots).To(BeNil())
 		})
@@ -209,7 +210,7 @@ var _ = Describe("WAL Health Checker", func() {
 				return 0, fmt.Errorf("directory not found")
 			})
 
-			status, err := checker.Check(db, false)
+			status, err := checker.Check(context.Background(), db, false)
 			// When any check fails, the health check returns an incomplete error.
 			// Callers (like autoresize) should fail-open when status is nil.
 			Expect(err).To(HaveOccurred())

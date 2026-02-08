@@ -196,8 +196,8 @@ func reconcilePVC(
 		}
 		if currentSize.Cmp(limit) >= 0 {
 			contextLogger.Info("auto-resize blocked: at expansion limit", "pvc", pvc.Name)
-			recorder.Eventf(cluster, corev1.EventTypeWarning, "AutoResizeBlocked",
-				"Expansion limit reached for volume %s", pvc.Name)
+			recorder.Eventf(cluster, corev1.EventTypeWarning, "AutoResizeAtLimit",
+				"Volume %s has reached expansion limit %s", pvc.Name, expansion.Limit)
 			return false, nil
 		}
 	}
@@ -210,7 +210,8 @@ func reconcilePVC(
 
 	walSafetyResult := EvaluateWALSafety(pvcRole, isSingleVolume, walSafety, diskInfo.WALHealthStatus)
 	if walSafetyResult.Allowed && walSafetyResult.BlockReason == WALSafetyBlockHealthUnavailable {
-		recorder.Event(cluster, corev1.EventTypeWarning, "ResizePVCWALHealthUnknown", walSafetyResult.BlockMessage)
+		recorder.Eventf(cluster, corev1.EventTypeWarning, "AutoResizeWALHealthUnavailable",
+			"Auto-resize permitted without WAL health verification for PVC %s", pvc.Name)
 	}
 	if !walSafetyResult.Allowed {
 		recorder.Event(cluster, corev1.EventTypeWarning, "AutoResizeBlocked", walSafetyResult.BlockMessage)
@@ -238,7 +239,7 @@ func reconcilePVC(
 	}
 
 	// Record standard Kubernetes Event
-	recorder.Eventf(cluster, corev1.EventTypeNormal, "ResizePVC",
+	recorder.Eventf(cluster, corev1.EventTypeNormal, "AutoResizeSuccess",
 		"Expanded volume %s from %s to %s", pvc.Name, currentSize.String(), newSize.String())
 
 	// Mutation for the Cluster Status (caller must persist)
@@ -257,7 +258,7 @@ func reconcilePVC(
 	appendResizeEvent(cluster, event)
 
 	if shouldAlertOnResize(pvcRole, isSingleVolume, walSafety) {
-		recorder.Eventf(cluster, corev1.EventTypeWarning, "ResizePVCWALRisk",
+		recorder.Eventf(cluster, corev1.EventTypeWarning, "AutoResizeWALRisk",
 			"Auto-resize occurred on WAL-related volume %s", pvc.Name)
 	}
 

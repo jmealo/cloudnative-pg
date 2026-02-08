@@ -23,8 +23,6 @@ import (
 	"context"
 	"time"
 
-	. "github.com/onsi/ginkgo/v2"
-	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -37,6 +35,9 @@ import (
 	apiv1 "github.com/cloudnative-pg/cloudnative-pg/api/v1"
 	"github.com/cloudnative-pg/cloudnative-pg/pkg/postgres"
 	"github.com/cloudnative-pg/cloudnative-pg/pkg/utils"
+
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
 )
 
 var _ = Describe("Reconciler Helpers", func() {
@@ -214,9 +215,6 @@ var _ = Describe("Event History Pruning", func() {
 		now := time.Now()
 
 		// Add 60 events: 20 old, 40 new
-		for i := 0; i < 20; i-- { // Wait, loop is wrong
-		}
-
 		events := make([]apiv1.AutoResizeEvent, 60)
 		for i := 0; i < 20; i++ {
 			events[i] = apiv1.AutoResizeEvent{
@@ -315,6 +313,9 @@ var _ = Describe("reconcilePVC", func() {
 							UsageThreshold: ptr.To(80),
 						},
 					},
+				},
+				WalStorage: &apiv1.StorageConfiguration{
+					Size: "2Gi",
 				},
 			},
 		}

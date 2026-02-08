@@ -782,7 +782,7 @@ func (r *ClusterReconciler) updateClusterStatusThatRequiresInstancesState(
 	}
 
 	// Update disk status from instance status
-	updateDiskStatus(cluster, statuses)
+	updateDiskStatus(cluster, cluster.Status.DiskStatus, statuses)
 
 	if !reflect.DeepEqual(existingClusterStatus, cluster.Status) {
 		return r.Status().Update(ctx, cluster)
@@ -792,7 +792,12 @@ func (r *ClusterReconciler) updateClusterStatusThatRequiresInstancesState(
 
 // updateDiskStatus populates cluster.Status.DiskStatus from instance statuses.
 // The Instances map is rebuilt on each update to ensure stale entries for removed pods are cleared.
-func updateDiskStatus(cluster *apiv1.Cluster, statuses postgres.PostgresqlStatusList) {
+// LastUpdated is only updated for an instance if its volume or health data has changed.
+func updateDiskStatus(
+	cluster *apiv1.Cluster,
+	existingDiskStatus *apiv1.ClusterDiskStatus,
+	statuses postgres.PostgresqlStatusList,
+) {
 	if cluster.Status.DiskStatus == nil {
 		cluster.Status.DiskStatus = &apiv1.ClusterDiskStatus{}
 	}
@@ -805,9 +810,7 @@ func updateDiskStatus(cluster *apiv1.Cluster, statuses postgres.PostgresqlStatus
 		}
 
 		podName := item.Pod.Name
-		instanceStatus := &apiv1.InstanceDiskStatus{
-			LastUpdated: &metav1.Time{Time: time.Now()},
-		}
+		instanceStatus := &apiv1.InstanceDiskStatus{}
 
 		// Convert data volume
 		if item.DiskStatus.DataVolume != nil {
@@ -829,18 +832,24 @@ func updateDiskStatus(cluster *apiv1.Cluster, statuses postgres.PostgresqlStatus
 
 		// Convert WAL health status
 		if item.WALHealthStatus != nil {
-			instanceStatus.WALHealth = &apiv1.WALHealthInfo{
-				ArchiveHealthy:    item.WALHealthStatus.ArchiveHealthy,
-				PendingWALFiles:   item.WALHealthStatus.PendingWALFiles,
-				InactiveSlotCount: item.WALHealthStatus.InactiveSlotCount,
+			instanceStatus.WALHealth = convertWALHealthStatus(item.WALHealthStatus)
+		}
+
+		// Idempotency check: only update LastUpdated if the actual data changed
+		if existingDiskStatus != nil && existingDiskStatus.Instances != nil {
+			if existingInstance, ok := existingDiskStatus.Instances[podName]; ok {
+				// Create a copy of the existing instance status without the timestamp for comparison
+				comparisonInstance := existingInstance.DeepCopy()
+				comparisonInstance.LastUpdated = nil
+				if reflect.DeepEqual(comparisonInstance, instanceStatus) {
+					instanceStatus.LastUpdated = existingInstance.LastUpdated
+				}
 			}
-			for _, slot := range item.WALHealthStatus.InactiveSlots {
-				instanceStatus.WALHealth.InactiveSlots = append(instanceStatus.WALHealth.InactiveSlots,
-					apiv1.InactiveSlotInfo{
-						SlotName:       slot.SlotName,
-						RetentionBytes: slot.RetentionBytes,
-					})
-			}
+		}
+
+		// If LastUpdated is still nil, it means it's new or data changed
+		if instanceStatus.LastUpdated == nil {
+			instanceStatus.LastUpdated = &metav1.Time{Time: time.Now()}
 		}
 
 		cluster.Status.DiskStatus.Instances[podName] = instanceStatus
@@ -858,6 +867,22 @@ func convertVolumeStatus(vol *postgres.VolumeStatus) *apiv1.VolumeDiskStatus {
 		InodesUsed:     vol.InodesUsed,
 		InodesFree:     vol.InodesFree,
 	}
+}
+
+// convertWALHealthStatus converts a postgres.WALHealthStatus to apiv1.WALHealthInfo.
+func convertWALHealthStatus(health *postgres.WALHealthStatus) *apiv1.WALHealthInfo {
+	info := &apiv1.WALHealthInfo{
+		ArchiveHealthy:    health.ArchiveHealthy,
+		PendingWALFiles:   health.PendingWALFiles,
+		InactiveSlotCount: health.InactiveSlotCount,
+	}
+	for _, slot := range health.InactiveSlots {
+		info.InactiveSlots = append(info.InactiveSlots, apiv1.InactiveSlotInfo{
+			SlotName:       slot.SlotName,
+			RetentionBytes: slot.RetentionBytes,
+		})
+	}
+	return info
 }
 
 // getPodsTopology returns a map with all the information about the pods topology

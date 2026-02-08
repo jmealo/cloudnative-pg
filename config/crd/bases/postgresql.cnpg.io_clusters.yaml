@@ -5986,12 +5986,14 @@ spec:
                               Once this limit is reached, no further automatic resizing will occur.
                             type: string
                           maxStep:
+                            default: 500Gi
                             description: |-
                               MaxStep is the maximum expansion step when using percentage-based steps.
                               Prevents oversized expansions on large volumes. Defaults to "500Gi".
                               Ignored when step is an absolute value.
                             type: string
                           minStep:
+                            default: 2Gi
                             description: |-
                               MinStep is the minimum expansion step when using percentage-based steps.
                               Prevents tiny expansions on small volumes. Defaults to "2Gi".
@@ -6363,12 +6365,14 @@ spec:
                                     Once this limit is reached, no further automatic resizing will occur.
                                   type: string
                                 maxStep:
+                                  default: 500Gi
                                   description: |-
                                     MaxStep is the maximum expansion step when using percentage-based steps.
                                     Prevents oversized expansions on large volumes. Defaults to "500Gi".
                                     Ignored when step is an absolute value.
                                   type: string
                                 minStep:
+                                  default: 2Gi
                                   description: |-
                                     MinStep is the minimum expansion step when using percentage-based steps.
                                     Prevents tiny expansions on small volumes. Defaults to "2Gi".
@@ -6892,12 +6896,14 @@ spec:
                               Once this limit is reached, no further automatic resizing will occur.
                             type: string
                           maxStep:
+                            default: 500Gi
                             description: |-
                               MaxStep is the maximum expansion step when using percentage-based steps.
                               Prevents oversized expansions on large volumes. Defaults to "500Gi".
                               Ignored when step is an absolute value.
                             type: string
                           minStep:
+                            default: 2Gi
                             description: |-
                               MinStep is the minimum expansion step when using percentage-based steps.
                               Prevents tiny expansions on small volumes. Defaults to "2Gi".
@@ -7045,6 +7051,9 @@ spec:
                       type: string
                     result:
                       description: Result is the outcome of the resize operation (success/failure).
+                      enum:
+                      - success
+                      - failure
                       type: string
                     tablespace:
                       description: Tablespace is the tablespace name if VolumeType
@@ -7057,6 +7066,10 @@ spec:
                     volumeType:
                       description: VolumeType is the type of volume that was resized
                         (data/wal/tablespace).
+                      enum:
+                      - data
+                      - wal
+                      - tablespace
                       type: string
                   type: object
                 type: array

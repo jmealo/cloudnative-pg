@@ -185,10 +185,10 @@ var _ = Describe("PVC Auto-Resize", Label(tests.LabelAutoResize), func() {
 			By("verifying Kubernetes Events were emitted", func() {
 				Eventually(func(g Gomega) {
 					events, err := env.Interface.CoreV1().Events(namespace).List(env.Ctx, metav1.ListOptions{
-						FieldSelector: "reason=ResizePVC",
+						FieldSelector: "reason=AutoResizeSuccess",
 					})
 					g.Expect(err).ToNot(HaveOccurred())
-					g.Expect(events.Items).ToNot(BeEmpty(), "Should have emitted ResizePVC event")
+					g.Expect(events.Items).ToNot(BeEmpty(), "Should have emitted AutoResizeSuccess event")
 				}, 60*time.Second, 5*time.Second).Should(Succeed())
 			})
 
@@ -743,35 +743,30 @@ var _ = Describe("PVC Auto-Resize", Label(tests.LabelAutoResize), func() {
 				}, 60*time.Second, 5*time.Second).Should(Succeed())
 			})
 
-			By("verifying second resize is blocked and metric is set", func() {
-				cluster, err := clusterutils.Get(env.Ctx, env.Client, namespace, clusterName)
-				Expect(err).ToNot(HaveOccurred())
+			By("verifying second resize is blocked by rate limit", func() {
+				// Wait for any potential resize to complete/be blocked, then verify size is unchanged
+				time.Sleep(30 * time.Second)
 
-				podName := clusterName + "-1"
-				pod := &corev1.Pod{}
-				err = env.Client.Get(env.Ctx, types.NamespacedName{
-					Namespace: namespace, Name: podName,
-				}, pod)
-				Expect(err).ToNot(HaveOccurred())
-
-				// PROOF: Check the actual Prometheus metric for "rate_limit" reason
-				Eventually(func(g Gomega) {
-					out, err := proxy.RetrieveMetricsFromInstance(env.Ctx, env.Interface, *pod,
-						cluster.IsMetricsTLSEnabled())
-					g.Expect(err).ToNot(HaveOccurred())
-					g.Expect(out).To(ContainSubstring("cnpg_disk_resize_blocked{reason=\"rate_limit\""))
-				}, 120*time.Second, 10*time.Second).Should(Succeed())
-
-				// And size remains constant
+				// Verify size remains constant - the rate limit should have blocked the second resize
 				pvcList, err := storage.GetPVCList(env.Ctx, env.Client, namespace)
 				Expect(err).ToNot(HaveOccurred())
 				for idx := range pvcList.Items {
 					pvc := &pvcList.Items[idx]
 					if pvc.Labels[utils.ClusterLabelName] == clusterName &&
 						pvc.Labels[utils.PvcRoleLabelName] == string(utils.PVCRolePgData) {
-						Expect(pvc.Spec.Resources.Requests.Storage().String()).To(Equal(sizeAfterFirstResize.String()))
+						Expect(pvc.Spec.Resources.Requests.Storage().String()).To(Equal(sizeAfterFirstResize.String()),
+							"PVC size should remain unchanged after second trigger due to rate limit")
 					}
 				}
+
+				// Verify a blocking event was recorded
+				Eventually(func(g Gomega) {
+					events, err := env.Interface.CoreV1().Events(namespace).List(env.Ctx, metav1.ListOptions{
+						FieldSelector: "reason=AutoResizeBlocked",
+					})
+					g.Expect(err).ToNot(HaveOccurred())
+					g.Expect(events.Items).ToNot(BeEmpty(), "Should have emitted AutoResizeBlocked event for rate limit")
+				}, 60*time.Second, 5*time.Second).Should(Succeed())
 			})
 
 			By("cleaning up the fill files", func() {

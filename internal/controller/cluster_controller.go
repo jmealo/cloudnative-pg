@@ -814,7 +814,7 @@ func (r *ClusterReconciler) reconcileResources(
 	// Auto-resize PVCs based on disk usage
 	diskInfoByPod := buildDiskInfoByPod(instancesStatus)
 	origCluster := cluster.DeepCopy()
-	autoResizeRes, err := autoresize.Reconcile(
+	autoResizeRes, autoResizeErr := autoresize.Reconcile(
 		ctx,
 		r.Client,
 		r.Recorder,
@@ -822,12 +822,9 @@ func (r *ClusterReconciler) reconcileResources(
 		diskInfoByPod,
 		resources.pvcs.Items,
 	)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
 
 	// If the autoresize logic added events or changed status, persist it now.
-	// This is CRITICAL because if we return autoResizeRes (requeue), the
+	// This is CRITICAL because if we return early on error or requeue, the
 	// rest of the loop is skipped and memory changes are lost.
 	if !reflect.DeepEqual(origCluster.Status, cluster.Status) {
 		newStatus := cluster.Status
@@ -837,6 +834,11 @@ func (r *ClusterReconciler) reconcileResources(
 			contextLogger.Error(err, "failed to persist auto-resize status changes")
 			return ctrl.Result{}, err
 		}
+	}
+
+	if autoResizeErr != nil {
+		// Return the autoResizeRes (which has RequeueAfter) so the reconciler retries
+		return autoResizeRes, autoResizeErr
 	}
 
 	if !autoResizeRes.IsZero() {

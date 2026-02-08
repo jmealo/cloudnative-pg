@@ -20,6 +20,7 @@ SPDX-License-Identifier: Apache-2.0
 package postgres
 
 import (
+	"context"
 	"database/sql"
 	"os"
 	"path/filepath"
@@ -93,8 +94,8 @@ func volumeStatusFromStats(stats *disk.VolumeStats) *postgresSpec.VolumeStatus {
 }
 
 // fillWALHealthStatus checks WAL archive health and populates the WAL health status in the result.
-func (instance *Instance) fillWALHealthStatus(db *sql.DB, result *postgresSpec.PostgresqlStatus) {
-	contextLogger := log.WithName("wal_health_status")
+func (instance *Instance) fillWALHealthStatus(ctx context.Context, db *sql.DB, result *postgresSpec.PostgresqlStatus) {
+	contextLogger := log.FromContext(ctx).WithName("wal_health_status")
 
 	archiveStatusPath := filepath.Join(specs.PgWalPath, "archive_status")
 	getReadyWALCount := func() (int, error) {
@@ -104,7 +105,7 @@ func (instance *Instance) fillWALHealthStatus(db *sql.DB, result *postgresSpec.P
 	checker := wal.NewHealthChecker(getReadyWALCount)
 	contextLogger.Info("checking WAL health",
 		"isPrimary", result.IsPrimary)
-	healthStatus, err := checker.Check(db, result.IsPrimary)
+	healthStatus, err := checker.Check(ctx, db, result.IsPrimary)
 	if err != nil {
 		contextLogger.Error(err, "failed to check WAL health for status")
 		return

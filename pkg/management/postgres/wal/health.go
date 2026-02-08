@@ -21,6 +21,7 @@ SPDX-License-Identifier: Apache-2.0
 package wal
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"time"
@@ -85,8 +86,8 @@ func NewHealthChecker(getReadyWALCount ReadyWALCountFunc) *HealthChecker {
 // 1. Counting .ready files in pg_wal/archive_status/
 // 2. Querying pg_stat_archiver for archive status
 // 3. Querying pg_replication_slots for inactive physical slots with WAL retention
-func (h *HealthChecker) Check(db DBQuerier, isPrimary bool) (*HealthStatus, error) {
-	contextLogger := log.WithName("wal_health")
+func (h *HealthChecker) Check(ctx context.Context, db DBQuerier, isPrimary bool) (*HealthStatus, error) {
+	contextLogger := log.FromContext(ctx).WithName("wal_health")
 
 	status := &HealthStatus{
 		ArchiveHealthy: true,
@@ -198,5 +199,9 @@ func (h *HealthChecker) queryInactiveSlots(db DBQuerier, status *HealthStatus) e
 		status.InactiveSlots = append(status.InactiveSlots, slot)
 	}
 
-	return rows.Err()
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("while iterating over inactive replication slots: %w", err)
+	}
+
+	return nil
 }

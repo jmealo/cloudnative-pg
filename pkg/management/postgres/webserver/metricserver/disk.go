@@ -20,8 +20,8 @@ SPDX-License-Identifier: Apache-2.0
 package metricserver
 
 import (
+	"context"
 	"database/sql"
-	"fmt"
 	"sync"
 	"time"
 
@@ -40,8 +40,8 @@ import (
 type decisionMetricsCache struct {
 	mu              sync.Mutex
 	resourceVersion string
-	successCount    map[string]int // key: volumeType/tablespace
-	recentCount     map[string]int
+	successCount    map[string]int // key: pvcName
+	recentCount     map[string]int // key: pvcName
 }
 
 var dmCache = &decisionMetricsCache{
@@ -121,12 +121,12 @@ func newDiskMetrics() *DiskMetrics {
 			Subsystem: "disk",
 			Name:      "resizes_total",
 			Help:      "Total number of auto-resize operations.",
-		}, []string{"volume_type", "tablespace", "result"}),
+		}, []string{"instance", "pvc_name", "volume_type", "tablespace", "result"}),
 		ResizeBudgetRemain: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: PrometheusNamespace,
 			Name:      "disk_resize_budget_remaining",
 			Help:      "Number of remaining auto-resize operations in the current 24h budget.",
-		}, []string{"volume_type", "tablespace"}),
+		}, []string{"instance", "pvc_name", "volume_type", "tablespace"}),
 		WALArchiveHealthy: prometheus.NewGauge(prometheus.GaugeOpts{
 			Namespace: PrometheusNamespace,
 			Name:      "wal_archive_healthy",
@@ -203,8 +203,8 @@ func (dm *DiskMetrics) setVolumeStats(result *disk.VolumeProbeResult) {
 }
 
 // collectWALHealthMetrics queries WAL archive health and updates metrics.
-func collectWALHealthMetrics(e *Exporter, db *sql.DB, isPrimary bool) {
-	contextLogger := log.WithName("wal_health_metrics")
+func collectWALHealthMetrics(ctx context.Context, e *Exporter, db *sql.DB, isPrimary bool) {
+	contextLogger := log.FromContext(ctx).WithName("wal_health_metrics")
 
 	getReadyWALCount := func() (int, error) {
 		ready, _, err := postgres.GetWALArchiveCounters()
@@ -212,9 +212,14 @@ func collectWALHealthMetrics(e *Exporter, db *sql.DB, isPrimary bool) {
 	}
 
 	checker := wal.NewHealthChecker(getReadyWALCount)
-	status, err := checker.Check(db, isPrimary)
+	status, err := checker.Check(ctx, db, isPrimary)
 	if err != nil {
 		contextLogger.Error(err, "failed to check WAL health")
+		// Reset gauges to avoid reporting stale data on failure
+		e.Metrics.DiskMetrics.WALArchiveHealthy.Set(0)
+		e.Metrics.DiskMetrics.WALPendingFiles.Set(0)
+		e.Metrics.DiskMetrics.WALInactiveSlots.Set(0)
+		e.Metrics.DiskMetrics.WALSlotRetentionBytes.Reset()
 		return
 	}
 
@@ -281,9 +286,25 @@ func collectDiskUsageMetrics(e *Exporter) {
 
 // deriveDecisionMetrics populates logical metrics (totals, budget) from cluster status history.
 func (dm *DiskMetrics) deriveDecisionMetrics(cluster *apiv1.Cluster, probe *disk.VolumeProbeResult) {
+	podName := cluster.Status.CurrentPrimary
+	if podName == "" {
+		// If we don't know the primary name, we can't reliably determine the PVC name.
+		// Fallback to the current pod name if possible.
+		podName = cluster.Name + "-1" // placeholder
+	}
+
+	var pvcName string
+	switch probe.VolumeType {
+	case disk.VolumeTypeData:
+		pvcName = podName
+	case disk.VolumeTypeWAL:
+		pvcName = podName + apiv1.WalArchiveVolumeSuffix
+	case disk.VolumeTypeTablespace:
+		pvcName = specs.PvcNameForTablespace(podName, probe.Tablespace)
+	}
+
 	volType := string(probe.VolumeType)
 	ts := probe.Tablespace
-	key := fmt.Sprintf("%s/%s", volType, ts)
 
 	dmCache.mu.Lock()
 	if dmCache.resourceVersion != cluster.ResourceVersion {
@@ -293,11 +314,10 @@ func (dm *DiskMetrics) deriveDecisionMetrics(cluster *apiv1.Cluster, probe *disk
 		cutoff := time.Now().Add(-24 * time.Hour)
 
 		for _, event := range cluster.Status.AutoResizeEvents {
-			eventKey := fmt.Sprintf("%s/%s", event.VolumeType, event.Tablespace)
-			if event.Result == "success" {
-				newSuccess[eventKey]++
+			if event.Result == apiv1.ResizeResultSuccess {
+				newSuccess[event.PVCName]++
 				if event.Timestamp.After(cutoff) {
-					newRecent[eventKey]++
+					newRecent[event.PVCName]++
 				}
 			}
 		}
@@ -305,11 +325,11 @@ func (dm *DiskMetrics) deriveDecisionMetrics(cluster *apiv1.Cluster, probe *disk
 		dmCache.recentCount = newRecent
 		dmCache.resourceVersion = cluster.ResourceVersion
 	}
-	successCount := dmCache.successCount[key]
-	recentCount := dmCache.recentCount[key]
+	successCount := dmCache.successCount[pvcName]
+	recentCount := dmCache.recentCount[pvcName]
 	dmCache.mu.Unlock()
 
-	dm.ResizesTotal.WithLabelValues(volType, ts, "success").Set(float64(successCount))
+	dm.ResizesTotal.WithLabelValues(podName, pvcName, volType, ts, "success").Set(float64(successCount))
 
 	// 2. Calculate remaining budget (24h window)
 	maxActions := 3 // default
@@ -322,7 +342,7 @@ func (dm *DiskMetrics) deriveDecisionMetrics(cluster *apiv1.Cluster, probe *disk
 	if budgetRemain < 0 {
 		budgetRemain = 0
 	}
-	dm.ResizeBudgetRemain.WithLabelValues(volType, ts).Set(float64(budgetRemain))
+	dm.ResizeBudgetRemain.WithLabelValues(podName, pvcName, volType, ts).Set(float64(budgetRemain))
 
 	// 3. At Limit metric and blocked status
 	atLimit := false

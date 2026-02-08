@@ -55,12 +55,10 @@ listed below. Do NOT implement follow-up items:
 - ~~`PatchWithOptimisticLock` for status updates~~ (follow-up)
 - ~~Structured logging context~~ (follow-up)
 - ~~Pointer fields for zero-value semantics~~ (follow-up)
-- ~~`cnpg_disk_resize_blocked` metric population~~ (follow-up — see E2E 1)
 - ~~Slot test stabilization~~ (follow-up)
 - ~~VolumeType/ResizeResult enum types~~ (follow-up — API type change)
 - ~~Reconciler integration tests with fake clients~~ (follow-up)
 - ~~`Enabled` kubebuilder default marker~~ (follow-up — CRD semantic change)
-- ~~`LastUpdated` idempotent timestamps~~ (follow-up — requires before/after comparison with map reinit)
 - ~~Budget metrics per-PVC cardinality~~ (follow-up — metrics rework with `resize_blocked`)
 
 ---
@@ -257,11 +255,44 @@ Setting `WALArchiveHealthy` to 0 on error is intentionally conservative:
 the auto-resize fail-open logic should see "not healthy" rather than a
 stale "healthy" from the previous scrape.
 
+### Fix 17: Remove panics in clamping.go (SHOULD FIX — operator safety)
+
+`clamping.go:163` and `clamping.go:176` — `parseQuantityOrDefault()` calls
+`panic()` when a hardcoded default string fails to parse. Panics crash the
+operator pod. These defaults are compile-time constants (`"2Gi"`, `"500Gi"`)
+so the panic should never fire, but the convention is clear: no panics in
+controller/instance manager code.
+
+Fix both locations: replace `panic(...)` with log + zero-quantity fallback:
+```go
+if err != nil {
+    autoresizeLog.Error(err, "BUG: invalid hardcoded default quantity", "default", defaultStr)
+    zero := resource.MustParse("0")
+    return &zero
+}
+```
+
+The existing unit tests for `parseQuantityOrDefault` will catch any invalid
+defaults at CI time, making the runtime panic unnecessary.
+
+### Fix 18: Fix API group in ValidateUpdate (SHOULD FIX — wrong error metadata)
+
+`internal/webhook/v1/cluster_webhook.go:158` uses `"cluster.cnpg.io"` but the
+CRD group is `"postgresql.cnpg.io"`. `ValidateCreate` at line 122 already uses
+the correct group. This is a pre-existing bug but we're touching this file.
+
+Fix:
+```go
+return allWarnings, apierrors.NewInvalid(
+    schema.GroupKind{Group: "postgresql.cnpg.io", Kind: "Cluster"},
+    cluster.Name, allErrs)
+```
+
 ---
 
 ## Unit Tests
 
-### Fix 17: HasBudget unit tests (MUST HAVE — zero coverage)
+### Fix 19: HasBudget unit tests (MUST HAVE)
 
 `HasBudget()` is the rate limiter for the entire feature. It has ZERO tests.
 
@@ -278,7 +309,7 @@ Create `pkg/reconciler/autoresize/hasbudget_test.go` (Ginkgo v2 + Gomega):
 8. `maxActions` negative → always false
 9. Boundary: event exactly at 24h cutoff
 
-### Fix 18: getAutoResizeWarnings unit tests (MUST HAVE — zero coverage)
+### Fix 20: getAutoResizeWarnings unit tests (MUST HAVE)
 
 `getAutoResizeWarnings()` ships in this PR but has ZERO tests.
 
@@ -294,7 +325,7 @@ Create `internal/webhook/v1/cluster_webhook_autoresize_warnings_test.go`:
 7. Valid config → no warnings
 8. Disabled resize → no warnings
 
-### Fix 19: appendResizeEvent unit tests (SHOULD HAVE — zero coverage)
+### Fix 21: appendResizeEvent unit tests (SHOULD HAVE)
 
 `appendResizeEvent()` in `reconciler.go:326` manages event history pruning
 (25h cutoff + 50-event cap). It has ZERO tests.
@@ -312,18 +343,18 @@ Add to `hasbudget_test.go` or a new file:
 
 ## E2E Test Fixes
 
-### E2E 1: Remove `cnpg_disk_resize_blocked` assertions (MUST FIX — tests will fail)
+### E2E 1: Verify `cnpg_disk_resize_blocked` assertions match implementation
 
-`cnpg_disk_resize_blocked` is defined but NEVER populated (`deriveDecisionMetrics`
-in `disk.go` never calls `.Set()` on `ResizeBlocked`). Two E2E tests assert on
-this metric and WILL FAIL:
+`cnpg_disk_resize_blocked` is now populated in `deriveDecisionMetrics`
+(disk.go:360-374) with reasons `"rate_limit"` and `"expansion_limit"`.
 
-- **Rate-limit test** (~line 762): `ContainSubstring("cnpg_disk_resize_blocked{reason=\"rate_limit\"")`
-- **Archive-block test** (~line 1079): `ContainSubstring("cnpg_disk_resize_blocked{reason=\"wal_health_unavailable\"")`
-
-**Fix:** Remove these two `cnpg_disk_resize_blocked` assertions. The tests
-should still verify blocking via PVC size unchanged (which they already do).
-Metric population is a follow-up.
+Verify the E2E assertions match the actual label values:
+- **Rate-limit test** (~line 762): should assert `reason="rate_limit"` ✓
+- **Archive-block test** (~line 1079): currently asserts `reason="wal_health_unavailable"`
+  but the metric only populates `"rate_limit"` and `"expansion_limit"` — NOT
+  `"wal_health_unavailable"`. Either add a `"wal_health_unavailable"` reason to
+  `deriveDecisionMetrics` or change the E2E assertion to verify blocking via PVC
+  size unchanged instead.
 
 ### E2E 2: REQ-12 AutoResizeEvent verification
 
@@ -377,7 +408,26 @@ By("verifying PVC stays at limit and does not grow", func() {
 
 Any `time.Sleep(2 * time.Minute)` → `Consistently(...)` pattern.
 
-### E2E 6: Slot test stays PIt()
+### E2E 6: Rate-limit test time.Sleep at line 748 (SHOULD FIX)
+
+`auto_resize_test.go:748` still has `time.Sleep(30 * time.Second)`. Replace
+with `Consistently` to verify PVC size stays unchanged:
+```go
+Consistently(func(g Gomega) {
+    pvcList, err := storage.GetPVCList(env.Ctx, env.Client, namespace)
+    g.Expect(err).ToNot(HaveOccurred())
+    for idx := range pvcList.Items {
+        pvc := &pvcList.Items[idx]
+        if pvc.Labels[utils.ClusterLabelName] == clusterName &&
+            pvc.Labels[utils.PvcRoleLabelName] == string(utils.PVCRolePgData) {
+            g.Expect(pvc.Spec.Resources.Requests.Storage().Cmp(sizeAfterFirstResize)).To(Equal(0),
+                "PVC should not grow past rate limit")
+        }
+    }
+}, 30*time.Second, 5*time.Second).Should(Succeed())
+```
+
+### E2E 7: Slot test stays PIt()
 
 Do NOT attempt to fix the slot detection issue. Keep `PIt()`.
 

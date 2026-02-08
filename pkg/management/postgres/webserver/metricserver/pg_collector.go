@@ -322,7 +322,8 @@ func (e *Exporter) Describe(ch chan<- *prometheus.Desc) {
 // export.
 func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 	log.Debug("collecting Postgres instance metrics")
-	e.updateInstanceMetrics()
+	ctx := context.Background()
+	e.updateInstanceMetrics(ctx)
 	e.collectInstanceMetrics(ch)
 
 	if e.queries != nil {
@@ -403,7 +404,7 @@ func (e *Exporter) collectInstanceMetrics(ch chan<- prometheus.Metric) {
 }
 
 // updateInstanceMetrics updates metrics from the instance manager
-func (e *Exporter) updateInstanceMetrics() {
+func (e *Exporter) updateInstanceMetrics(ctx context.Context) {
 	e.Metrics.CollectionsTotal.Inc()
 	collectionStart := time.Now()
 	if e.instance.IsFenced() {
@@ -464,7 +465,7 @@ func (e *Exporter) updateInstanceMetrics() {
 	collectDiskUsageMetrics(e)
 
 	// Collect WAL health metrics
-	collectWALHealthMetrics(e, db, isPrimary)
+	collectWALHealthMetrics(ctx, e, db, isPrimary)
 
 	if err := collectPGWalArchiveMetric(e); err != nil {
 		log.Error(err, "while collecting WAL archive metrics", "path", specs.PgWalArchiveStatusPath)

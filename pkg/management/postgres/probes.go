@@ -20,6 +20,7 @@ SPDX-License-Identifier: Apache-2.0
 package postgres
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -39,7 +40,7 @@ import (
 )
 
 // GetStatus Extract the status of this PostgreSQL database
-func (instance *Instance) GetStatus() (result *postgresSpec.PostgresqlStatus, err error) {
+func (instance *Instance) GetStatus(ctx context.Context) (result *postgresSpec.PostgresqlStatus, err error) {
 	result = &postgresSpec.PostgresqlStatus{
 		Pod:                    &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: instance.GetPodName()}},
 		InstanceManagerVersion: versions.Version,
@@ -125,7 +126,7 @@ func (instance *Instance) GetStatus() (result *postgresSpec.PostgresqlStatus, er
 	result.SessionID = instance.SessionID
 
 	instance.fillDiskStatus(result)
-	instance.fillWALHealthStatus(superUserDB, result)
+	instance.fillWALHealthStatus(ctx, superUserDB, result)
 
 	return result, nil
 }
