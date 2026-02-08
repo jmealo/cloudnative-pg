@@ -1,0 +1,272 @@
+/*
+Copyright The CloudNativePG Contributors
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package disk
+
+import (
+	"context"
+	"database/sql"
+	"os"
+	"path/filepath"
+	"regexp"
+	"time"
+
+	"github.com/cloudnative-pg/cloudnative-pg/pkg/specs"
+)
+
+// WALHealthStatus contains WAL health information for auto-resize decisions
+type WALHealthStatus struct {
+	// IsPrimary indicates if this instance is the primary
+	IsPrimary bool
+	// ArchivingEnabled indicates if WAL archiving is configured
+	ArchivingEnabled bool
+	// ArchiveHealthy indicates WAL archiving is working (only meaningful if ArchivingEnabled)
+	ArchiveHealthy bool
+	// PendingArchiveFiles is the count of files awaiting archive
+	PendingArchiveFiles int
+	// LastArchiveSuccess is when the last successful archive occurred
+	LastArchiveSuccess *time.Time
+	// LastArchiveFailure is when the last archive failure occurred
+	LastArchiveFailure *time.Time
+	// InactiveSlots lists inactive replication slots
+	InactiveSlots []SlotInfo
+	// TotalSlotRetentionBytes is total WAL retained by inactive slots
+	TotalSlotRetentionBytes int64
+}
+
+// SlotInfo contains replication slot information
+type SlotInfo struct {
+	Name          string
+	Active        bool
+	RetainedBytes int64
+	RestartLSN    string
+}
+
+// WALHealthChecker evaluates WAL health for auto-resize decisions
+type WALHealthChecker struct {
+	archiveStatusPath string
+}
+
+// NewWALHealthChecker creates a new WAL health checker using standard paths
+func NewWALHealthChecker() *WALHealthChecker {
+	return &WALHealthChecker{
+		archiveStatusPath: filepath.Join(specs.PgWalPath, "archive_status"),
+	}
+}
+
+// NewWALHealthCheckerWithPath creates a new WAL health checker with custom path (for testing)
+func NewWALHealthCheckerWithPath(archiveStatusPath string) *WALHealthChecker {
+	return &WALHealthChecker{
+		archiveStatusPath: archiveStatusPath,
+	}
+}
+
+// walFileRegex matches WAL file names with .ready extension
+var walFileRegex = regexp.MustCompile(`^[0-9A-F]{24}\.ready$`)
+
+// CountPendingArchive counts WAL files awaiting archive
+func (h *WALHealthChecker) CountPendingArchive() (int, error) {
+	entries, err := os.ReadDir(h.archiveStatusPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, err
+	}
+
+	count := 0
+	for _, entry := range entries {
+		if walFileRegex.MatchString(entry.Name()) {
+			count++
+		}
+	}
+	return count, nil
+}
+
+// Check evaluates current WAL health using database connection
+func (h *WALHealthChecker) Check(ctx context.Context, db *sql.DB) (*WALHealthStatus, error) {
+	status := &WALHealthStatus{
+		ArchiveHealthy: true,
+	}
+
+	if db == nil {
+		return status, nil
+	}
+
+	// Check if this is primary or replica
+	isPrimary, err := h.checkIsPrimary(ctx, db)
+	if err != nil {
+		return nil, err
+	}
+	status.IsPrimary = isPrimary
+
+	// Check if archiving is enabled
+	archivingEnabled, err := h.checkArchivingEnabled(ctx, db)
+	if err != nil {
+		return nil, err
+	}
+	status.ArchivingEnabled = archivingEnabled
+
+	// Only check archive health if archiving is enabled
+	if archivingEnabled {
+		// Count pending archive files
+		ready, err := h.CountPendingArchive()
+		if err != nil {
+			return nil, err
+		}
+		status.PendingArchiveFiles = ready
+
+		// Consider archive unhealthy if too many files pending
+		if ready > 10 {
+			status.ArchiveHealthy = false
+		}
+
+		// Check archive timestamps from pg_stat_archiver
+		if err := h.checkArchiveStats(ctx, db, status); err != nil {
+			return nil, err
+		}
+	}
+
+	// Check replication slots on both primary and replica
+	// - Primary uses pg_current_wal_lsn() to calculate retained bytes
+	// - Replica uses pg_last_wal_replay_lsn() to calculate retained bytes
+	// Note: CNPG synchronizes "Standby HA slots" from primary to replicas
+	slots, err := h.checkReplicationSlots(ctx, db, isPrimary)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, slot := range slots {
+		if !slot.Active {
+			status.InactiveSlots = append(status.InactiveSlots, slot)
+			status.TotalSlotRetentionBytes += slot.RetainedBytes
+		}
+	}
+
+	return status, nil
+}
+
+// checkIsPrimary determines if this instance is the primary
+func (h *WALHealthChecker) checkIsPrimary(ctx context.Context, db *sql.DB) (bool, error) {
+	var isInRecovery bool
+	err := db.QueryRowContext(ctx, "SELECT pg_is_in_recovery()").Scan(&isInRecovery)
+	if err != nil {
+		return false, err
+	}
+	// Primary is NOT in recovery mode
+	return !isInRecovery, nil
+}
+
+// checkArchivingEnabled determines if WAL archiving is configured
+func (h *WALHealthChecker) checkArchivingEnabled(ctx context.Context, db *sql.DB) (bool, error) {
+	var archiveMode string
+	err := db.QueryRowContext(ctx,
+		"SELECT setting FROM pg_settings WHERE name = 'archive_mode'").Scan(&archiveMode)
+	if err != nil {
+		return false, err
+	}
+	// archive_mode can be 'off', 'on', or 'always'
+	return archiveMode != "off", nil
+}
+
+func (h *WALHealthChecker) checkArchiveStats(ctx context.Context, db *sql.DB, status *WALHealthStatus) error {
+	row := db.QueryRowContext(ctx, `
+		SELECT
+			last_archived_time,
+			last_failed_time,
+			failed_count
+		FROM pg_stat_archiver
+	`)
+
+	var lastArchived, lastFailed sql.NullTime
+	var failedCount int64
+
+	if err := row.Scan(&lastArchived, &lastFailed, &failedCount); err != nil {
+		return err
+	}
+
+	if lastArchived.Valid {
+		status.LastArchiveSuccess = &lastArchived.Time
+	}
+	if lastFailed.Valid {
+		status.LastArchiveFailure = &lastFailed.Time
+		// If last failure is more recent than last success, archive is unhealthy
+		if status.LastArchiveSuccess == nil || lastFailed.Time.After(*status.LastArchiveSuccess) {
+			status.ArchiveHealthy = false
+		}
+	}
+
+	return nil
+}
+
+func (h *WALHealthChecker) checkReplicationSlots(
+	ctx context.Context,
+	db *sql.DB,
+	isPrimary bool,
+) (slots []SlotInfo, err error) {
+	// Use pg_current_wal_lsn() on primary, pg_last_wal_replay_lsn() on replica
+	// to calculate WAL retained by each slot
+	var lsnFunc string
+	if isPrimary {
+		lsnFunc = "pg_current_wal_lsn()"
+	} else {
+		lsnFunc = "pg_last_wal_replay_lsn()"
+	}
+
+	query := `
+		SELECT
+			slot_name,
+			active,
+			restart_lsn,
+			CASE
+				WHEN restart_lsn IS NOT NULL THEN pg_wal_lsn_diff(` + lsnFunc + `, restart_lsn)
+				ELSE 0
+			END as retained_bytes
+		FROM pg_replication_slots
+		WHERE slot_type = 'physical'
+	`
+
+	rows, err := db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if closeErr := rows.Close(); closeErr != nil && err == nil {
+			err = closeErr
+		}
+	}()
+
+	for rows.Next() {
+		var slot SlotInfo
+		var restartLSN sql.NullString
+		var retainedBytes sql.NullInt64
+
+		if err := rows.Scan(&slot.Name, &slot.Active, &restartLSN, &retainedBytes); err != nil {
+			return nil, err
+		}
+
+		if restartLSN.Valid {
+			slot.RestartLSN = restartLSN.String
+		}
+		if retainedBytes.Valid {
+			slot.RetainedBytes = retainedBytes.Int64
+		}
+
+		slots = append(slots, slot)
+	}
+
+	return slots, rows.Err()
+}
