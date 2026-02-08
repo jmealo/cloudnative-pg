@@ -98,13 +98,14 @@ func EvaluateWALSafety(
 		}
 	}
 
-	// If no WAL health data is available, block the resize (fail-closed)
-	// because we don't know if archiving is healthy.
+	// If no WAL health data is available, allow the resize (fail-open) with a warning.
+	// The primary threat is disk full → database crash. Blocking resize when we can't
+	// verify WAL health is more dangerous than allowing it.
 	if walHealth == nil {
 		return WALSafetyResult{
-			Allowed:      false,
+			Allowed:      true,
 			BlockReason:  WALSafetyBlockHealthUnavailable,
-			BlockMessage: "auto-resize blocked: WAL health information is not available",
+			BlockMessage: "auto-resize permitted without WAL health verification: WAL health information is not available",
 		}
 	}
 

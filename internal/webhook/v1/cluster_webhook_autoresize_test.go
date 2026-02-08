@@ -440,3 +440,217 @@ var _ = Describe("auto-resize validation", func() {
 		})
 	})
 })
+
+var _ = Describe("getAutoResizeWarnings", func() {
+	Context("maxActionsPerDay: 0 warning", func() {
+		It("should warn when maxActionsPerDay is 0", func() {
+			cluster := &apiv1.Cluster{
+				Spec: apiv1.ClusterSpec{
+					StorageConfiguration: apiv1.StorageConfiguration{
+						Size: "10Gi",
+						Resize: &apiv1.ResizeConfiguration{
+							Enabled: true,
+							Strategy: &apiv1.ResizeStrategy{
+								MaxActionsPerDay: ptr.To(0),
+								WALSafetyPolicy: &apiv1.WALSafetyPolicy{
+									AcknowledgeWALRisk: true,
+								},
+							},
+						},
+					},
+				},
+			}
+			warnings := getAutoResizeWarnings(cluster)
+			Expect(warnings).ToNot(BeEmpty())
+			Expect(warnings[0]).To(ContainSubstring("effectively disables auto-resize"))
+		})
+	})
+
+	Context("minAvailable > size warning", func() {
+		It("should warn when minAvailable exceeds volume size", func() {
+			cluster := &apiv1.Cluster{
+				Spec: apiv1.ClusterSpec{
+					StorageConfiguration: apiv1.StorageConfiguration{
+						Size: "1Gi",
+						Resize: &apiv1.ResizeConfiguration{
+							Enabled: true,
+							Triggers: &apiv1.ResizeTriggers{
+								MinAvailable: "5Gi",
+							},
+							Strategy: &apiv1.ResizeStrategy{
+								WALSafetyPolicy: &apiv1.WALSafetyPolicy{
+									AcknowledgeWALRisk: true,
+								},
+							},
+						},
+					},
+				},
+			}
+			warnings := getAutoResizeWarnings(cluster)
+			Expect(warnings).ToNot(BeEmpty())
+			Expect(warnings[0]).To(ContainSubstring("resize will trigger immediately"))
+		})
+	})
+
+	Context("limit <= size warning", func() {
+		It("should warn when limit is less than or equal to current size", func() {
+			cluster := &apiv1.Cluster{
+				Spec: apiv1.ClusterSpec{
+					StorageConfiguration: apiv1.StorageConfiguration{
+						Size: "10Gi",
+						Resize: &apiv1.ResizeConfiguration{
+							Enabled: true,
+							Expansion: &apiv1.ExpansionPolicy{
+								Limit: "5Gi",
+							},
+							Strategy: &apiv1.ResizeStrategy{
+								WALSafetyPolicy: &apiv1.WALSafetyPolicy{
+									AcknowledgeWALRisk: true,
+								},
+							},
+						},
+					},
+				},
+			}
+			warnings := getAutoResizeWarnings(cluster)
+			Expect(warnings).ToNot(BeEmpty())
+			Expect(warnings[0]).To(ContainSubstring("auto-resize will never increase"))
+		})
+	})
+
+	Context("minStep/maxStep with absolute step warning", func() {
+		It("should warn when minStep/maxStep used with absolute step", func() {
+			cluster := &apiv1.Cluster{
+				Spec: apiv1.ClusterSpec{
+					StorageConfiguration: apiv1.StorageConfiguration{
+						Size: "10Gi",
+						Resize: &apiv1.ResizeConfiguration{
+							Enabled: true,
+							Expansion: &apiv1.ExpansionPolicy{
+								Step:    intstr.IntOrString{Type: intstr.String, StrVal: "10Gi"},
+								MinStep: "2Gi",
+							},
+							Strategy: &apiv1.ResizeStrategy{
+								WALSafetyPolicy: &apiv1.WALSafetyPolicy{
+									AcknowledgeWALRisk: true,
+								},
+							},
+						},
+					},
+				},
+			}
+			warnings := getAutoResizeWarnings(cluster)
+			Expect(warnings).ToNot(BeEmpty())
+			Expect(warnings[0]).To(ContainSubstring("apply only to percentage-based steps"))
+		})
+	})
+
+	Context("acknowledgeWALRisk on dual-volume warning", func() {
+		It("should warn when acknowledgeWALRisk is set on a cluster with separate WAL volume", func() {
+			cluster := &apiv1.Cluster{
+				Spec: apiv1.ClusterSpec{
+					StorageConfiguration: apiv1.StorageConfiguration{
+						Size: "10Gi",
+						Resize: &apiv1.ResizeConfiguration{
+							Enabled: true,
+							Strategy: &apiv1.ResizeStrategy{
+								WALSafetyPolicy: &apiv1.WALSafetyPolicy{
+									AcknowledgeWALRisk: true,
+								},
+							},
+						},
+					},
+					WalStorage: &apiv1.StorageConfiguration{
+						Size: "5Gi",
+					},
+				},
+			}
+			warnings := getAutoResizeWarnings(cluster)
+			Expect(warnings).ToNot(BeEmpty())
+			Expect(warnings[0]).To(ContainSubstring("has no effect"))
+		})
+	})
+
+	Context("requireArchiveHealthy without backup warning", func() {
+		It("should warn when requireArchiveHealthy is enabled but no backup configured", func() {
+			cluster := &apiv1.Cluster{
+				Spec: apiv1.ClusterSpec{
+					StorageConfiguration: apiv1.StorageConfiguration{
+						Size: "10Gi",
+						Resize: &apiv1.ResizeConfiguration{
+							Enabled: true,
+							Strategy: &apiv1.ResizeStrategy{
+								WALSafetyPolicy: &apiv1.WALSafetyPolicy{
+									AcknowledgeWALRisk:    true,
+									RequireArchiveHealthy: ptr.To(true),
+								},
+							},
+						},
+					},
+					// No Backup configured
+				},
+			}
+			warnings := getAutoResizeWarnings(cluster)
+			Expect(warnings).ToNot(BeEmpty())
+			hasArchiveWarning := false
+			for _, w := range warnings {
+				if ContainSubstring("no backup configuration").Match(w) == nil {
+					hasArchiveWarning = true
+					break
+				}
+			}
+			Expect(hasArchiveWarning).To(BeTrue())
+		})
+	})
+
+	Context("valid configuration produces no warnings", func() {
+		It("should return no warnings for a valid resize configuration", func() {
+			cluster := &apiv1.Cluster{
+				Spec: apiv1.ClusterSpec{
+					StorageConfiguration: apiv1.StorageConfiguration{
+						Size: "10Gi",
+						Resize: &apiv1.ResizeConfiguration{
+							Enabled: true,
+							Triggers: &apiv1.ResizeTriggers{
+								UsageThreshold: ptr.To(80),
+							},
+							Expansion: &apiv1.ExpansionPolicy{
+								Step:  intstr.IntOrString{Type: intstr.String, StrVal: "20%"},
+								Limit: "100Gi",
+							},
+							Strategy: &apiv1.ResizeStrategy{
+								MaxActionsPerDay: ptr.To(3),
+								WALSafetyPolicy: &apiv1.WALSafetyPolicy{
+									AcknowledgeWALRisk: true,
+								},
+							},
+						},
+					},
+				},
+			}
+			warnings := getAutoResizeWarnings(cluster)
+			Expect(warnings).To(BeEmpty())
+		})
+	})
+
+	Context("disabled resize produces no warnings", func() {
+		It("should return no warnings when resize is disabled", func() {
+			cluster := &apiv1.Cluster{
+				Spec: apiv1.ClusterSpec{
+					StorageConfiguration: apiv1.StorageConfiguration{
+						Size: "10Gi",
+						Resize: &apiv1.ResizeConfiguration{
+							Enabled: false,
+							// Even with bad config, disabled should skip warnings
+							Expansion: &apiv1.ExpansionPolicy{
+								Limit: "1Gi", // Would warn if enabled
+							},
+						},
+					},
+				},
+			}
+			warnings := getAutoResizeWarnings(cluster)
+			Expect(warnings).To(BeEmpty())
+		})
+	})
+})

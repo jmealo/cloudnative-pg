@@ -242,15 +242,19 @@ var _ = Describe("EvaluateWALSafety", func() {
 	})
 
 	Context("nil walHealth", func() {
-		It("should block resize when walHealth is nil (fail-closed)", func() {
+		It("should allow resize when walHealth is nil (fail-open) but record reason", func() {
+			// Fail-open: when WAL health is unavailable, the resize is allowed with a warning.
+			// The primary threat is disk full → database crash. Blocking resize when we can't
+			// verify WAL health is more dangerous than allowing it.
 			result := EvaluateWALSafety(
 				string(utils.PVCRolePgWal),
 				false,
 				walSafety,
 				nil, // no health data
 			)
-			Expect(result.Allowed).To(BeFalse())
+			Expect(result.Allowed).To(BeTrue())
 			Expect(result.BlockReason).To(Equal(WALSafetyBlockHealthUnavailable))
+			Expect(result.BlockMessage).To(ContainSubstring("permitted without WAL health verification"))
 		})
 	})
 
