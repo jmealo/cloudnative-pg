@@ -185,8 +185,8 @@ The expansion policy controls how much the volume grows on each resize:
 | Field | Description | Default |
 |-------|-------------|---------|
 | `step` | Amount to grow (percentage like `20%` or absolute like `10Gi`) | 20% |
-| `minStep` | Minimum growth per resize | Not set |
-| `maxStep` | Maximum growth per resize | Not set |
+| `minStep` | Minimum growth per resize | 2Gi |
+| `maxStep` | Maximum growth per resize | 500Gi |
 | `limit` | Maximum total volume size | Not set |
 
 Notes:
@@ -300,7 +300,7 @@ is blocked. This forces investigation of stuck or abandoned replication slots.
 | `cnpg_disk_resize_budget_remaining` | Remaining daily resize budget |
 | `cnpg_disk_resizes_total` | Counter of resize operations |
 | `cnpg_wal_archive_healthy` | 1 if archiving is healthy |
-| `cnpg_wal_pending_files` | Number of un-archived WAL files |
+| `cnpg_wal_pending_archive_files` | Number of un-archived WAL files |
 | `cnpg_wal_inactive_slots` | Number of inactive replication slots |
 
 ### PrometheusRule Alerts
