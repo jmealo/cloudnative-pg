@@ -74,78 +74,78 @@ func newDiskMetrics() *DiskMetrics {
 		TotalBytes: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: PrometheusNamespace,
 			Name:      "disk_total_bytes",
-			Help:      "Total capacity of the volume in bytes.",
+			Help:      "Total capacity of the volume in bytes",
 		}, []string{"volume_type", "tablespace"}),
 		UsedBytes: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: PrometheusNamespace,
 			Name:      "disk_used_bytes",
-			Help:      "Used space on the volume in bytes.",
+			Help:      "Used space on the volume in bytes",
 		}, []string{"volume_type", "tablespace"}),
 		AvailableBytes: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: PrometheusNamespace,
 			Name:      "disk_available_bytes",
-			Help:      "Available space on the volume in bytes (non-root).",
+			Help:      "Available space on the volume in bytes (non-root)",
 		}, []string{"volume_type", "tablespace"}),
 		PercentUsed: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: PrometheusNamespace,
 			Name:      "disk_percent_used",
-			Help:      "Percentage of the volume in use (0-100).",
+			Help:      "Percentage of the volume in use (0-100)",
 		}, []string{"volume_type", "tablespace"}),
 		InodesTotal: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: PrometheusNamespace,
 			Name:      "disk_inodes_total",
-			Help:      "Total number of inodes on the volume.",
+			Help:      "Total number of inodes on the volume",
 		}, []string{"volume_type", "tablespace"}),
 		InodesUsed: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: PrometheusNamespace,
 			Name:      "disk_inodes_used",
-			Help:      "Number of inodes in use on the volume.",
+			Help:      "Number of inodes in use on the volume",
 		}, []string{"volume_type", "tablespace"}),
 		InodesFree: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: PrometheusNamespace,
 			Name:      "disk_inodes_free",
-			Help:      "Number of free inodes on the volume.",
+			Help:      "Number of free inodes on the volume",
 		}, []string{"volume_type", "tablespace"}),
 		AtLimit: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: PrometheusNamespace,
 			Name:      "disk_at_limit",
-			Help:      "1 if the volume is at its configured expansion.limit, 0 otherwise.",
+			Help:      "1 if the volume is at its configured expansion.limit, 0 otherwise",
 		}, []string{"volume_type", "tablespace"}),
 		ResizeBlocked: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: PrometheusNamespace,
 			Name:      "disk_resize_blocked",
-			Help:      "1 if auto-resize is blocked, with reason label.",
+			Help:      "1 if auto-resize is blocked, with reason label",
 		}, []string{"volume_type", "tablespace", "reason"}),
 		ResizesTotal: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: PrometheusNamespace,
 			Subsystem: "disk",
 			Name:      "resizes_total",
-			Help:      "Total number of auto-resize operations.",
+			Help:      "Total number of auto-resize operations",
 		}, []string{"instance", "pvc_name", "volume_type", "tablespace", "result"}),
 		ResizeBudgetRemain: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: PrometheusNamespace,
 			Name:      "disk_resize_budget_remaining",
-			Help:      "Number of remaining auto-resize operations in the current 24h budget.",
+			Help:      "Number of remaining auto-resize operations in the current 24h budget",
 		}, []string{"instance", "pvc_name", "volume_type", "tablespace"}),
 		WALArchiveHealthy: prometheus.NewGauge(prometheus.GaugeOpts{
 			Namespace: PrometheusNamespace,
 			Name:      "wal_archive_healthy",
-			Help:      "1 if WAL archiving is healthy (last_archived_time > last_failed_time), 0 otherwise.",
+			Help:      "1 if WAL archiving is healthy (last_archived_time > last_failed_time), 0 otherwise",
 		}),
 		WALPendingFiles: prometheus.NewGauge(prometheus.GaugeOpts{
 			Namespace: PrometheusNamespace,
 			Name:      "wal_pending_archive_files",
-			Help:      "Number of WAL files pending archiving (.ready files in archive_status).",
+			Help:      "Number of WAL files pending archiving (.ready files in archive_status)",
 		}),
 		WALInactiveSlots: prometheus.NewGauge(prometheus.GaugeOpts{
 			Namespace: PrometheusNamespace,
 			Name:      "wal_inactive_slots",
-			Help:      "Number of inactive physical replication slots.",
+			Help:      "Number of inactive physical replication slots",
 		}),
 		WALSlotRetentionBytes: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: PrometheusNamespace,
 			Name:      "wal_slot_retention_bytes",
-			Help:      "WAL retention in bytes for inactive physical replication slots.",
+			Help:      "WAL retention in bytes for inactive physical replication slots",
 		}, []string{"slot_name"}),
 	}
 }

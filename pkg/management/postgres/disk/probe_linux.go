@@ -28,6 +28,8 @@ import (
 	"github.com/cloudnative-pg/machinery/pkg/log"
 )
 
+var diskLog = log.WithName("disk")
+
 // StatfsFunc is the function signature for statfs system calls.
 // This is exposed for testing purposes to allow mocking.
 type StatfsFunc func(path string, stat *syscall.Statfs_t) error
@@ -60,8 +62,6 @@ func NewProbeWithStatfs(fn StatfsFunc) *Probe {
 // GetVolumeStats probes the filesystem at the given path and returns
 // disk usage statistics.
 func (p *Probe) GetVolumeStats(mountPath string) (*VolumeStats, error) {
-	contextLogger := log.WithValues("mountPath", mountPath)
-
 	var stat syscall.Statfs_t
 	if err := p.statfsFunc(mountPath, &stat); err != nil {
 		return nil, fmt.Errorf("statfs failed for path %s: %w", mountPath, err)
@@ -92,7 +92,8 @@ func (p *Probe) GetVolumeStats(mountPath string) (*VolumeStats, error) {
 		InodesFree:     stat.Ffree,
 	}
 
-	contextLogger.Debug("disk probe completed",
+	diskLog.Debug("disk probe completed",
+		"mountPath", mountPath,
 		"totalBytes", stats.TotalBytes,
 		"usedBytes", stats.UsedBytes,
 		"availableBytes", stats.AvailableBytes,
