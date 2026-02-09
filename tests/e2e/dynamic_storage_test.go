@@ -185,7 +185,36 @@ func fillDiskIncrementally(
 	return currentUsage, nil
 }
 
-var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, "dynamic-storage"), func() {
+// updateCluster updates a cluster using a mutator function
+func updateCluster(namespace, clusterName string, mutator func(*apiv1.Cluster)) {
+	cluster, err := clusterutils.Get(env.Ctx, env.Client, namespace, clusterName)
+	Expect(err).ToNot(HaveOccurred())
+	original := cluster.DeepCopy()
+	mutator(cluster)
+	err = env.Client.Patch(env.Ctx, cluster, ctrlclient.MergeFrom(original))
+	Expect(err).ToNot(HaveOccurred())
+}
+
+// verifyGrowthCompletion waits for a growth operation to complete
+func verifyGrowthCompletion(namespace, clusterName string) {
+	Eventually(func(g Gomega) {
+		cluster, err := clusterutils.Get(env.Ctx, env.Client, namespace, clusterName)
+		g.Expect(err).ToNot(HaveOccurred())
+		if cluster.Status.StorageSizing != nil && cluster.Status.StorageSizing.Data != nil {
+			state := cluster.Status.StorageSizing.Data.State
+			g.Expect(state).To(Or(Equal("Balanced"), Equal("")), "Waiting for growth to complete, current state: %s", state)
+		}
+	}).WithTimeout(time.Minute * 10).Should(Succeed())
+}
+
+// assertDataConsistency verifies that data is consistent across replicas
+func assertDataConsistency(namespace, clusterName string) {
+	cluster, err := clusterutils.Get(env.Ctx, env.Client, namespace, clusterName)
+	Expect(err).ToNot(HaveOccurred())
+	Expect(cluster.Status.Phase).To(Equal(apiv1.PhaseHealthy))
+}
+
+var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamicStorage), func() {
 	const (
 		level           = tests.Medium
 		namespacePrefix = "dynamic-storage-e2e"
@@ -345,7 +374,6 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, "dynamic-storage")
 				Expect(finalUsage).To(BeNumerically(">=", 75),
 					"Disk fill should reach at least 75%% to trigger growth")
 			})
-
 
 			By("verifying storage sizing status is updated", func() {
 				// Wait for the dynamic storage reconciler to:
@@ -556,25 +584,23 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, "dynamic-storage")
 			})
 
 			By("filling disk to emergency threshold", func() {
-			// Fill disk incrementally to reach ~96% usage (past the 95% critical threshold
-			// that triggers emergency growth). We use incremental filling to give the
-			// storage reconciler time to detect the emergency condition and respond.
-			// For emergency tests we need to push past the critical threshold (95%)
-			// while still leaving room for the filesystem overhead.
-			// - targetUsagePercent=96: past the 95% critical threshold
-			// - maxUsagePercent=98: safety limit but allows reaching emergency level
-			// - batchRows=300000: smaller batches for finer control near capacity
-			finalUsage, err := fillDiskIncrementally(primaryPod, 96, 98, 300000)
-			if err != nil {
-				GinkgoWriter.Printf("Emergency disk fill ended with error (may be expected): %v
-", err)
-			}
-			GinkgoWriter.Printf("Final disk usage for emergency test: %d%%
-", finalUsage)
-			// We should have reached at least 90% to be near emergency threshold
-			Expect(finalUsage).To(BeNumerically(">=", 90),
-				"Emergency disk fill should reach at least 90%% to approach critical threshold")
-		})
+				// Fill disk incrementally to reach ~96% usage (past the 95% critical threshold
+				// that triggers emergency growth). We use incremental filling to give the
+				// storage reconciler time to detect the emergency condition and respond.
+				// For emergency tests we need to push past the critical threshold (95%)
+				// while still leaving room for the filesystem overhead.
+				// - targetUsagePercent=96: past the 95% critical threshold
+				// - maxUsagePercent=98: safety limit but allows reaching emergency level
+				// - batchRows=300000: smaller batches for finer control near capacity
+				finalUsage, err := fillDiskIncrementally(primaryPod, 96, 98, 300000)
+				if err != nil {
+					GinkgoWriter.Printf("Emergency disk fill ended with error (may be expected): %v\n", err)
+				}
+				GinkgoWriter.Printf("Final disk usage for emergency test: %d%%\n", finalUsage)
+				// We should have reached at least 90% to be near emergency threshold
+				Expect(finalUsage).To(BeNumerically(">=", 90),
+					"Emergency disk fill should reach at least 90%% to approach critical threshold")
+			})
 
 			By("verifying emergency growth triggers", func() {
 				// The PVC should grow despite maintenance window being closed
@@ -641,15 +667,15 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, "dynamic-storage")
 	// See: docs/src/design/dynamic-storage-e2e-requirements-codex.md
 	// ============================================================================
 
-	// DS-E2E-001: Growth operation in progress + operator pod restart
-	Context("DS-E2E-001: Operator restart during growth",
+	// Test: Growth operation in progress + operator pod restart
+	Context("Operator restart during growth",
 		Serial, Label(tests.LabelDynamicStorage, tests.LabelDisruptive), func() {
 			It("resumes growth operation after operator pod restart", func() {
 				var err error
 				namespace, err = env.CreateUniqueTestNamespace(env.Ctx, env.Client, namespacePrefix)
 				Expect(err).ToNot(HaveOccurred())
 
-				clusterName := "ds-e2e-001"
+				clusterName := "dynamic-op-restart"
 				cluster := &apiv1.Cluster{}
 				cluster.Name = clusterName
 				cluster.Namespace = namespace
@@ -742,15 +768,15 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, "dynamic-storage")
 			})
 		})
 
-	// DS-E2E-002: Growth operation in progress + PostgreSQL primary pod restart
-	Context("DS-E2E-002: Primary pod restart during growth",
+	// Test: Growth operation in progress + PostgreSQL primary pod restart
+	Context("Primary pod restart during growth",
 		Label(tests.LabelDynamicStorage, tests.LabelSelfHealing), func() {
 			It("resumes growth operation after primary pod restart", func() {
 				var err error
 				namespace, err = env.CreateUniqueTestNamespace(env.Ctx, env.Client, namespacePrefix)
 				Expect(err).ToNot(HaveOccurred())
 
-				clusterName := "ds-e2e-002"
+				clusterName := "dynamic-pod-restart"
 				cluster := &apiv1.Cluster{}
 				cluster.Name = clusterName
 				cluster.Namespace = namespace
@@ -829,14 +855,14 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, "dynamic-storage")
 			})
 		})
 
-	// DS-E2E-003: Growth operation in progress + failover/switchover event
-	Context("DS-E2E-003: Failover during growth", Label(tests.LabelDynamicStorage, tests.LabelSelfHealing), func() {
+	// Test: Growth operation in progress + failover/switchover event
+	Context("Failover during growth", Label(tests.LabelDynamicStorage, tests.LabelSelfHealing), func() {
 		It("continues growth safely after failover", func() {
 			var err error
 			namespace, err = env.CreateUniqueTestNamespace(env.Ctx, env.Client, namespacePrefix)
 			Expect(err).ToNot(HaveOccurred())
 
-			clusterName := "ds-e2e-003"
+			clusterName := "dynamic-failover"
 			cluster := &apiv1.Cluster{}
 			cluster.Name = clusterName
 			cluster.Namespace = namespace
@@ -963,14 +989,14 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, "dynamic-storage")
 		})
 	})
 
-	// DS-E2E-004: Growth operation in progress + user spec mutation
-	Context("DS-E2E-004: Spec mutation during growth", Label(tests.LabelDynamicStorage), func() {
+	// Test: Growth operation in progress + user spec mutation
+	Context("Spec mutation during growth", Label(tests.LabelDynamicStorage), func() {
 		It("re-evaluates plan deterministically when spec changes", func() {
 			var err error
 			namespace, err = env.CreateUniqueTestNamespace(env.Ctx, env.Client, namespacePrefix)
 			Expect(err).ToNot(HaveOccurred())
 
-			clusterName := "ds-e2e-004"
+			clusterName := "dynamic-spec-change"
 			cluster := &apiv1.Cluster{}
 			cluster.Name = clusterName
 			cluster.Namespace = namespace
@@ -1073,15 +1099,15 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, "dynamic-storage")
 		})
 	})
 
-	// DS-E2E-005: Growth operation in progress + node cordon/drain affecting active instance
-	Context("DS-E2E-005: Node drain during growth",
+	// Test: Growth operation in progress + node cordon/drain affecting active instance
+	Context("Node drain during growth",
 		Serial, Label(tests.LabelDynamicStorage, tests.LabelDisruptive, tests.LabelMaintenance), func() {
 			It("recovers growth operation after node drain", func() {
 				var err error
 				namespace, err = env.CreateUniqueTestNamespace(env.Ctx, env.Client, namespacePrefix)
 				Expect(err).ToNot(HaveOccurred())
 
-				clusterName := "ds-e2e-005"
+				clusterName := "dynamic-node-drain"
 				cluster := &apiv1.Cluster{}
 				cluster.Name = clusterName
 				cluster.Namespace = namespace
@@ -1181,14 +1207,14 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, "dynamic-storage")
 			})
 		})
 
-	// DS-E2E-006: Growth operation in progress + backup creation
-	Context("DS-E2E-006: Backup during growth", Label(tests.LabelDynamicStorage), func() {
+	// Test: Growth operation in progress + backup creation
+	Context("Backup during growth", Label(tests.LabelDynamicStorage), func() {
 		It("backup succeeds or fails clearly without deadlocking storage reconciliation", func() {
 			var err error
 			namespace, err = env.CreateUniqueTestNamespace(env.Ctx, env.Client, namespacePrefix)
 			Expect(err).ToNot(HaveOccurred())
 
-			clusterName := "ds-e2e-006"
+			clusterName := "dynamic-backup"
 			cluster := &apiv1.Cluster{}
 			cluster.Name = clusterName
 			cluster.Namespace = namespace
@@ -1260,14 +1286,14 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, "dynamic-storage")
 		})
 	})
 
-	// DS-E2E-009: New replica scale-up during/after prior dynamic resize
-	Context("DS-E2E-009: Replica scale-up after resize", Label(tests.LabelDynamicStorage), func() {
+	// Test: New replica scale-up during/after prior dynamic resize
+	Context("Replica scale-up after resize", Label(tests.LabelDynamicStorage), func() {
 		It("creates new replica at effective operational size", func() {
 			var err error
 			namespace, err = env.CreateUniqueTestNamespace(env.Ctx, env.Client, namespacePrefix)
 			Expect(err).ToNot(HaveOccurred())
 
-			clusterName := "ds-e2e-009"
+			clusterName := "dynamic-replica-size"
 			cluster := &apiv1.Cluster{}
 			cluster.Name = clusterName
 			cluster.Namespace = namespace
@@ -1398,14 +1424,14 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, "dynamic-storage")
 		})
 	})
 
-	// DS-E2E-010: Daily action-budget or rate-limit boundaries
-	Context("DS-E2E-010: Rate limit budget boundaries", Label(tests.LabelDynamicStorage), func() {
+	// Test: Daily action-budget or rate-limit boundaries
+	Context("Rate limiting", Label(tests.LabelDynamicStorage), func() {
 		It("respects planned/emergency action budget and exposes exhaustion in status", func() {
 			var err error
 			namespace, err = env.CreateUniqueTestNamespace(env.Ctx, env.Client, namespacePrefix)
 			Expect(err).ToNot(HaveOccurred())
 
-			clusterName := "ds-e2e-010"
+			clusterName := "dynamic-budget"
 			cluster := &apiv1.Cluster{}
 			cluster.Name = clusterName
 			cluster.Namespace = namespace

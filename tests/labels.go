@@ -22,6 +22,12 @@ package tests
 
 // List of the labels we use for labeling test specs
 // See https://github.com/onsi/ginkgo/blob/c70867a9661d9eb6eeb706dd7580bf510a99f35b/docs/MIGRATING_TO_V2.md
+//
+// NAMING CONVENTION:
+// - Constant names: PascalCase with "Label" prefix (e.g., LabelDynamicStorage)
+// - Constant values: kebab-case (e.g., "dynamic-storage")
+// - NEVER use abbreviated notation (e.g., "ds-e2e") - always use full descriptive names
+// - See docs/src/design/testing-conventions.md for full guidelines
 const (
 	// LabelBackupRestore is a label for only selecting backup and restore tests
 	LabelBackupRestore = "backup-restore"
@@ -94,6 +100,9 @@ const (
 
 	// LabelTablespaces is a label for selecting the tablespaces test
 	LabelTablespaces = "tablespaces"
+
+	// LabelDynamicStorage is a label for selecting dynamic storage tests
+	LabelDynamicStorage = "dynamic-storage"
 
 	// LabelUpgrade is a label for upgrade tests
 	LabelUpgrade = "upgrade"
