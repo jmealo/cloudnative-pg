@@ -94,6 +94,18 @@ GINKGO_FOCUS=${GINKGO_FOCUS:-}
 # Set cloud vendor for test profile selection
 export TEST_CLOUD_VENDOR=${TEST_CLOUD_VENDOR:-aks}
 
+# Colors (defined early for use in flag parsing)
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+CYAN='\033[0;36m'
+NC='\033[0m'
+
+info()  { echo -e "${CYAN}[INFO]${NC}  $*"; }
+warn()  { echo -e "${YELLOW}[WARN]${NC}  $*"; }
+ok()    { echo -e "${GREEN}[OK]${NC}    $*"; }
+fail()  { echo -e "${RED}[FAIL]${NC}  $*"; }
+
 # Parse flags
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -115,18 +127,6 @@ done
 
 POSTGRES_IMG=${POSTGRES_IMG:-$(grep 'DefaultImageName.*=' "${ROOT_DIR}/pkg/versions/versions.go" | cut -f 2 -d \")}
 PGBOUNCER_IMG=${PGBOUNCER_IMG:-$(grep 'DefaultPgbouncerImage.*=' "${ROOT_DIR}/pkg/versions/versions.go" | cut -f 2 -d \")}
-
-# Colors
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[0;33m'
-CYAN='\033[0;36m'
-NC='\033[0m'
-
-info()  { echo -e "${CYAN}[INFO]${NC}  $*"; }
-warn()  { echo -e "${YELLOW}[WARN]${NC}  $*"; }
-ok()    { echo -e "${GREEN}[OK]${NC}    $*"; }
-fail()  { echo -e "${RED}[FAIL]${NC}  $*"; }
 
 # ────────────────────────────────────────────────────────────
 # Diagnostic functions (all read-only)
