@@ -85,14 +85,12 @@ readonly ROOT_DIR
 CONTROLLER_IMG_BASE=${CONTROLLER_IMG_BASE:-ghcr.io/jmealo/cloudnative-pg-testing}
 CONTROLLER_IMG_TAG=${CONTROLLER_IMG_TAG:-feat-pvc-autoresizing-$(git -C "$(dirname "$0")/../../" rev-parse --short HEAD)}
 CONTROLLER_IMG=${CONTROLLER_IMG:-${CONTROLLER_IMG_BASE}:${CONTROLLER_IMG_TAG}}
-GINKGO_NODES=${GINKGO_NODES:-6}
+GINKGO_NODES=${GINKGO_NODES:-3}
 GINKGO_TIMEOUT=${GINKGO_TIMEOUT:-3h}
 SKIP_BUILD=${SKIP_BUILD:-false}
 SKIP_DEPLOY=${SKIP_DEPLOY:-false}
 DIAGNOSE_ONLY=${DIAGNOSE_ONLY:-false}
 GINKGO_FOCUS=${GINKGO_FOCUS:-}
-# Set cloud vendor for test profile selection
-export TEST_CLOUD_VENDOR=${TEST_CLOUD_VENDOR:-aks}
 
 # Parse flags
 while [[ $# -gt 0 ]]; do
@@ -182,10 +180,10 @@ print_victorialogs_hint() {
   info "=== VictoriaLogs Query Hint ==="
   info "To view all logs relevant to auto-resize E2E tests in VictoriaLogs, use the victorialogs-infra MCP:"
   info ""
-  info '  {namespace=~"dynamic-storage-.*|cnpg-system"}'
+  info '  {namespace=~"autoresize-.*|cnpg-system"}'
   info ""
   info "To further filter for volume/resize issues:"
-  info '  {namespace=~"dynamic-storage-.*|cnpg-system"} AND (_msg:~"resize|volume|attach|disk|pvc")'
+  info '  {namespace=~"autoresize-.*|cnpg-system"} AND (_msg:~"resize|volume|attach|disk|pvc")'
   info ""
   info "For Azure CSI driver logs specifically:"
   info '  {namespace="kube-system"} AND (_msg:~"csi|azuredisk|attach|detach")'
@@ -436,11 +434,11 @@ go install github.com/onsi/ginkgo/v2/ginkgo@v2.28.1
 # Run auto-resize E2E tests
 # ────────────────────────────────────────────────────────────
 
-info "=== Running Dynamic Storage E2E Tests ==="
+info "=== Running Auto-Resize E2E Tests ==="
 info "StorageClass: ${E2E_DEFAULT_STORAGE_CLASS}"
 info "Ginkgo nodes: ${GINKGO_NODES}"
 info "Ginkgo timeout: ${GINKGO_TIMEOUT}"
-info "Label filter: dynamic-storage || dynamic-storage-p0 || dynamic-storage-p1"
+info "Label filter: auto-resize"
 if [ -n "${GINKGO_FOCUS}" ]; then
   info "Focus filter: ${GINKGO_FOCUS}"
 fi
@@ -454,8 +452,8 @@ info "=== Pre-test Cleanup ==="
 # Delete orphaned namespaces from prior test runs.
 # These leave behind PVCs with Azure Disks attached, which saturate
 # the attach queue and cause timeouts for new tests.
-# Clean up: dynamic-storage-* (test namespaces) and minio (object store for backup tests)
-ORPHAN_NS=$(kubectl get namespaces -o name 2>/dev/null | grep -E 'dynamic-storage-|^namespace/minio$' | cut -d/ -f2 || true)
+# Clean up: autoresize-* (test namespaces) and minio (object store for backup tests)
+ORPHAN_NS=$(kubectl get namespaces -o name 2>/dev/null | grep -E 'autoresize-|^namespace/minio$' | cut -d/ -f2 || true)
 if [ -n "${ORPHAN_NS}" ]; then
   warn "Found orphaned namespaces from prior runs:"
   echo "${ORPHAN_NS}"
@@ -531,7 +529,7 @@ ginkgo --nodes="${GINKGO_NODES}" \
        --timeout "${GINKGO_TIMEOUT}" \
        --poll-progress-after=1200s \
        --poll-progress-interval=150s \
-       --label-filter "dynamic-storage || dynamic-storage-p0 || dynamic-storage-p1" \
+       --label-filter "dynamic-storage" \
        "${FOCUS_FLAGS[@]+"${FOCUS_FLAGS[@]}"}" \
        --force-newlines \
        --output-dir "${ROOT_DIR}/tests/e2e/out/" \
