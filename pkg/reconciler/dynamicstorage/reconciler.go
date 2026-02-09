@@ -102,12 +102,33 @@ func Reconcile(
 		return ctrl.Result{}, nil
 	}
 
+	// Log input state for debugging
+	instanceCount := 0
+	if instanceStatuses != nil {
+		instanceCount = len(instanceStatuses.Items)
+	}
+	contextLogger.Debug("Dynamic storage reconciler called",
+		"instanceStatusCount", instanceCount,
+		"pvcCount", len(pvcs))
+
 	// Collect disk status from instance statuses
 	diskStatusMap := collectDiskStatus(instanceStatuses)
 	if len(diskStatusMap) == 0 {
 		// If we have instance statuses but no disk status yet, they might still be initializing.
 		// Requeue after a short delay to retry collecting disk status.
 		if instanceStatuses != nil && len(instanceStatuses.Items) > 0 {
+			// Log which instances don't have disk status
+			for _, status := range instanceStatuses.Items {
+				podName := "unknown"
+				if status.Pod != nil {
+					podName = status.Pod.Name
+				}
+				hasDiskStatus := status.DiskStatus != nil
+				contextLogger.Debug("Instance status detail",
+					"pod", podName,
+					"hasDiskStatus", hasDiskStatus,
+					"error", status.Error)
+			}
 			contextLogger.Info("No disk status available yet, will retry",
 				"instanceCount", len(instanceStatuses.Items),
 				"requeueAfter", "30s")
