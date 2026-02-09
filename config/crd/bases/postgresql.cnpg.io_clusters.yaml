@@ -5770,6 +5770,72 @@ spec:
               storage:
                 description: Configuration of the storage of the instances
                 properties:
+                  emergencyGrow:
+                    description: |-
+                      EmergencyGrow controls growth outside the maintenance window.
+                      Only applies when Request and Limit are set (dynamic sizing mode).
+                    properties:
+                      criticalMinimumFree:
+                        default: 1Gi
+                        description: CriticalMinimumFree triggers emergency growth
+                          when free space drops below this value.
+                        type: string
+                      criticalThreshold:
+                        default: 95
+                        description: CriticalThreshold is the usage percentage that
+                          triggers emergency growth.
+                        maximum: 99
+                        minimum: 80
+                        type: integer
+                      enabled:
+                        default: true
+                        description: Enabled allows emergency growth outside maintenance
+                          windows.
+                        type: boolean
+                      exceedLimitOnEmergency:
+                        default: false
+                        description: |-
+                          ExceedLimitOnEmergency allows growth beyond Limit as a last resort.
+                          Use with caution - this can lead to unexpected costs.
+                        type: boolean
+                      maxActionsPerDay:
+                        default: 4
+                        description: |-
+                          MaxActionsPerDay limits total resize operations per 24-hour window.
+                          Cloud providers often limit volume modifications (e.g., AWS EBS ~4/day).
+                        type: integer
+                      reservedActionsForEmergency:
+                        default: 1
+                        description: ReservedActionsForEmergency from the daily budget.
+                        type: integer
+                    type: object
+                  limit:
+                    description: |-
+                      Limit is the maximum provisioned storage size (ceiling).
+                      When set with Request, enables dynamic sizing mode.
+                      The operator will never grow beyond this value.
+                      Mutually exclusive with Size.
+                    type: string
+                  maintenanceWindow:
+                    description: |-
+                      MaintenanceWindow defines when non-urgent sizing operations occur.
+                      Only applies when Request and Limit are set (dynamic sizing mode).
+                    properties:
+                      duration:
+                        default: 2h
+                        description: Duration of the maintenance window.
+                        type: string
+                      schedule:
+                        default: 0 3 * * *
+                        description: |-
+                          Schedule in cron syntax: "minute hour day-of-month month day-of-week"
+                          Examples: "0 3 * * *" (daily at 3 AM), "0 3 * * 0" (Sundays at 3 AM)
+                        type: string
+                      timezone:
+                        default: UTC
+                        description: Timezone for interpreting the schedule.
+                        type: string
+                    type: object
                   pvcTemplate:
                     description: Template to be used to generate the Persistent Volume
                       Claim
@@ -5966,6 +6032,13 @@ spec:
                           backing this claim.
                         type: string
                     type: object
+                  request:
+                    description: |-
+                      Request is the minimum provisioned storage size (floor).
+                      When set with Limit, enables dynamic sizing mode.
+                      The operator will never shrink below this value.
+                      Mutually exclusive with Size.
+                    type: string
                   resizeInUseVolumes:
                     default: true
                     description: Resize existent PVCs, defaults to true
@@ -5975,6 +6048,7 @@ spec:
                       Size of the storage. Required if not already specified in the PVC template.
                       Changes to this field are automatically reapplied to the created PVCs.
                       Size cannot be decreased.
+                      Mutually exclusive with Request/Limit dynamic sizing fields.
                     type: string
                   storageClass:
                     description: |-
@@ -5983,6 +6057,15 @@ spec:
                       If not specified, the generated PVCs will use the
                       default storage class
                     type: string
+                  targetBuffer:
+                    default: 20
+                    description: |-
+                      TargetBuffer is the desired free space percentage (5-50%).
+                      Only applies when Request and Limit are set (dynamic sizing mode).
+                      The operator grows storage when free space drops below this percentage.
+                    maximum: 50
+                    minimum: 5
+                    type: integer
                 type: object
               superuserSecret:
                 description: |-
@@ -6022,6 +6105,73 @@ spec:
                     storage:
                       description: The storage configuration for the tablespace
                       properties:
+                        emergencyGrow:
+                          description: |-
+                            EmergencyGrow controls growth outside the maintenance window.
+                            Only applies when Request and Limit are set (dynamic sizing mode).
+                          properties:
+                            criticalMinimumFree:
+                              default: 1Gi
+                              description: CriticalMinimumFree triggers emergency
+                                growth when free space drops below this value.
+                              type: string
+                            criticalThreshold:
+                              default: 95
+                              description: CriticalThreshold is the usage percentage
+                                that triggers emergency growth.
+                              maximum: 99
+                              minimum: 80
+                              type: integer
+                            enabled:
+                              default: true
+                              description: Enabled allows emergency growth outside
+                                maintenance windows.
+                              type: boolean
+                            exceedLimitOnEmergency:
+                              default: false
+                              description: |-
+                                ExceedLimitOnEmergency allows growth beyond Limit as a last resort.
+                                Use with caution - this can lead to unexpected costs.
+                              type: boolean
+                            maxActionsPerDay:
+                              default: 4
+                              description: |-
+                                MaxActionsPerDay limits total resize operations per 24-hour window.
+                                Cloud providers often limit volume modifications (e.g., AWS EBS ~4/day).
+                              type: integer
+                            reservedActionsForEmergency:
+                              default: 1
+                              description: ReservedActionsForEmergency from the daily
+                                budget.
+                              type: integer
+                          type: object
+                        limit:
+                          description: |-
+                            Limit is the maximum provisioned storage size (ceiling).
+                            When set with Request, enables dynamic sizing mode.
+                            The operator will never grow beyond this value.
+                            Mutually exclusive with Size.
+                          type: string
+                        maintenanceWindow:
+                          description: |-
+                            MaintenanceWindow defines when non-urgent sizing operations occur.
+                            Only applies when Request and Limit are set (dynamic sizing mode).
+                          properties:
+                            duration:
+                              default: 2h
+                              description: Duration of the maintenance window.
+                              type: string
+                            schedule:
+                              default: 0 3 * * *
+                              description: |-
+                                Schedule in cron syntax: "minute hour day-of-month month day-of-week"
+                                Examples: "0 3 * * *" (daily at 3 AM), "0 3 * * 0" (Sundays at 3 AM)
+                              type: string
+                            timezone:
+                              default: UTC
+                              description: Timezone for interpreting the schedule.
+                              type: string
+                          type: object
                         pvcTemplate:
                           description: Template to be used to generate the Persistent
                             Volume Claim
@@ -6222,6 +6372,13 @@ spec:
                                 the PersistentVolume backing this claim.
                               type: string
                           type: object
+                        request:
+                          description: |-
+                            Request is the minimum provisioned storage size (floor).
+                            When set with Limit, enables dynamic sizing mode.
+                            The operator will never shrink below this value.
+                            Mutually exclusive with Size.
+                          type: string
                         resizeInUseVolumes:
                           default: true
                           description: Resize existent PVCs, defaults to true
@@ -6231,6 +6388,7 @@ spec:
                             Size of the storage. Required if not already specified in the PVC template.
                             Changes to this field are automatically reapplied to the created PVCs.
                             Size cannot be decreased.
+                            Mutually exclusive with Request/Limit dynamic sizing fields.
                           type: string
                         storageClass:
                           description: |-
@@ -6239,6 +6397,15 @@ spec:
                             If not specified, the generated PVCs will use the
                             default storage class
                           type: string
+                        targetBuffer:
+                          default: 20
+                          description: |-
+                            TargetBuffer is the desired free space percentage (5-50%).
+                            Only applies when Request and Limit are set (dynamic sizing mode).
+                            The operator grows storage when free space drops below this percentage.
+                          maximum: 50
+                          minimum: 5
+                          type: integer
                       type: object
                     temporary:
                       default: false
@@ -6434,6 +6601,72 @@ spec:
                 description: Configuration of the storage for PostgreSQL WAL (Write-Ahead
                   Log)
                 properties:
+                  emergencyGrow:
+                    description: |-
+                      EmergencyGrow controls growth outside the maintenance window.
+                      Only applies when Request and Limit are set (dynamic sizing mode).
+                    properties:
+                      criticalMinimumFree:
+                        default: 1Gi
+                        description: CriticalMinimumFree triggers emergency growth
+                          when free space drops below this value.
+                        type: string
+                      criticalThreshold:
+                        default: 95
+                        description: CriticalThreshold is the usage percentage that
+                          triggers emergency growth.
+                        maximum: 99
+                        minimum: 80
+                        type: integer
+                      enabled:
+                        default: true
+                        description: Enabled allows emergency growth outside maintenance
+                          windows.
+                        type: boolean
+                      exceedLimitOnEmergency:
+                        default: false
+                        description: |-
+                          ExceedLimitOnEmergency allows growth beyond Limit as a last resort.
+                          Use with caution - this can lead to unexpected costs.
+                        type: boolean
+                      maxActionsPerDay:
+                        default: 4
+                        description: |-
+                          MaxActionsPerDay limits total resize operations per 24-hour window.
+                          Cloud providers often limit volume modifications (e.g., AWS EBS ~4/day).
+                        type: integer
+                      reservedActionsForEmergency:
+                        default: 1
+                        description: ReservedActionsForEmergency from the daily budget.
+                        type: integer
+                    type: object
+                  limit:
+                    description: |-
+                      Limit is the maximum provisioned storage size (ceiling).
+                      When set with Request, enables dynamic sizing mode.
+                      The operator will never grow beyond this value.
+                      Mutually exclusive with Size.
+                    type: string
+                  maintenanceWindow:
+                    description: |-
+                      MaintenanceWindow defines when non-urgent sizing operations occur.
+                      Only applies when Request and Limit are set (dynamic sizing mode).
+                    properties:
+                      duration:
+                        default: 2h
+                        description: Duration of the maintenance window.
+                        type: string
+                      schedule:
+                        default: 0 3 * * *
+                        description: |-
+                          Schedule in cron syntax: "minute hour day-of-month month day-of-week"
+                          Examples: "0 3 * * *" (daily at 3 AM), "0 3 * * 0" (Sundays at 3 AM)
+                        type: string
+                      timezone:
+                        default: UTC
+                        description: Timezone for interpreting the schedule.
+                        type: string
+                    type: object
                   pvcTemplate:
                     description: Template to be used to generate the Persistent Volume
                       Claim
@@ -6630,6 +6863,13 @@ spec:
                           backing this claim.
                         type: string
                     type: object
+                  request:
+                    description: |-
+                      Request is the minimum provisioned storage size (floor).
+                      When set with Limit, enables dynamic sizing mode.
+                      The operator will never shrink below this value.
+                      Mutually exclusive with Size.
+                    type: string
                   resizeInUseVolumes:
                     default: true
                     description: Resize existent PVCs, defaults to true
@@ -6639,6 +6879,7 @@ spec:
                       Size of the storage. Required if not already specified in the PVC template.
                       Changes to this field are automatically reapplied to the created PVCs.
                       Size cannot be decreased.
+                      Mutually exclusive with Request/Limit dynamic sizing fields.
                     type: string
                   storageClass:
                     description: |-
@@ -6647,6 +6888,15 @@ spec:
                       If not specified, the generated PVCs will use the
                       default storage class
                     type: string
+                  targetBuffer:
+                    default: 20
+                    description: |-
+                      TargetBuffer is the desired free space percentage (5-50%).
+                      Only applies when Request and Limit are set (dynamic sizing mode).
+                      The operator grows storage when free space drops below this percentage.
+                    maximum: 50
+                    minimum: 5
+                    type: integer
                 type: object
             required:
             - instances
@@ -7139,6 +7389,256 @@ spec:
                   superuserSecretVersion:
                     description: The resource version of the "postgres" user secret
                     type: string
+                type: object
+              storageSizing:
+                description: StorageSizing tracks dynamic sizing state per logical
+                  volume.
+                properties:
+                  data:
+                    description: Data volume sizing status.
+                    properties:
+                      actualSizes:
+                        additionalProperties:
+                          type: string
+                        description: ActualSizes maps instance names to their current
+                          PVC sizes.
+                        type: object
+                      budget:
+                        description: Budget tracks daily operation limits.
+                        properties:
+                          actionsLast24h:
+                            description: ActionsLast24h is the count of resize operations
+                              in the last 24 hours.
+                            type: integer
+                          availableForEmergency:
+                            description: AvailableForEmergency is the number of actions
+                              remaining for emergency operations.
+                            type: integer
+                          availableForPlanned:
+                            description: AvailableForPlanned is the number of actions
+                              remaining for scheduled operations.
+                            type: integer
+                          budgetResetsAt:
+                            description: BudgetResetsAt is the time when the rolling
+                              24h window resets.
+                            format: date-time
+                            type: string
+                        type: object
+                      effectiveSize:
+                        description: EffectiveSize is the current target size for
+                          new PVCs.
+                        type: string
+                      lastAction:
+                        description: LastAction records the most recent sizing operation.
+                        properties:
+                          from:
+                            description: From is the size before the action.
+                            type: string
+                          instance:
+                            description: Instance is the name of the instance affected
+                              by the action.
+                            type: string
+                          kind:
+                            description: 'Kind is the type of action: EmergencyGrow,
+                              ScheduledGrow.'
+                            type: string
+                          result:
+                            description: 'Result is the outcome: Success, Failed,
+                              Pending.'
+                            type: string
+                          timestamp:
+                            description: Timestamp is the time when the action occurred.
+                            format: date-time
+                            type: string
+                          to:
+                            description: To is the size after the action.
+                            type: string
+                        type: object
+                      nextMaintenanceWindow:
+                        description: NextMaintenanceWindow is the timestamp when pending
+                          operations can execute.
+                        format: date-time
+                        type: string
+                      state:
+                        description: 'State is the current status of the logical volume:
+                          Balanced, NeedsGrow, Emergency, PendingGrowth, Resizing.'
+                        enum:
+                        - Balanced
+                        - NeedsGrow
+                        - Emergency
+                        - PendingGrowth
+                        - Resizing
+                        type: string
+                      targetSize:
+                        description: TargetSize is the calculated ideal size based
+                          on usage + buffer.
+                        type: string
+                    type: object
+                  tablespaces:
+                    additionalProperties:
+                      description: VolumeSizingStatus tracks the sizing state of a
+                        logical volume.
+                      properties:
+                        actualSizes:
+                          additionalProperties:
+                            type: string
+                          description: ActualSizes maps instance names to their current
+                            PVC sizes.
+                          type: object
+                        budget:
+                          description: Budget tracks daily operation limits.
+                          properties:
+                            actionsLast24h:
+                              description: ActionsLast24h is the count of resize operations
+                                in the last 24 hours.
+                              type: integer
+                            availableForEmergency:
+                              description: AvailableForEmergency is the number of
+                                actions remaining for emergency operations.
+                              type: integer
+                            availableForPlanned:
+                              description: AvailableForPlanned is the number of actions
+                                remaining for scheduled operations.
+                              type: integer
+                            budgetResetsAt:
+                              description: BudgetResetsAt is the time when the rolling
+                                24h window resets.
+                              format: date-time
+                              type: string
+                          type: object
+                        effectiveSize:
+                          description: EffectiveSize is the current target size for
+                            new PVCs.
+                          type: string
+                        lastAction:
+                          description: LastAction records the most recent sizing operation.
+                          properties:
+                            from:
+                              description: From is the size before the action.
+                              type: string
+                            instance:
+                              description: Instance is the name of the instance affected
+                                by the action.
+                              type: string
+                            kind:
+                              description: 'Kind is the type of action: EmergencyGrow,
+                                ScheduledGrow.'
+                              type: string
+                            result:
+                              description: 'Result is the outcome: Success, Failed,
+                                Pending.'
+                              type: string
+                            timestamp:
+                              description: Timestamp is the time when the action occurred.
+                              format: date-time
+                              type: string
+                            to:
+                              description: To is the size after the action.
+                              type: string
+                          type: object
+                        nextMaintenanceWindow:
+                          description: NextMaintenanceWindow is the timestamp when
+                            pending operations can execute.
+                          format: date-time
+                          type: string
+                        state:
+                          description: 'State is the current status of the logical
+                            volume: Balanced, NeedsGrow, Emergency, PendingGrowth,
+                            Resizing.'
+                          enum:
+                          - Balanced
+                          - NeedsGrow
+                          - Emergency
+                          - PendingGrowth
+                          - Resizing
+                          type: string
+                        targetSize:
+                          description: TargetSize is the calculated ideal size based
+                            on usage + buffer.
+                          type: string
+                      type: object
+                    description: Tablespaces sizing status.
+                    type: object
+                  wal:
+                    description: WAL volume sizing status (Phase 2).
+                    properties:
+                      actualSizes:
+                        additionalProperties:
+                          type: string
+                        description: ActualSizes maps instance names to their current
+                          PVC sizes.
+                        type: object
+                      budget:
+                        description: Budget tracks daily operation limits.
+                        properties:
+                          actionsLast24h:
+                            description: ActionsLast24h is the count of resize operations
+                              in the last 24 hours.
+                            type: integer
+                          availableForEmergency:
+                            description: AvailableForEmergency is the number of actions
+                              remaining for emergency operations.
+                            type: integer
+                          availableForPlanned:
+                            description: AvailableForPlanned is the number of actions
+                              remaining for scheduled operations.
+                            type: integer
+                          budgetResetsAt:
+                            description: BudgetResetsAt is the time when the rolling
+                              24h window resets.
+                            format: date-time
+                            type: string
+                        type: object
+                      effectiveSize:
+                        description: EffectiveSize is the current target size for
+                          new PVCs.
+                        type: string
+                      lastAction:
+                        description: LastAction records the most recent sizing operation.
+                        properties:
+                          from:
+                            description: From is the size before the action.
+                            type: string
+                          instance:
+                            description: Instance is the name of the instance affected
+                              by the action.
+                            type: string
+                          kind:
+                            description: 'Kind is the type of action: EmergencyGrow,
+                              ScheduledGrow.'
+                            type: string
+                          result:
+                            description: 'Result is the outcome: Success, Failed,
+                              Pending.'
+                            type: string
+                          timestamp:
+                            description: Timestamp is the time when the action occurred.
+                            format: date-time
+                            type: string
+                          to:
+                            description: To is the size after the action.
+                            type: string
+                        type: object
+                      nextMaintenanceWindow:
+                        description: NextMaintenanceWindow is the timestamp when pending
+                          operations can execute.
+                        format: date-time
+                        type: string
+                      state:
+                        description: 'State is the current status of the logical volume:
+                          Balanced, NeedsGrow, Emergency, PendingGrowth, Resizing.'
+                        enum:
+                        - Balanced
+                        - NeedsGrow
+                        - Emergency
+                        - PendingGrowth
+                        - Resizing
+                        type: string
+                      targetSize:
+                        description: TargetSize is the calculated ideal size based
+                          on usage + buffer.
+                        type: string
+                    type: object
                 type: object
               switchReplicaClusterStatus:
                 description: SwitchReplicaClusterStatus is the status of the switch

@@ -92,6 +92,18 @@ type PostgresqlStatus struct {
 	// allowing detection of restarts that don't change the container ID or executable hash.
 	SessionID string `json:"sessionID"`
 
+	// DiskStatus contains filesystem statistics for the data volume.
+	// This is used by the dynamic storage sizing feature to monitor disk usage.
+	DiskStatus *DiskStatus `json:"diskStatus,omitempty"`
+
+	// WALDiskStatus contains filesystem statistics for the WAL volume.
+	// This is populated only when walStorage is configured.
+	WALDiskStatus *DiskStatus `json:"walDiskStatus,omitempty"`
+
+	// TablespaceDiskStatus contains filesystem statistics for tablespace volumes.
+	// Maps tablespace name to disk status.
+	TablespaceDiskStatus map[string]*DiskStatus `json:"tablespaceDiskStatus,omitempty"`
+
 	// This field represents the Kubelet point-of-view of the readiness
 	// status of this instance and may be slightly stale when the Kubelet has
 	// not still invoked the readiness probe.
@@ -101,6 +113,21 @@ type PostgresqlStatus struct {
 	//
 	// This field is never populated in the instance manager.
 	IsPodReady bool `json:"isPodReady"`
+}
+
+// DiskStatus represents filesystem statistics for a volume.
+type DiskStatus struct {
+	// TotalBytes is the total size of the filesystem in bytes.
+	TotalBytes uint64 `json:"totalBytes"`
+
+	// UsedBytes is the number of bytes used on the filesystem.
+	UsedBytes uint64 `json:"usedBytes"`
+
+	// AvailableBytes is the number of bytes available to non-root users.
+	AvailableBytes uint64 `json:"availableBytes"`
+
+	// PercentUsed is the percentage of the filesystem that is used.
+	PercentUsed float64 `json:"percentUsed"`
 }
 
 // PgStatReplication contains the replications of replicas as reported by the primary instance
