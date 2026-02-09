@@ -514,7 +514,8 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 				TargetBuffer: ptr.To(20),
 				MaintenanceWindow: &apiv1.MaintenanceWindowConfig{
 					// Set maintenance window to a time that is not now
-					Schedule: "0 4 31 2 *", // February 31st at 4am (never happens)
+					// robfig/cron uses 6-field format: second minute hour day-of-month month day-of-week
+					Schedule: "0 0 4 31 2 *", // February 31st at 4am (never happens)
 					Duration: "1h",
 					Timezone: "UTC",
 				},
@@ -559,7 +560,8 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 				Limit:        "20Gi",
 				TargetBuffer: ptr.To(20),
 				MaintenanceWindow: &apiv1.MaintenanceWindowConfig{
-					Schedule: "0 4 31 2 *", // Never open
+					// robfig/cron uses 6-field format: second minute hour day-of-month month day-of-week
+					Schedule: "0 0 4 31 2 *", // Never open
 					Duration: "1h",
 					Timezone: "UTC",
 				},
