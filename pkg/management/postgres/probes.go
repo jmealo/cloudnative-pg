@@ -721,6 +721,11 @@ func (instance *Instance) fillDiskStatus(result *postgres.PostgresqlStatus) erro
 			AvailableBytes: dataStatus.AvailableBytes,
 			PercentUsed:    dataStatus.PercentUsed,
 		}
+		log.Trace("Disk status collected successfully",
+			"path", specs.PgDataPath,
+			"totalBytes", dataStatus.TotalBytes,
+			"usedBytes", dataStatus.UsedBytes,
+			"percentUsed", dataStatus.PercentUsed)
 	}
 
 	// Probe WAL volume if it exists (separate WAL volume is optional)
