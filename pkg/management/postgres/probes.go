@@ -51,9 +51,7 @@ func (instance *Instance) GetStatus() (result *postgres.PostgresqlStatus, err er
 
 	// Always collect disk status as it doesn't require a database connection.
 	// This is critical for dynamic storage sizing even when PostgreSQL is down.
-	if diskErr := instance.fillDiskStatus(result); diskErr != nil {
-		log.Debug("Error while collecting disk status", "err", diskErr)
-	}
+	instance.fillDiskStatus(result)
 
 	// this deferred function may override the error returned. Take extra care.
 	defer func() {
@@ -283,6 +281,7 @@ func (instance *Instance) fillStatus(result *postgres.PostgresqlStatus) error {
 		return err
 	}
 
+	instance.fillDiskStatus(result)
 	return nil
 }
 
@@ -710,11 +709,16 @@ func GetReadyWALFiles() (fileNames []string, err error) {
 // fillDiskStatus fills the disk status information for data, WAL, and tablespace volumes.
 // This is used by the dynamic storage sizing feature to monitor disk usage.
 func (instance *Instance) fillDiskStatus(result *postgres.PostgresqlStatus) {
+	pgData := instance.PgData
+	if pgData == "" {
+		pgData = specs.PgDataPath
+	}
+
 	// Probe data volume disk status with retries for transient filesystem issues
 	var dataStatus *disk.Status
 	var err error
 	for attempt := 0; attempt < 3; attempt++ {
-		dataStatus, err = disk.Probe(specs.PgDataPath)
+		dataStatus, err = disk.Probe(pgData)
 		if err == nil {
 			break
 		}
@@ -723,7 +727,7 @@ func (instance *Instance) fillDiskStatus(result *postgres.PostgresqlStatus) {
 	}
 	if err != nil {
 		// Log error but don't fail - disk status is not critical for instance health
-		log.Info("Failed to probe data volume disk status after retries", "path", specs.PgDataPath, "error", err)
+		log.Info("Failed to probe data volume disk status after retries", "path", pgData, "error", err)
 	} else {
 		result.DiskStatus = &postgres.DiskStatus{
 			TotalBytes:     dataStatus.TotalBytes,
@@ -732,7 +736,7 @@ func (instance *Instance) fillDiskStatus(result *postgres.PostgresqlStatus) {
 			PercentUsed:    dataStatus.PercentUsed,
 		}
 		log.Info("Disk status collected successfully",
-			"path", specs.PgDataPath,
+			"path", pgData,
 			"totalBytes", dataStatus.TotalBytes,
 			"usedBytes", dataStatus.UsedBytes,
 			"percentUsed", dataStatus.PercentUsed)

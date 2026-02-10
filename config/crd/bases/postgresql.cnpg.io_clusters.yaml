@@ -7460,14 +7460,17 @@ spec:
                         format: date-time
                         type: string
                       state:
-                        description: 'State is the current status of the logical volume:
-                          Balanced, NeedsGrow, Emergency, PendingGrowth, Resizing.'
+                        description: |-
+                          State is the current status of the logical volume: Balanced, NeedsGrow, Emergency,
+                          PendingGrowth, Resizing, AtLimit, WaitingForDiskStatus.
                         enum:
                         - Balanced
                         - NeedsGrow
                         - Emergency
                         - PendingGrowth
                         - Resizing
+                        - AtLimit
+                        - WaitingForDiskStatus
                         type: string
                       targetSize:
                         description: TargetSize is the calculated ideal size based
@@ -7542,15 +7545,17 @@ spec:
                           format: date-time
                           type: string
                         state:
-                          description: 'State is the current status of the logical
-                            volume: Balanced, NeedsGrow, Emergency, PendingGrowth,
-                            Resizing.'
+                          description: |-
+                            State is the current status of the logical volume: Balanced, NeedsGrow, Emergency,
+                            PendingGrowth, Resizing, AtLimit, WaitingForDiskStatus.
                           enum:
                           - Balanced
                           - NeedsGrow
                           - Emergency
                           - PendingGrowth
                           - Resizing
+                          - AtLimit
+                          - WaitingForDiskStatus
                           type: string
                         targetSize:
                           description: TargetSize is the calculated ideal size based
@@ -7625,14 +7630,17 @@ spec:
                         format: date-time
                         type: string
                       state:
-                        description: 'State is the current status of the logical volume:
-                          Balanced, NeedsGrow, Emergency, PendingGrowth, Resizing.'
+                        description: |-
+                          State is the current status of the logical volume: Balanced, NeedsGrow, Emergency,
+                          PendingGrowth, Resizing, AtLimit, WaitingForDiskStatus.
                         enum:
                         - Balanced
                         - NeedsGrow
                         - Emergency
                         - PendingGrowth
                         - Resizing
+                        - AtLimit
+                        - WaitingForDiskStatus
                         type: string
                       targetSize:
                         description: TargetSize is the calculated ideal size based

@@ -371,7 +371,11 @@ func evaluateSizing(
 		}
 	}
 
-	return evaluateGrowth(cfg, volumeStatus, volumeType, currentSize, request, limit, maxTotal, maxUsed, highestUsageInstance)
+	return evaluateGrowth(
+		cfg, volumeStatus, volumeType,
+		currentSize, request, limit,
+		maxTotal, maxUsed, highestUsageInstance,
+	)
 }
 
 func findMaxUsage(diskStatusMap map[string]*DiskInfo) (uint64, uint64, uint64, string) {
