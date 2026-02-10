@@ -22,7 +22,6 @@ package dynamicstorage
 import (
 	"context"
 	"fmt"
-	"time"
 
 	"github.com/cloudnative-pg/machinery/pkg/log"
 	corev1 "k8s.io/api/core/v1"

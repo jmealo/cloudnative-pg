@@ -49,8 +49,18 @@ func (instance *Instance) GetStatus() (result *postgres.PostgresqlStatus, err er
 		MightBeUnavailable:     instance.MightBeUnavailable(),
 	}
 
+	// Always collect disk status as it doesn't require a database connection.
+	// This is critical for dynamic storage sizing even when PostgreSQL is down.
+	if diskErr := instance.fillDiskStatus(result); diskErr != nil {
+		log.Debug("Error while collecting disk status", "err", diskErr)
+	}
+
 	// this deferred function may override the error returned. Take extra care.
 	defer func() {
+		if err != nil {
+			result.ErrorMessage = err.Error()
+		}
+
 		if !result.MightBeUnavailable {
 			return
 		}
@@ -273,7 +283,7 @@ func (instance *Instance) fillStatus(result *postgres.PostgresqlStatus) error {
 		return err
 	}
 
-	return instance.fillDiskStatus(result)
+	return nil
 }
 
 func (instance *Instance) fillBasebackupStats(
@@ -721,7 +731,7 @@ func (instance *Instance) fillDiskStatus(result *postgres.PostgresqlStatus) erro
 			AvailableBytes: dataStatus.AvailableBytes,
 			PercentUsed:    dataStatus.PercentUsed,
 		}
-		log.Trace("Disk status collected successfully",
+		log.Info("Disk status collected successfully",
 			"path", specs.PgDataPath,
 			"totalBytes", dataStatus.TotalBytes,
 			"usedBytes", dataStatus.UsedBytes,

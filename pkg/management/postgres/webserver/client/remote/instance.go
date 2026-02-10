@@ -338,6 +338,10 @@ func (r *instanceClientImpl) rawInstanceStatusRequest(
 		return result
 	}
 
+	if result.ErrorMessage != "" {
+		result.Error = errors.New(result.ErrorMessage)
+	}
+
 	return result
 }
 

@@ -75,6 +75,9 @@ type PostgresqlStatus struct {
 	// status of a Pod
 	Error error `json:"-"`
 
+	// ErrorMessage is the string representation of Error, for JSON serialization
+	ErrorMessage string `json:"errorMessage,omitempty"`
+
 	// contains the PgStatReplication rows content.
 	ReplicationInfo PgStatReplicationList `json:"replicationInfo,omitempty"`
 	// contains the PgReplicationSlot rows content.
