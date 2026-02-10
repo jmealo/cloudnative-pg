@@ -27,6 +27,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
@@ -333,18 +334,18 @@ func updateCluster(namespace, clusterName string, mutator func(*apiv1.Cluster)) 
 }
 
 // verifyGrowthCompletion waits for a growth operation to complete, including:
-// 1. StorageSizing status reaching a stable state (Balanced or empty)
+// 1. StorageSizing status reaching a stable state (Balanced or AtLimit)
 // 2. PVC capacity actually reflecting the resize (CSI driver completion)
 func verifyGrowthCompletion(namespace, clusterName string) {
 	By("waiting for storage sizing state to stabilize", func() {
 		Eventually(func(g Gomega) {
 			cluster, err := clusterutils.Get(env.Ctx, env.Client, namespace, clusterName)
 			g.Expect(err).ToNot(HaveOccurred())
-			if cluster.Status.StorageSizing != nil && cluster.Status.StorageSizing.Data != nil {
-				state := cluster.Status.StorageSizing.Data.State
-				g.Expect(state).To(Or(Equal("Balanced"), Equal("")),
-					"Waiting for growth to complete, current state: %s", state)
-			}
+			g.Expect(cluster.Status.StorageSizing).ToNot(BeNil())
+			g.Expect(cluster.Status.StorageSizing.Data).ToNot(BeNil())
+			state := cluster.Status.StorageSizing.Data.State
+			g.Expect(state).To(Or(Equal("Balanced"), Equal("AtLimit")),
+				"Waiting for growth to complete, current state: %s", state)
 		}).WithTimeout(time.Duration(testTimeouts[timeouts.AKSVolumeResize]) * time.Second).
 			WithPolling(time.Duration(testTimeouts[timeouts.StorageSizingPolling]) * time.Second).Should(Succeed())
 	})
@@ -394,6 +395,43 @@ func waitForPVCCapacityUpdate(namespace, clusterName string, timeout time.Durati
 		WithPolling(time.Duration(testTimeouts[timeouts.StorageSizingPolling]) * time.Second).Should(Succeed())
 
 	GinkgoWriter.Printf("All PVCs have updated capacity\n")
+}
+
+// triggerSwitchoverAndWait performs a switchover using AKS-aware timeouts and waits
+// for the cluster to become ready again.
+func triggerSwitchoverAndWait(namespace, clusterName string) (oldPrimary, newPrimary string) {
+	cluster, err := clusterutils.Get(env.Ctx, env.Client, namespace, clusterName)
+	Expect(err).ToNot(HaveOccurred())
+	oldPrimary = cluster.Status.CurrentPrimary
+	Expect(oldPrimary).ToNot(BeEmpty(), "cluster should have a current primary before switchover")
+
+	podList, err := clusterutils.ListPods(env.Ctx, env.Client, namespace, clusterName)
+	Expect(err).ToNot(HaveOccurred())
+	Expect(len(podList.Items)).To(BeNumerically(">=", 2), "switchover requires at least one replica")
+
+	for _, pod := range podList.Items {
+		if pod.Name != oldPrimary {
+			newPrimary = pod.Name
+			break
+		}
+	}
+	Expect(newPrimary).ToNot(BeEmpty(), "failed to identify a promotion candidate")
+
+	originCluster := cluster.DeepCopy()
+	cluster.Status.TargetPrimary = newPrimary
+	err = env.Client.Status().Patch(env.Ctx, cluster, ctrlclient.MergeFrom(originCluster))
+	Expect(err).ToNot(HaveOccurred())
+
+	Eventually(func(g Gomega) {
+		updated, getErr := clusterutils.Get(env.Ctx, env.Client, namespace, clusterName)
+		g.Expect(getErr).ToNot(HaveOccurred())
+		g.Expect(updated.Status.CurrentPrimary).To(Equal(newPrimary))
+		g.Expect(updated.Status.TargetPrimary).To(Equal(newPrimary))
+	}).WithTimeout(time.Duration(testTimeouts[timeouts.AKSVolumeResize]) * time.Second).
+		WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())
+
+	AssertClusterIsReady(namespace, clusterName, testTimeouts[timeouts.ClusterIsReady], env)
+	return oldPrimary, newPrimary
 }
 
 var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamicStorage), func() {
@@ -629,19 +667,32 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 				AssertClusterIsReady(namespace, clusterName, testTimeouts[timeouts.ClusterIsReady], env)
 			})
 
-			By("verifying PVC does not exceed limit", func() {
-				// Even after growth, PVC should never exceed limit
-				Consistently(func(g Gomega) {
+			By("filling disk to trigger growth toward limit", func() {
+				primaryPod, getErr := clusterutils.GetPrimary(env.Ctx, env.Client, namespace, clusterName)
+				Expect(getErr).ToNot(HaveOccurred())
+				finalUsage, fillErr := fillDiskIncrementally(primaryPod, 85, 92, 500000)
+				if fillErr != nil {
+					GinkgoWriter.Printf("Disk fill ended with error (may be expected): %v\n", fillErr)
+				}
+				Expect(finalUsage).To(BeNumerically(">=", 75))
+			})
+
+			By("verifying PVC grows but does not exceed limit", func() {
+				limit := resource.MustParse("6Gi")
+				initialRequest := resource.MustParse("5Gi")
+				Eventually(func(g Gomega) {
 					var pvcList corev1.PersistentVolumeClaimList
 					err := env.Client.List(env.Ctx, &pvcList,
 						ctrlclient.InNamespace(namespace),
 						ctrlclient.MatchingLabels{utils.ClusterLabelName: clusterName})
 					g.Expect(err).ToNot(HaveOccurred())
-					for _, pvc := range pvcList.Items {
-						size := pvc.Spec.Resources.Requests[corev1.ResourceStorage]
-						limit := resource.MustParse("6Gi")
-						g.Expect(size.Cmp(limit)).To(BeNumerically("<=", 0))
-					}
+					g.Expect(pvcList.Items).To(HaveLen(1))
+
+					size := pvcList.Items[0].Spec.Resources.Requests[corev1.ResourceStorage]
+					g.Expect(size.Cmp(initialRequest)).To(BeNumerically(">", 0),
+						"PVC should grow beyond initial request when under pressure")
+					g.Expect(size.Cmp(limit)).To(BeNumerically("<=", 0),
+						"PVC should never exceed configured limit")
 				}).WithTimeout(time.Duration(testTimeouts[timeouts.AKSVolumeResize]) * time.Second).
 					WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())
 			})
@@ -792,17 +843,35 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 				AssertClusterIsReady(namespace, clusterName, testTimeouts[timeouts.ClusterIsReady], env)
 			})
 
-			By("verifying growth is pending", func() {
-				// Growth should be queued, not executed immediately
+			By("filling disk while maintenance window is closed", func() {
+				primaryPod, getErr := clusterutils.GetPrimary(env.Ctx, env.Client, namespace, clusterName)
+				Expect(getErr).ToNot(HaveOccurred())
+				finalUsage, fillErr := fillDiskIncrementally(primaryPod, 85, 92, 500000)
+				if fillErr != nil {
+					GinkgoWriter.Printf("Disk fill ended with error (may be expected): %v\n", fillErr)
+				}
+				Expect(finalUsage).To(BeNumerically(">=", 75))
+			})
+
+			By("verifying growth is pending and request is unchanged", func() {
+				// Growth should be queued and not applied before the maintenance window opens.
 				Eventually(func(g Gomega) {
 					cluster, err := clusterutils.Get(env.Ctx, env.Client, namespace, clusterName)
 					g.Expect(err).ToNot(HaveOccurred())
-					// The cluster should show next maintenance window
-					if cluster.Status.StorageSizing != nil &&
-						cluster.Status.StorageSizing.Data != nil &&
-						cluster.Status.StorageSizing.Data.State == "PendingGrowth" {
-						g.Expect(cluster.Status.StorageSizing.Data.NextMaintenanceWindow).ToNot(BeNil())
-					}
+					g.Expect(cluster.Status.StorageSizing).ToNot(BeNil())
+					g.Expect(cluster.Status.StorageSizing.Data).ToNot(BeNil())
+					g.Expect(cluster.Status.StorageSizing.Data.State).To(Equal("PendingGrowth"))
+					g.Expect(cluster.Status.StorageSizing.Data.NextMaintenanceWindow).ToNot(BeNil())
+
+					var pvcList corev1.PersistentVolumeClaimList
+					err = env.Client.List(env.Ctx, &pvcList,
+						ctrlclient.InNamespace(namespace),
+						ctrlclient.MatchingLabels{utils.ClusterLabelName: clusterName})
+					g.Expect(err).ToNot(HaveOccurred())
+					g.Expect(pvcList.Items).To(HaveLen(1))
+					size := pvcList.Items[0].Spec.Resources.Requests[corev1.ResourceStorage]
+					g.Expect(size.Cmp(resource.MustParse("5Gi"))).To(BeZero(),
+						"PVC request should remain at initial size while growth is pending")
 				}).WithTimeout(time.Duration(testTimeouts[timeouts.AKSVolumeResize]) * time.Second).
 					WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())
 			})
@@ -870,15 +939,24 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 			})
 
 			By("verifying emergency growth triggers", func() {
-				// The PVC should grow despite maintenance window being closed
+				// The PVC should grow despite maintenance window being closed.
 				Eventually(func(g Gomega) {
 					cluster, err := clusterutils.Get(env.Ctx, env.Client, namespace, clusterName)
 					g.Expect(err).ToNot(HaveOccurred())
-					if cluster.Status.StorageSizing != nil &&
-						cluster.Status.StorageSizing.Data != nil &&
-						cluster.Status.StorageSizing.Data.LastAction != nil {
-						g.Expect(cluster.Status.StorageSizing.Data.LastAction.Kind).To(Equal("EmergencyGrow"))
-					}
+					g.Expect(cluster.Status.StorageSizing).ToNot(BeNil())
+					g.Expect(cluster.Status.StorageSizing.Data).ToNot(BeNil())
+					g.Expect(cluster.Status.StorageSizing.Data.LastAction).ToNot(BeNil())
+					g.Expect(cluster.Status.StorageSizing.Data.LastAction.Kind).To(Equal("EmergencyGrow"))
+
+					var pvcList corev1.PersistentVolumeClaimList
+					err = env.Client.List(env.Ctx, &pvcList,
+						ctrlclient.InNamespace(namespace),
+						ctrlclient.MatchingLabels{utils.ClusterLabelName: clusterName})
+					g.Expect(err).ToNot(HaveOccurred())
+					g.Expect(pvcList.Items).To(HaveLen(1))
+					size := pvcList.Items[0].Spec.Resources.Requests[corev1.ResourceStorage]
+					g.Expect(size.Cmp(resource.MustParse("5Gi"))).To(BeNumerically(">", 0),
+						"PVC request should increase after emergency growth")
 				}).WithTimeout(time.Duration(testTimeouts[timeouts.AKSVolumeResize]) * time.Second).
 					WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())
 			})
@@ -886,7 +964,7 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 	})
 
 	Context("Rate limiting", Label(tests.LabelDynamicStorage), func() {
-		It("respects max actions per day budget", func() {
+		It("initializes max-actions budget counters", func() {
 			var err error
 			namespace, err = env.CreateUniqueTestNamespace(env.Ctx, env.Client, namespacePrefix)
 			Expect(err).ToNot(HaveOccurred())
@@ -919,12 +997,13 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 				Eventually(func(g Gomega) {
 					cluster, err := clusterutils.Get(env.Ctx, env.Client, namespace, clusterName)
 					g.Expect(err).ToNot(HaveOccurred())
-					if cluster.Status.StorageSizing != nil &&
-						cluster.Status.StorageSizing.Data != nil &&
-						cluster.Status.StorageSizing.Data.Budget != nil {
-						g.Expect(cluster.Status.StorageSizing.Data.Budget.AvailableForPlanned).To(BeNumerically(">=", 0))
-						g.Expect(cluster.Status.StorageSizing.Data.Budget.AvailableForEmergency).To(BeNumerically(">=", 0))
-					}
+					g.Expect(cluster.Status.StorageSizing).ToNot(BeNil())
+					g.Expect(cluster.Status.StorageSizing.Data).ToNot(BeNil())
+					g.Expect(cluster.Status.StorageSizing.Data.Budget).ToNot(BeNil())
+					budget := cluster.Status.StorageSizing.Data.Budget
+					g.Expect(budget.AvailableForPlanned).To(BeEquivalentTo(1))
+					g.Expect(budget.AvailableForEmergency).To(BeEquivalentTo(1))
+					g.Expect(budget.BudgetResetsAt.IsZero()).To(BeFalse())
 				}).WithTimeout(time.Duration(testTimeouts[timeouts.AKSVolumeResize]) * time.Second).
 					WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())
 			})
@@ -1205,57 +1284,20 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 					time.Duration(testTimeouts[timeouts.AKSVolumeResize])*time.Second)
 			})
 
+			var promotedPrimary string
 			By("triggering switchover", func() {
-				// Instead of using AssertSwitchover (which has hardcoded 120s timeout),
-				// we manually trigger the switchover and use configurable timeouts.
-				// This is necessary for Azure AKS which may be slower.
-
-				// Get current primary
-				cluster, err := clusterutils.Get(env.Ctx, env.Client, namespace, clusterName)
-				Expect(err).ToNot(HaveOccurred())
-				currentPrimary := cluster.Status.CurrentPrimary
-
-				// Get pod list to find a target
-				podList, err := clusterutils.ListPods(env.Ctx, env.Client, namespace, clusterName)
-				Expect(err).ToNot(HaveOccurred())
-				Expect(len(podList.Items)).To(BeNumerically(">=", 2))
-
-				// Find a replica to promote
-				var targetPrimary string
-				for _, pod := range podList.Items {
-					if pod.Name != currentPrimary {
-						targetPrimary = pod.Name
-						break
-					}
-				}
-				Expect(targetPrimary).ToNot(BeEmpty())
-
-				// Trigger switchover by setting TargetPrimary in status
-				originCluster := cluster.DeepCopy()
-				cluster.Status.TargetPrimary = targetPrimary
-				err = env.Client.Status().Patch(env.Ctx, cluster, ctrlclient.MergeFrom(originCluster))
-				Expect(err).ToNot(HaveOccurred())
-
-				// Wait for switchover to complete with longer timeout
-				// After a storage resize on AKS, pods need additional time to stabilize
-				// before they can successfully complete a switchover. Use the AKS-specific
-				// timeout which accounts for CSI operations.
-				Eventually(func(g Gomega) {
-					cluster, err := clusterutils.Get(env.Ctx, env.Client, namespace, clusterName)
-					g.Expect(err).ToNot(HaveOccurred())
-					g.Expect(cluster.Status.CurrentPrimary).To(Equal(targetPrimary))
-				}).WithTimeout(time.Duration(testTimeouts[timeouts.AKSVolumeResize]) * time.Second).
-					WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())
-
-				// Wait for cluster to be ready (using the configured timeout)
-				AssertClusterIsReady(namespace, clusterName, testTimeouts[timeouts.ClusterIsReady], env)
+				previousPrimary, newPrimary := triggerSwitchoverAndWait(namespace, clusterName)
+				Expect(previousPrimary).To(Equal(originalPrimary))
+				promotedPrimary = newPrimary
 			})
 
 			By("verifying correct primary election", func() {
 				Eventually(func(g Gomega) {
 					cluster, err := clusterutils.Get(env.Ctx, env.Client, namespace, clusterName)
 					g.Expect(err).ToNot(HaveOccurred())
+					g.Expect(cluster.Status.CurrentPrimary).To(Equal(promotedPrimary))
 					g.Expect(cluster.Status.CurrentPrimary).ToNot(Equal(originalPrimary))
+					g.Expect(cluster.Status.TargetPrimary).To(Equal(promotedPrimary))
 				}).WithTimeout(time.Duration(testTimeouts[timeouts.AKSVolumeResize]) * time.Second).
 					WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())
 			})
@@ -1285,7 +1327,7 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 
 	// Test: Growth operation in progress + user spec mutation
 	Context("Spec mutation during growth", Label(tests.LabelDynamicStorage), func() {
-		It("re-evaluates plan deterministically when spec changes", func() {
+		It("accepts storage spec mutations during growth without losing data", func() {
 			var err error
 			namespace, err = env.CreateUniqueTestNamespace(env.Ctx, env.Client, namespacePrefix)
 			Expect(err).ToNot(HaveOccurred())
@@ -1565,9 +1607,38 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 					WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())
 			})
 
-			// Note: Full backup test requires object storage (MinIO/Azure).
-			// This test verifies that the storage sizing controller doesn't deadlock
-			// when backup-related operations are happening concurrently.
+			backupName := clusterName + "-during-growth"
+			By("starting backup while growth is in-flight", func() {
+				backup := &apiv1.Backup{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      backupName,
+						Namespace: namespace,
+					},
+					Spec: apiv1.BackupSpec{
+						Cluster: apiv1.LocalObjectReference{
+							Name: clusterName,
+						},
+					},
+				}
+				err := env.Client.Create(env.Ctx, backup)
+				Expect(err).ToNot(HaveOccurred())
+			})
+
+			By("verifying backup reaches a terminal phase", func() {
+				Eventually(func(g Gomega) {
+					backup := &apiv1.Backup{}
+					err := env.Client.Get(env.Ctx, ctrlclient.ObjectKey{
+						Namespace: namespace,
+						Name:      backupName,
+					}, backup)
+					g.Expect(err).ToNot(HaveOccurred())
+					g.Expect(backup.Status.Phase).To(Or(
+						Equal(apiv1.BackupPhaseCompleted),
+						Equal(apiv1.BackupPhaseFailed),
+					))
+				}).WithTimeout(time.Duration(testTimeouts[timeouts.BackupIsReady]) * time.Second).
+					WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())
+			})
 
 			By("verifying cluster remains healthy and storage sizing continues", func() {
 				AssertClusterIsReady(namespace, clusterName, testTimeouts[timeouts.ClusterIsReady], env)
@@ -1728,7 +1799,7 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 
 	// Test: Daily action-budget or rate-limit boundaries
 	Context("Rate limiting", Label(tests.LabelDynamicStorage), func() {
-		It("respects planned/emergency action budget and exposes exhaustion in status", func() {
+		It("exposes planned/emergency budget split in status", func() {
 			var err error
 			namespace, err = env.CreateUniqueTestNamespace(env.Ctx, env.Client, namespacePrefix)
 			Expect(err).ToNot(HaveOccurred())
@@ -1760,17 +1831,15 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 				Eventually(func(g Gomega) {
 					cluster, err := clusterutils.Get(env.Ctx, env.Client, namespace, clusterName)
 					g.Expect(err).ToNot(HaveOccurred())
-					if cluster.Status.StorageSizing != nil &&
-						cluster.Status.StorageSizing.Data != nil &&
-						cluster.Status.StorageSizing.Data.Budget != nil {
-						budget := cluster.Status.StorageSizing.Data.Budget
-						// With maxActionsPerDay=3 and reservedForEmergency=1:
-						// availableForPlanned should be 2, availableForEmergency should be 1
-						g.Expect(budget.AvailableForPlanned).To(BeNumerically(">=", 0))
-						g.Expect(budget.AvailableForEmergency).To(BeNumerically(">=", 0))
-						// Budget reset time should be set
-						g.Expect(budget.BudgetResetsAt.IsZero()).To(BeFalse())
-					}
+					g.Expect(cluster.Status.StorageSizing).ToNot(BeNil())
+					g.Expect(cluster.Status.StorageSizing.Data).ToNot(BeNil())
+					g.Expect(cluster.Status.StorageSizing.Data.Budget).ToNot(BeNil())
+					budget := cluster.Status.StorageSizing.Data.Budget
+					// With maxActionsPerDay=3 and reservedForEmergency=1:
+					// availableForPlanned should be 2, availableForEmergency should be 1
+					g.Expect(budget.AvailableForPlanned).To(BeEquivalentTo(2))
+					g.Expect(budget.AvailableForEmergency).To(BeEquivalentTo(1))
+					g.Expect(budget.BudgetResetsAt.IsZero()).To(BeFalse())
 				}).WithTimeout(time.Duration(testTimeouts[timeouts.AKSVolumeResize]) * time.Second).
 					WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())
 			})
@@ -1931,9 +2000,21 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 					time.Duration(testTimeouts[timeouts.AKSVolumeResize])*time.Second)
 			})
 
+			var previousPrimary, promotedPrimary string
 			By("verifying promotion/replica replacement ordering is safe", func() {
-				// Trigger a switchover to verify ordering
-				AssertSwitchover(namespace, clusterName, env)
+				previousPrimary, promotedPrimary = triggerSwitchoverAndWait(namespace, clusterName)
+				Expect(previousPrimary).ToNot(Equal(promotedPrimary))
+			})
+
+			By("verifying role transition completed cleanly", func() {
+				Eventually(func(g Gomega) {
+					cluster, err := clusterutils.Get(env.Ctx, env.Client, namespace, clusterName)
+					g.Expect(err).ToNot(HaveOccurred())
+					g.Expect(cluster.Status.CurrentPrimary).To(Equal(promotedPrimary))
+					g.Expect(cluster.Status.CurrentPrimary).ToNot(Equal(previousPrimary))
+					g.Expect(cluster.Status.TargetPrimary).To(Equal(promotedPrimary))
+				}).WithTimeout(time.Duration(testTimeouts[timeouts.AKSVolumeResize]) * time.Second).
+					WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())
 			})
 
 			By("verifying data integrity after switchover", func() {

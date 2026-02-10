@@ -25,6 +25,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -89,11 +90,21 @@ var _ = Describe("Dynamic storage management extended scenarios",
 						},
 					},
 				}
+				tableLocator := TableLocator{
+					Namespace:    namespace,
+					ClusterName:  clusterName,
+					DatabaseName: "app",
+					TableName:    "sentinel",
+				}
 
 				By("creating cluster", func() {
 					err := env.Client.Create(env.Ctx, cluster)
 					Expect(err).ToNot(HaveOccurred())
 					AssertClusterIsReady(namespace, clusterName, testTimeouts[timeouts.ClusterIsReady], env)
+				})
+
+				By("inserting sentinel data", func() {
+					AssertCreateTestData(env, tableLocator)
 				})
 
 				By("triggering growth condition", func() {
@@ -113,11 +124,12 @@ var _ = Describe("Dynamic storage management extended scenarios",
 						WithPolling(time.Duration(testTimeouts[timeouts.StorageSizingPolling]) * time.Second).Should(Succeed())
 				})
 
+				backupName := clusterName + "-concurrent-backup"
 				By("starting concurrent operations", func() {
 					// 1. Create backup
 					backup := &apiv1.Backup{
 						ObjectMeta: metav1.ObjectMeta{
-							Name:      clusterName + "-concurrent-backup",
+							Name:      backupName,
 							Namespace: namespace,
 						},
 						Spec: apiv1.BackupSpec{
@@ -126,11 +138,16 @@ var _ = Describe("Dynamic storage management extended scenarios",
 							},
 						},
 					}
-					_ = env.Client.Create(env.Ctx, backup)
+					err := env.Client.Create(env.Ctx, backup)
+					Expect(err).ToNot(HaveOccurred())
 
 					// 2. Drain node
-					_ = nodes.DrainPrimary(env.Ctx, env.Client, namespace, clusterName, testTimeouts[timeouts.DrainNode])
-					_ = nodes.UncordonAll(env.Ctx, env.Client)
+					podsOnPrimaryNode := nodes.DrainPrimary(
+						env.Ctx, env.Client, namespace, clusterName, testTimeouts[timeouts.DrainNode],
+					)
+					Expect(podsOnPrimaryNode).ToNot(BeEmpty())
+					err = nodes.UncordonAll(env.Ctx, env.Client)
+					Expect(err).ToNot(HaveOccurred())
 
 					// 3. Open maintenance window
 					updateCluster(namespace, clusterName, func(cluster *apiv1.Cluster) {
@@ -138,9 +155,26 @@ var _ = Describe("Dynamic storage management extended scenarios",
 					})
 				})
 
+				By("verifying backup reaches a terminal phase", func() {
+					Eventually(func(g Gomega) {
+						backup := &apiv1.Backup{}
+						getErr := env.Client.Get(env.Ctx, ctrlclient.ObjectKey{
+							Namespace: namespace,
+							Name:      backupName,
+						}, backup)
+						g.Expect(getErr).ToNot(HaveOccurred())
+						g.Expect(backup.Status.Phase).To(Or(
+							Equal(apiv1.BackupPhaseCompleted),
+							Equal(apiv1.BackupPhaseFailed),
+						))
+					}).WithTimeout(time.Duration(testTimeouts[timeouts.BackupIsReady]) * time.Second).
+						WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())
+				})
+
 				By("verifying eventual convergence", func() {
 					verifyGrowthCompletion(namespace, clusterName)
-					assertDataConsistency(namespace, clusterName)
+					AssertClusterIsReady(namespace, clusterName, testTimeouts[timeouts.ClusterIsReady], env)
+					AssertDataExpectedCount(env, tableLocator, 2)
 				})
 			})
 
@@ -163,11 +197,30 @@ var _ = Describe("Dynamic storage management extended scenarios",
 						},
 					},
 				}
+				tableLocator := TableLocator{
+					Namespace:    namespace,
+					ClusterName:  clusterName,
+					DatabaseName: "app",
+					TableName:    "sentinel",
+				}
+				initialPodUIDs := make(map[string]types.UID)
 
 				By("creating cluster", func() {
 					err := env.Client.Create(env.Ctx, cluster)
 					Expect(err).ToNot(HaveOccurred())
 					AssertClusterIsReady(namespace, clusterName, testTimeouts[timeouts.ClusterIsReady], env)
+				})
+
+				By("inserting sentinel data", func() {
+					AssertCreateTestData(env, tableLocator)
+				})
+
+				By("recording initial pod identities", func() {
+					podList, err := clusterutils.ListPods(env.Ctx, env.Client, namespace, clusterName)
+					Expect(err).ToNot(HaveOccurred())
+					for _, pod := range podList.Items {
+						initialPodUIDs[pod.Name] = pod.UID
+					}
 				})
 
 				By("triggering growth condition", func() {
@@ -195,11 +248,25 @@ var _ = Describe("Dynamic storage management extended scenarios",
 				By("verifying both operations complete", func() {
 					verifyGrowthCompletion(namespace, clusterName)
 					AssertClusterIsReady(namespace, clusterName, testTimeouts[timeouts.ClusterIsReady], env)
-					assertDataConsistency(namespace, clusterName)
+					AssertDataExpectedCount(env, tableLocator, 2)
+				})
+
+				By("verifying rolling upgrade replaced at least one pod", func() {
+					podList, err := clusterutils.ListPods(env.Ctx, env.Client, namespace, clusterName)
+					Expect(err).ToNot(HaveOccurred())
+
+					replacedPods := 0
+					for _, pod := range podList.Items {
+						if oldUID, ok := initialPodUIDs[pod.Name]; ok && oldUID != pod.UID {
+							replacedPods++
+						}
+					}
+					Expect(replacedPods).To(BeNumerically(">=", 1),
+						"expected at least one pod replacement from rolling upgrade")
 				})
 			})
 
-			It("verify that volume snapshot creation and restore around dynamically resized volumes work correctly", func() {
+			It("verify that volume snapshot creation around dynamically resized volumes works correctly", func() {
 				if !utils.HaveVolumeSnapshot() {
 					Skip("This test requires VolumeSnapshot support")
 				}
@@ -246,18 +313,20 @@ var _ = Describe("Dynamic storage management extended scenarios",
 					Expect(err).ToNot(HaveOccurred())
 
 					Eventually(func(g Gomega) {
-						backupList, err := backups.List(env.Ctx, env.Client, namespace)
-						g.Expect(err).ToNot(HaveOccurred())
-						for _, backup := range backupList.Items {
-							if backup.Name == backupName {
-								g.Expect(backup.Status.Phase).To(BeEquivalentTo(apiv1.BackupPhaseCompleted))
-							}
-						}
-					}, testTimeouts[timeouts.VolumeSnapshotIsReady]).Should(Succeed())
+						backup := &apiv1.Backup{}
+						getErr := env.Client.Get(env.Ctx, ctrlclient.ObjectKey{
+							Namespace: namespace,
+							Name:      backupName,
+						}, backup)
+						g.Expect(getErr).ToNot(HaveOccurred())
+						g.Expect(backup.Status.Phase).To(BeEquivalentTo(apiv1.BackupPhaseCompleted))
+					}, testTimeouts[timeouts.VolumeSnapshotIsReady]).WithPolling(
+						time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second,
+					).Should(Succeed())
 				})
 			})
 
-			It("verify that repeated oscillation around threshold band does not cause flapping", func() {
+			It("verify that post-growth steady state does not cause resize flapping", func() {
 				clusterName := "ds-014"
 				cluster := &apiv1.Cluster{
 					ObjectMeta: metav1.ObjectMeta{
@@ -280,21 +349,36 @@ var _ = Describe("Dynamic storage management extended scenarios",
 					AssertClusterIsReady(namespace, clusterName, testTimeouts[timeouts.ClusterIsReady], env)
 				})
 
-				By("triggering growth and verifying no flapping", func() {
+				By("triggering growth", func() {
 					primaryPod, err := clusterutils.GetPrimary(env.Ctx, env.Client, namespace, clusterName)
 					Expect(err).ToNot(HaveOccurred())
 					_, err = fillDiskIncrementally(primaryPod, 85, 90, 500000)
 					Expect(err).ToNot(HaveOccurred())
 					verifyGrowthCompletion(namespace, clusterName)
+				})
 
+				var stableSize resource.Quantity
+				By("recording stabilized PVC size after growth", func() {
+					var pvcList corev1.PersistentVolumeClaimList
+					err := env.Client.List(env.Ctx, &pvcList,
+						ctrlclient.InNamespace(namespace),
+						ctrlclient.MatchingLabels{utils.ClusterLabelName: clusterName})
+					Expect(err).ToNot(HaveOccurred())
+					Expect(pvcList.Items).To(HaveLen(1))
+					stableSize = pvcList.Items[0].Spec.Resources.Requests[corev1.ResourceStorage]
+				})
+
+				By("verifying no resize flapping after convergence", func() {
 					Consistently(func(g Gomega) {
 						var pvcList corev1.PersistentVolumeClaimList
 						err := env.Client.List(env.Ctx, &pvcList,
 							ctrlclient.InNamespace(namespace),
 							ctrlclient.MatchingLabels{utils.ClusterLabelName: clusterName})
 						g.Expect(err).ToNot(HaveOccurred())
-						g.Expect(pvcList.Items[0].Spec.Resources.Requests[corev1.ResourceStorage]).To(Equal(resource.MustParse("10Gi")))
-					}).WithTimeout(time.Minute * 2).Should(Succeed())
+						g.Expect(pvcList.Items).To(HaveLen(1))
+						currentSize := pvcList.Items[0].Spec.Resources.Requests[corev1.ResourceStorage]
+						g.Expect(currentSize.Cmp(stableSize)).To(BeZero())
+					}).WithTimeout(time.Minute * 2).WithPolling(10 * time.Second).Should(Succeed())
 				})
 			})
 		})
