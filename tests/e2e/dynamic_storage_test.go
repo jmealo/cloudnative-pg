@@ -375,61 +375,6 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 		}
 	})
 
-	Context("Tablespace dynamic sizing", Label(tests.LabelDynamicStorage), func() {
-		It("grows tablespace storage when usage exceeds target buffer", func() {
-			var err error
-			namespace, err = env.CreateUniqueTestNamespace(env.Ctx, env.Client, namespacePrefix)
-			Expect(err).ToNot(HaveOccurred())
-
-			clusterName := "dynamic-tbs-grow"
-			tbsName := "tbsdynamic"
-			clusterFile := fixturesDir + "/dynamic_storage/cluster-tablespaces-dynamic.yaml.template"
-
-			By("creating cluster with tablespaces", func() {
-				AssertCreateCluster(namespace, clusterName, clusterFile, env)
-			})
-
-			var primaryPod *corev1.Pod
-			By("finding primary pod", func() {
-				primaryPod, err = clusterutils.GetPrimary(env.Ctx, env.Client, namespace, clusterName)
-				Expect(err).ToNot(HaveOccurred())
-			})
-
-			By("filling tablespace disk to trigger growth", func() {
-				finalUsage, err := fillTablespaceDiskIncrementally(primaryPod, tbsName, 85, 92, 500000)
-				if err != nil {
-					GinkgoWriter.Printf("Tablespace disk fill ended with error: %v\n", err)
-				}
-				Expect(finalUsage).To(BeNumerically(">=", 75))
-			})
-
-			By("verifying tablespace storage sizing status is updated", func() {
-				Eventually(func(g Gomega) {
-					cluster, err := clusterutils.Get(env.Ctx, env.Client, namespace, clusterName)
-					g.Expect(err).ToNot(HaveOccurred())
-					g.Expect(cluster.Status.StorageSizing).ToNot(BeNil())
-					g.Expect(cluster.Status.StorageSizing.Tablespaces).ToNot(BeNil())
-					g.Expect(cluster.Status.StorageSizing.Tablespaces[tbsName]).ToNot(BeNil())
-
-					var pvcList corev1.PersistentVolumeClaimList
-					err = env.Client.List(env.Ctx, &pvcList,
-						ctrlclient.InNamespace(namespace),
-						ctrlclient.MatchingLabels{
-							utils.ClusterLabelName:        clusterName,
-							utils.PvcRoleLabelName:        string(utils.PVCRolePgTablespace),
-							utils.TablespaceNameLabelName: tbsName,
-						})
-					g.Expect(err).ToNot(HaveOccurred())
-					g.Expect(pvcList.Items).To(HaveLen(1))
-					size := pvcList.Items[0].Spec.Resources.Requests[corev1.ResourceStorage]
-					g.Expect(size.Cmp(resource.MustParse("1Gi"))).To(BeNumerically(">", 0),
-						"Tablespace PVC request should grow beyond initial 1Gi")
-				}).WithTimeout(time.Duration(testTimeouts[timeouts.AKSVolumeResize]) * time.Second).
-					WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())
-			})
-		})
-	})
-
 	Context("Dynamic sizing validation", func() {
 		It("rejects invalid configurations", func() {
 			var err error
@@ -715,6 +660,61 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 						sizes[size.String()] = true
 					}
 					g.Expect(sizes).To(HaveLen(1))
+				}).WithTimeout(time.Duration(testTimeouts[timeouts.AKSVolumeResize]) * time.Second).
+					WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())
+			})
+		})
+	})
+
+	Context("Tablespace dynamic sizing", Label(tests.LabelDynamicStorage), func() {
+		It("grows tablespace storage when usage exceeds target buffer", func() {
+			var err error
+			namespace, err = env.CreateUniqueTestNamespace(env.Ctx, env.Client, namespacePrefix)
+			Expect(err).ToNot(HaveOccurred())
+
+			clusterName := "dynamic-tbs-grow"
+			tbsName := "tbsdynamic"
+			clusterFile := fixturesDir + "/dynamic_storage/cluster-tablespaces-dynamic.yaml.template"
+
+			By("creating cluster with tablespaces", func() {
+				AssertCreateCluster(namespace, clusterName, clusterFile, env)
+			})
+
+			var primaryPod *corev1.Pod
+			By("finding primary pod", func() {
+				primaryPod, err = clusterutils.GetPrimary(env.Ctx, env.Client, namespace, clusterName)
+				Expect(err).ToNot(HaveOccurred())
+			})
+
+			By("filling tablespace disk to trigger growth", func() {
+				finalUsage, err := fillTablespaceDiskIncrementally(primaryPod, tbsName, 85, 92, 500000)
+				if err != nil {
+					GinkgoWriter.Printf("Tablespace disk fill ended with error: %v\n", err)
+				}
+				Expect(finalUsage).To(BeNumerically(">=", 75))
+			})
+
+			By("verifying tablespace storage sizing status is updated", func() {
+				Eventually(func(g Gomega) {
+					cluster, err := clusterutils.Get(env.Ctx, env.Client, namespace, clusterName)
+					g.Expect(err).ToNot(HaveOccurred())
+					g.Expect(cluster.Status.StorageSizing).ToNot(BeNil())
+					g.Expect(cluster.Status.StorageSizing.Tablespaces).ToNot(BeNil())
+					g.Expect(cluster.Status.StorageSizing.Tablespaces[tbsName]).ToNot(BeNil())
+
+					var pvcList corev1.PersistentVolumeClaimList
+					err = env.Client.List(env.Ctx, &pvcList,
+						ctrlclient.InNamespace(namespace),
+						ctrlclient.MatchingLabels{
+							utils.ClusterLabelName:        clusterName,
+							utils.PvcRoleLabelName:        string(utils.PVCRolePgTablespace),
+							utils.TablespaceNameLabelName: tbsName,
+						})
+					g.Expect(err).ToNot(HaveOccurred())
+					g.Expect(pvcList.Items).To(HaveLen(1))
+					size := pvcList.Items[0].Spec.Resources.Requests[corev1.ResourceStorage]
+					g.Expect(size.Cmp(resource.MustParse("1Gi"))).To(BeNumerically(">", 0),
+						"Tablespace PVC request should grow beyond initial 1Gi")
 				}).WithTimeout(time.Duration(testTimeouts[timeouts.AKSVolumeResize]) * time.Second).
 					WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())
 			})
