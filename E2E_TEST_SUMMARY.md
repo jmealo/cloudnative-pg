@@ -2,7 +2,7 @@
 
 ## Test Execution
 - **Date**: 2026-02-09
-- **Branch**: feat/dynamic-storage-spec
+- **Branch**: feat/dynamic-storage-complete
 - **Commit**: 605d94e0d (with additional E2E script fixes)
 - **AKS Cluster**: Azure AKS with Premium SSD (supports online volume expansion)
 - **Duration**: 1h 55m
