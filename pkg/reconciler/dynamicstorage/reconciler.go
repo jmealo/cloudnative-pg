@@ -506,36 +506,28 @@ func executeAction(
 	pvcs []corev1.PersistentVolumeClaim,
 	result *ReconcileResult,
 ) error {
+	if err := patchPVCsForVolume(ctx, c, pvcs, result); err != nil {
+		return err
+	}
+	return updateStatusAfterAction(cluster, result)
+}
+
+func patchPVCsForVolume(
+	ctx context.Context,
+	c client.Client,
+	pvcs []corev1.PersistentVolumeClaim,
+	result *ReconcileResult,
+) error {
 	contextLogger := log.FromContext(ctx)
 
-	// Find relevant PVCs and patch them
 	for i := range pvcs {
 		pvc := &pvcs[i]
-
-		// Check if this PVC belongs to the volume type we're reconciling
-		role := pvc.Labels[utils.PvcRoleLabelName]
-		switch result.VolumeType {
-		case VolumeTypeData:
-			if role != string(utils.PVCRolePgData) {
-				continue
-			}
-		case VolumeTypeWAL:
-			if role != string(utils.PVCRolePgWal) {
-				continue
-			}
-		case VolumeTypeTablespace:
-			if role != string(utils.PVCRolePgTablespace) {
-				continue
-			}
-			tbsName := pvc.Labels[utils.TablespaceNameLabelName]
-			if tbsName != result.TablespaceName {
-				continue
-			}
+		if !isPVCForVolume(pvc, result) {
+			continue
 		}
 
 		currentSize := pvc.Spec.Resources.Requests[corev1.ResourceStorage]
 		if currentSize.Cmp(result.TargetSize) >= 0 {
-			// Already at or above target
 			continue
 		}
 
@@ -551,8 +543,26 @@ func executeAction(
 			return fmt.Errorf("error patching PVC %s: %w", pvc.Name, err)
 		}
 	}
+	return nil
+}
 
-	// Record the action in status
+func isPVCForVolume(pvc *corev1.PersistentVolumeClaim, result *ReconcileResult) bool {
+	role := pvc.Labels[utils.PvcRoleLabelName]
+	switch result.VolumeType {
+	case VolumeTypeData:
+		return role == string(utils.PVCRolePgData)
+	case VolumeTypeWAL:
+		return role == string(utils.PVCRolePgWal)
+	case VolumeTypeTablespace:
+		if role != string(utils.PVCRolePgTablespace) {
+			return false
+		}
+		return pvc.Labels[utils.TablespaceNameLabelName] == result.TablespaceName
+	}
+	return false
+}
+
+func updateStatusAfterAction(cluster *apiv1.Cluster, result *ReconcileResult) error {
 	var status *apiv1.VolumeSizingStatus
 	var cfg *apiv1.StorageConfiguration
 
@@ -590,7 +600,6 @@ func executeAction(
 		status.EffectiveSize = result.TargetSize.String()
 		status.Budget = IncrementBudgetUsage(cfg, status)
 	}
-
 	return nil
 }
 
