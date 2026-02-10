@@ -21,6 +21,7 @@ package metricserver
 
 import (
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/cloudnative-pg/machinery/pkg/log"
@@ -32,6 +33,7 @@ import (
 	"github.com/cloudnative-pg/cloudnative-pg/pkg/management/postgres"
 	"github.com/cloudnative-pg/cloudnative-pg/pkg/management/postgres/webserver/client/local"
 	postgresstatus "github.com/cloudnative-pg/cloudnative-pg/pkg/postgres"
+	"github.com/cloudnative-pg/cloudnative-pg/pkg/reconciler/dynamicstorage"
 )
 
 type diskCollector struct {
@@ -45,14 +47,14 @@ type diskCollector struct {
 	percentUsed    *prometheus.GaugeVec
 
 	// Dynamic storage metrics
-	targetSizeBytes          *prometheus.GaugeVec
-	actualSizeBytes          *prometheus.GaugeVec
-	effectiveSizeBytes        *prometheus.GaugeVec
-	state                    *prometheus.GaugeVec
-	budgetTotal              *prometheus.GaugeVec
-	budgetUsed               *prometheus.GaugeVec
-	budgetEmergencyReserved  *prometheus.GaugeVec
-	nextWindowSeconds        *prometheus.GaugeVec
+	targetSizeBytes         *prometheus.GaugeVec
+	actualSizeBytes         *prometheus.GaugeVec
+	effectiveSizeBytes      *prometheus.GaugeVec
+	state                   *prometheus.GaugeVec
+	budgetTotal             *prometheus.GaugeVec
+	budgetUsed              *prometheus.GaugeVec
+	budgetEmergencyReserved *prometheus.GaugeVec
+	nextWindowSeconds       *prometheus.GaugeVec
 }
 
 func newDiskCollector(instance *postgres.Instance) *diskCollector {
@@ -264,13 +266,20 @@ func (d *diskCollector) recordVolumeSizing(
 	}
 
 	// State (1 for current state, 0 for others)
-	states := []string{"Balanced", "NeedsGrow", "Emergency", "PendingGrowth", "Resizing"}
+	states := []dynamicstorage.VolumeState{
+		dynamicstorage.VolumeStateBalanced,
+		dynamicstorage.VolumeStateNeedsGrow,
+		dynamicstorage.VolumeStateEmergency,
+		dynamicstorage.VolumeStatePendingGrowth,
+		dynamicstorage.VolumeStateResizing,
+		dynamicstorage.VolumeStateAtLimit,
+	}
 	for _, state := range states {
 		val := 0.0
-		if s.State == state {
+		if s.State == string(state) {
 			val = 1.0
 		}
-		d.state.WithLabelValues(volumeType, tablespace, state).Set(val)
+		d.state.WithLabelValues(volumeType, tablespace, string(state)).Set(val)
 	}
 
 	// Budget
@@ -301,7 +310,7 @@ func (d *diskCollector) recordVolumeSizing(
 func (d *diskCollector) parseQuantity(q string) (float64, error) {
 	qty, err := resource.ParseQuantity(q)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("parsing volume quantity: %w", err)
 	}
 	return float64(qty.Value()), nil
 }
