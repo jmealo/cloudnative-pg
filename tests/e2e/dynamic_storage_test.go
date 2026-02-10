@@ -352,29 +352,10 @@ func waitForPVCCapacityUpdate(namespace, clusterName string, timeout time.Durati
 			GinkgoWriter.Printf("PVC %s: request=%s, capacity=%s (OK)\n",
 				pvc.Name, request.String(), capacity.String())
 		}
-	}).WithTimeout(timeout).WithPolling(time.Duration(testTimeouts[timeouts.StorageSizingPolling]) * time.Second).Should(Succeed())
+	}).WithTimeout(timeout).
+		WithPolling(time.Duration(testTimeouts[timeouts.StorageSizingPolling]) * time.Second).Should(Succeed())
 
 	GinkgoWriter.Printf("All PVCs have updated capacity\n")
-}
-
-// waitForStorageSizingAndPVCUpdate waits for both the operator to detect the growth need
-// AND for the CSI driver to complete the resize. This is the proper sequence for Azure AKS.
-func waitForStorageSizingAndPVCUpdate(namespace, clusterName string) {
-	By("waiting for storage sizing status to be populated", func() {
-		Eventually(func(g Gomega) {
-			cluster, err := clusterutils.Get(env.Ctx, env.Client, namespace, clusterName)
-			g.Expect(err).ToNot(HaveOccurred())
-			g.Expect(cluster.Status.StorageSizing).ToNot(BeNil(),
-				"Expected StorageSizing status to be populated")
-		}).WithTimeout(time.Duration(testTimeouts[timeouts.StorageSizingDetection]) * time.Second).
-			WithPolling(time.Duration(testTimeouts[timeouts.StorageSizingPolling]) * time.Second).Should(Succeed())
-	})
-
-	By("waiting for PVC capacity to update (CSI resize completion)", func() {
-		// Use the AKS volume resize timeout (15 min) for Azure CSI operations
-		waitForPVCCapacityUpdate(namespace, clusterName,
-			time.Duration(testTimeouts[timeouts.AKSVolumeResize])*time.Second)
-	})
 }
 
 var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamicStorage), func() {
