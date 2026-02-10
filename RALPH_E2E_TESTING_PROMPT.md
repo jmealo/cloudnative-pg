@@ -6,7 +6,7 @@ Run E2E tests for the dynamic storage feature on Azure AKS and iterate until all
 
 ## Context
 
-- **Branch**: `feat/dynamic-storage-spec`
+- **Branch**: `feat/dynamic-storage-complete`
 - **Feature**: Convergent Dynamic Storage Management
 - **Test Suite**: `tests/e2e/dynamic_storage_test.go` (19 test cases)
 - **Infrastructure**: Azure AKS with Premium SSD (supports online volume expansion)
