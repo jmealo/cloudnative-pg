@@ -709,7 +709,7 @@ func GetReadyWALFiles() (fileNames []string, err error) {
 
 // fillDiskStatus fills the disk status information for data, WAL, and tablespace volumes.
 // This is used by the dynamic storage sizing feature to monitor disk usage.
-func (instance *Instance) fillDiskStatus(result *postgres.PostgresqlStatus) error {
+func (instance *Instance) fillDiskStatus(result *postgres.PostgresqlStatus) {
 	// Probe data volume disk status with retries for transient filesystem issues
 	var dataStatus *disk.Status
 	var err error
@@ -755,8 +755,6 @@ func (instance *Instance) fillDiskStatus(result *postgres.PostgresqlStatus) erro
 
 	// Probe tablespace volumes if they exist
 	result.TablespaceDiskStatus = probeTablespaceDiskStatus()
-
-	return nil
 }
 
 // probeTablespaceDiskStatus probes disk status for all tablespace volumes.

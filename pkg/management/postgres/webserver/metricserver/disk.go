@@ -200,7 +200,11 @@ func (d *diskCollector) collectDiskUsage(ch chan<- prometheus.Metric) {
 	}
 }
 
-func (d *diskCollector) recordDiskStatus(ch chan<- prometheus.Metric, volumeType, instance string, s *postgresstatus.DiskStatus) {
+func (d *diskCollector) recordDiskStatus(
+	ch chan<- prometheus.Metric,
+	volumeType, instance string,
+	s *postgresstatus.DiskStatus,
+) {
 	d.totalBytes.WithLabelValues(volumeType, instance).Set(float64(s.TotalBytes))
 	d.usedBytes.WithLabelValues(volumeType, instance).Set(float64(s.UsedBytes))
 	d.availableBytes.WithLabelValues(volumeType, instance).Set(float64(s.AvailableBytes))
