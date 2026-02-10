@@ -1065,8 +1065,8 @@ type VolumeSizingStatus struct {
 	// +optional
 	ActualSizes map[string]string `json:"actualSizes,omitempty"`
 
-	// State is the current status of the logical volume: Balanced, NeedsGrow, Emergency, PendingGrowth, Resizing.
-	// +kubebuilder:validation:Enum=Balanced;NeedsGrow;Emergency;PendingGrowth;Resizing
+	// State is the current status of the logical volume: Balanced, NeedsGrow, Emergency, PendingGrowth, Resizing, AtLimit, WaitingForDiskStatus.
+	// +kubebuilder:validation:Enum=Balanced;NeedsGrow;Emergency;PendingGrowth;Resizing;AtLimit;WaitingForDiskStatus
 	// +optional
 	State string `json:"state,omitempty"`
 

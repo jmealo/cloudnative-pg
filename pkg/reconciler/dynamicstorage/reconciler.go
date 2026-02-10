@@ -53,6 +53,29 @@ const (
 	ActionPendingGrowth ActionType = "PendingGrowth"
 )
 
+// VolumeState represents the state of a volume in StorageSizing status.
+type VolumeState string
+
+const (
+	// VolumeStateBalanced indicates the volume is within target buffer.
+	VolumeStateBalanced VolumeState = "Balanced"
+
+	// VolumeStateNeedsGrow indicates the volume is below target buffer but not emergency.
+	VolumeStateNeedsGrow VolumeState = "NeedsGrow"
+
+	// VolumeStateEmergency indicates the volume is in emergency growth condition.
+	VolumeStateEmergency VolumeState = "Emergency"
+
+	// VolumeStatePendingGrowth indicates growth is queued waiting for window.
+	VolumeStatePendingGrowth VolumeState = "PendingGrowth"
+
+	// VolumeStateResizing indicates the volume is currently being resized by the provider.
+	VolumeStateResizing VolumeState = "Resizing"
+
+	// VolumeStateAtLimit indicates the volume has reached its configured limit.
+	VolumeStateAtLimit VolumeState = "AtLimit"
+)
+
 // VolumeType represents the type of volume being managed.
 type VolumeType string
 
@@ -114,9 +137,26 @@ func Reconcile(
 
 	// Collect disk status from instance statuses
 	diskStatusMap := collectDiskStatusForVolume(instanceStatuses, VolumeTypeData, "")
+	contextLogger.Debug("Collected disk status map", "count", len(diskStatusMap))
+	for podName, info := range diskStatusMap {
+		contextLogger.Info("Instance disk status received",
+			"pod", podName,
+			"usedBytes", info.UsedBytes,
+			"totalBytes", info.TotalBytes,
+			"percentUsed", info.PercentUsed)
+	}
+
+	// Initialize storage sizing status if needed (do this early so status is always set)
+	if cluster.Status.StorageSizing == nil {
+		cluster.Status.StorageSizing = &apiv1.StorageSizingStatus{}
+	}
+	if cluster.Status.StorageSizing.Data == nil {
+		cluster.Status.StorageSizing.Data = &apiv1.VolumeSizingStatus{}
+	}
+
 	if len(diskStatusMap) == 0 {
 		// If we have instance statuses but no disk status yet, they might still be initializing.
-		// Requeue after a short delay to retry collecting disk status.
+		// Set status to indicate we're waiting, then return normally to allow status persistence.
 		if instanceStatuses != nil && len(instanceStatuses.Items) > 0 {
 			// Log which instances don't have disk status
 			for _, status := range instanceStatuses.Items {
@@ -125,15 +165,24 @@ func Reconcile(
 					podName = status.Pod.Name
 				}
 				hasDiskStatus := status.DiskStatus != nil
-				contextLogger.Debug("Instance status detail",
+				hasError := status.Error != nil || status.ErrorMessage != ""
+				contextLogger.Info("Instance disk status detail",
 					"pod", podName,
 					"hasDiskStatus", hasDiskStatus,
-					"error", status.Error)
+					"hasError", hasError,
+					"errorMessage", status.ErrorMessage)
 			}
-			contextLogger.Info("No disk status available yet, will retry",
-				"instanceCount", len(instanceStatuses.Items),
-				"requeueAfter", "30s")
-			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+
+			// Set status to indicate we're waiting for disk status
+			// This allows users to see what's happening instead of silent failures
+			cluster.Status.StorageSizing.Data.State = "WaitingForDiskStatus"
+
+			contextLogger.Info("No disk status available yet, status updated to reflect waiting state",
+				"instanceCount", len(instanceStatuses.Items))
+
+			// Return normally (not requeue) to allow status to be persisted.
+			// Normal reconciliation will retry when instance status updates.
+			return ctrl.Result{}, nil
 		}
 		// No instances at all, nothing to do
 		contextLogger.Debug("No instances available for disk status collection")
@@ -143,15 +192,7 @@ func Reconcile(
 	// Evaluate sizing for data volume
 	result := evaluateSizing(cluster, &cluster.Spec.StorageConfiguration, VolumeTypeData, "", diskStatusMap)
 
-	// Initialize storage sizing status if needed
-	if cluster.Status.StorageSizing == nil {
-		cluster.Status.StorageSizing = &apiv1.StorageSizingStatus{}
-	}
-	if cluster.Status.StorageSizing.Data == nil {
-		cluster.Status.StorageSizing.Data = &apiv1.VolumeSizingStatus{}
-	}
-
-	// Update status based on result
+	// Update status based on result (status structures already initialized above)
 	updateVolumeStatus(cluster.Status.StorageSizing.Data, &cluster.Spec.StorageConfiguration, result)
 
 	// Execute action if needed
@@ -276,17 +317,7 @@ func evaluateSizing(
 	tbsName string,
 	diskStatusMap map[string]*DiskInfo,
 ) *ReconcileResult {
-	// Get the maximum usage across all instances
-	var maxUsed, maxTotal, minAvailable uint64
-	var highestUsageInstance string
-	for instanceName, info := range diskStatusMap {
-		if info.UsedBytes > maxUsed {
-			maxUsed = info.UsedBytes
-			maxTotal = info.TotalBytes
-			minAvailable = info.AvailableBytes
-			highestUsageInstance = instanceName
-		}
-	}
+	maxUsed, maxTotal, minAvailable, highestUsageInstance := findMaxUsage(diskStatusMap)
 
 	if maxTotal == 0 {
 		return &ReconcileResult{Action: ActionNoOp, VolumeType: volumeType}
@@ -318,23 +349,10 @@ func evaluateSizing(
 		}
 	}
 
+	volumeStatus := getVolumeSizingStatus(cluster, volumeType, tbsName)
+
 	// Check for emergency condition
 	if IsEmergencyCondition(cfg, maxTotal, maxUsed, minAvailable) {
-		// Get volume sizing status for budget check
-		var volumeStatus *apiv1.VolumeSizingStatus
-		if cluster.Status.StorageSizing != nil {
-			switch volumeType {
-			case VolumeTypeData:
-				volumeStatus = cluster.Status.StorageSizing.Data
-			case VolumeTypeWAL:
-				volumeStatus = cluster.Status.StorageSizing.WAL
-			case VolumeTypeTablespace:
-				if cluster.Status.StorageSizing.Tablespaces != nil {
-					volumeStatus = cluster.Status.StorageSizing.Tablespaces[tbsName]
-				}
-			}
-		}
-
 		if HasBudgetForEmergency(cfg, volumeStatus) {
 			targetSize := CalculateEmergencyGrowthSize(currentSize, limit)
 			return &ReconcileResult{
@@ -354,63 +372,91 @@ func evaluateSizing(
 		}
 	}
 
+	return evaluateGrowth(cfg, volumeStatus, volumeType, currentSize, request, limit, maxTotal, maxUsed, highestUsageInstance)
+}
+
+func findMaxUsage(diskStatusMap map[string]*DiskInfo) (uint64, uint64, uint64, string) {
+	var maxUsed, maxTotal, minAvailable uint64
+	var highestUsageInstance string
+	for instanceName, info := range diskStatusMap {
+		if info.UsedBytes > maxUsed {
+			maxUsed = info.UsedBytes
+			maxTotal = info.TotalBytes
+			minAvailable = info.AvailableBytes
+			highestUsageInstance = instanceName
+		}
+	}
+	return maxUsed, maxTotal, minAvailable, highestUsageInstance
+}
+
+func getVolumeSizingStatus(cluster *apiv1.Cluster, volumeType VolumeType, tbsName string) *apiv1.VolumeSizingStatus {
+	if cluster.Status.StorageSizing == nil {
+		return nil
+	}
+	switch volumeType {
+	case VolumeTypeData:
+		return cluster.Status.StorageSizing.Data
+	case VolumeTypeWAL:
+		return cluster.Status.StorageSizing.WAL
+	case VolumeTypeTablespace:
+		if cluster.Status.StorageSizing.Tablespaces != nil {
+			return cluster.Status.StorageSizing.Tablespaces[tbsName]
+		}
+	}
+	return nil
+}
+
+func evaluateGrowth(
+	cfg *apiv1.StorageConfiguration,
+	volumeStatus *apiv1.VolumeSizingStatus,
+	volumeType VolumeType,
+	currentSize, request, limit resource.Quantity,
+	maxTotal, maxUsed uint64,
+	highestUsageInstance string,
+) *ReconcileResult {
 	// Check if growth is needed
-	if NeedsGrowth(cfg, maxTotal, maxUsed) {
-		targetSize := CalculateTargetSize(maxUsed, GetTargetBuffer(cfg))
-		targetSize = ClampSize(targetSize, request, limit)
-
-		// Only grow if target is larger than current
-		if targetSize.Cmp(currentSize) <= 0 {
-			return &ReconcileResult{
-				Action:      ActionNoOp,
-				VolumeType:  volumeType,
-				CurrentSize: currentSize,
-				TargetSize:  targetSize,
-				Reason:      "target not larger than current",
-			}
-		}
-
-		var volumeStatus *apiv1.VolumeSizingStatus
-		if cluster.Status.StorageSizing != nil {
-			switch volumeType {
-			case VolumeTypeData:
-				volumeStatus = cluster.Status.StorageSizing.Data
-			case VolumeTypeWAL:
-				volumeStatus = cluster.Status.StorageSizing.WAL
-			case VolumeTypeTablespace:
-				if cluster.Status.StorageSizing.Tablespaces != nil {
-					volumeStatus = cluster.Status.StorageSizing.Tablespaces[tbsName]
-				}
-			}
-		}
-
-		// Check maintenance window and budget
-		if IsMaintenanceWindowOpen(cfg) && HasBudgetForScheduled(cfg, volumeStatus) {
-			return &ReconcileResult{
-				Action:       ActionScheduledGrow,
-				VolumeType:   volumeType,
-				CurrentSize:  currentSize,
-				TargetSize:   targetSize,
-				Reason:       "free space below target buffer",
-				InstanceName: highestUsageInstance,
-			}
-		}
-
+	if !NeedsGrowth(cfg, maxTotal, maxUsed) {
 		return &ReconcileResult{
-			Action:       ActionPendingGrowth,
+			Action:      ActionNoOp,
+			VolumeType:  volumeType,
+			CurrentSize: currentSize,
+			Reason:      "balanced",
+		}
+	}
+
+	targetSize := CalculateTargetSize(maxUsed, GetTargetBuffer(cfg))
+	targetSize = ClampSize(targetSize, request, limit)
+
+	// Only grow if target is larger than current
+	if targetSize.Cmp(currentSize) <= 0 {
+		return &ReconcileResult{
+			Action:      ActionNoOp,
+			VolumeType:  volumeType,
+			CurrentSize: currentSize,
+			TargetSize:  targetSize,
+			Reason:      "target not larger than current",
+		}
+	}
+
+	// Check maintenance window and budget
+	if IsMaintenanceWindowOpen(cfg) && HasBudgetForScheduled(cfg, volumeStatus) {
+		return &ReconcileResult{
+			Action:       ActionScheduledGrow,
 			VolumeType:   volumeType,
 			CurrentSize:  currentSize,
 			TargetSize:   targetSize,
-			Reason:       "waiting for maintenance window",
+			Reason:       "free space below target buffer",
 			InstanceName: highestUsageInstance,
 		}
 	}
 
 	return &ReconcileResult{
-		Action:      ActionNoOp,
-		VolumeType:  volumeType,
-		CurrentSize: currentSize,
-		Reason:      "balanced",
+		Action:       ActionPendingGrowth,
+		VolumeType:   volumeType,
+		CurrentSize:  currentSize,
+		TargetSize:   targetSize,
+		Reason:       "waiting for maintenance window",
+		InstanceName: highestUsageInstance,
 	}
 }
 
@@ -424,16 +470,16 @@ func updateVolumeStatus(
 	switch result.Action {
 	case ActionNoOp:
 		if result.Reason == "at limit" {
-			status.State = "AtLimit"
+			status.State = string(VolumeStateAtLimit)
 		} else {
-			status.State = "Balanced"
+			status.State = string(VolumeStateBalanced)
 		}
 	case ActionEmergencyGrow:
-		status.State = "Emergency"
+		status.State = string(VolumeStateEmergency)
 	case ActionScheduledGrow:
-		status.State = "Resizing"
+		status.State = string(VolumeStateResizing)
 	case ActionPendingGrowth:
-		status.State = "PendingGrowth"
+		status.State = string(VolumeStatePendingGrowth)
 	}
 
 	// Update target size
