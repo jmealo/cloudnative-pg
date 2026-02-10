@@ -191,8 +191,11 @@ func Reconcile(
 	// Evaluate sizing for data volume
 	result := evaluateSizing(cluster, &cluster.Spec.StorageConfiguration, VolumeTypeData, "", diskStatusMap)
 
+	// Collect actual PVC sizes
+	actualSizes := collectActualSizes(pvcs, VolumeTypeData, "")
+
 	// Update status based on result (status structures already initialized above)
-	updateVolumeStatus(cluster.Status.StorageSizing.Data, &cluster.Spec.StorageConfiguration, result)
+	updateVolumeStatus(cluster.Status.StorageSizing.Data, &cluster.Spec.StorageConfiguration, result, actualSizes)
 
 	// Execute action if needed
 	if result.Action != ActionNoOp && result.Action != ActionPendingGrowth {
@@ -248,7 +251,10 @@ func reconcileTablespaces(
 			cluster.Status.StorageSizing.Tablespaces[tbs.Name] = &apiv1.VolumeSizingStatus{}
 		}
 
-		updateVolumeStatus(cluster.Status.StorageSizing.Tablespaces[tbs.Name], &tbs.Storage, result)
+		// Collect actual PVC sizes for this tablespace
+		actualSizes := collectActualSizes(pvcs, VolumeTypeTablespace, tbs.Name)
+
+		updateVolumeStatus(cluster.Status.StorageSizing.Tablespaces[tbs.Name], &tbs.Storage, result, actualSizes)
 
 		if result.Action != ActionNoOp && result.Action != ActionPendingGrowth {
 			if err := executeAction(ctx, c, cluster, pvcs, result); err != nil {
@@ -463,11 +469,58 @@ func evaluateGrowth(
 	}
 }
 
+// collectActualSizes collects the current PVC sizes for instances of a specific volume type.
+func collectActualSizes(
+	pvcs []corev1.PersistentVolumeClaim,
+	volumeType VolumeType,
+	tbsName string,
+) map[string]string {
+	actualSizes := make(map[string]string)
+
+	for i := range pvcs {
+		pvc := &pvcs[i]
+
+		// Check if this PVC matches the volume type
+		role := pvc.Labels[utils.PvcRoleLabelName]
+		var matches bool
+		switch volumeType {
+		case VolumeTypeData:
+			matches = role == string(utils.PVCRolePgData)
+		case VolumeTypeWAL:
+			matches = role == string(utils.PVCRolePgWal)
+		case VolumeTypeTablespace:
+			matches = role == string(utils.PVCRolePgTablespace) &&
+				pvc.Labels[utils.TablespaceNameLabelName] == tbsName
+		}
+
+		if !matches {
+			continue
+		}
+
+		// Get instance name from PVC labels
+		instanceName := pvc.Labels[utils.InstanceNameLabelName]
+		if instanceName == "" {
+			continue
+		}
+
+		// Get the current size from PVC status (actual size) or spec (requested size)
+		// Use status.capacity if available (actual provisioned size), otherwise use spec.resources.requests
+		if capacity, ok := pvc.Status.Capacity[corev1.ResourceStorage]; ok {
+			actualSizes[instanceName] = capacity.String()
+		} else if size, ok := pvc.Spec.Resources.Requests[corev1.ResourceStorage]; ok {
+			actualSizes[instanceName] = size.String()
+		}
+	}
+
+	return actualSizes
+}
+
 // updateVolumeStatus updates the volume sizing status based on the result.
 func updateVolumeStatus(
 	status *apiv1.VolumeSizingStatus,
 	cfg *apiv1.StorageConfiguration,
 	result *ReconcileResult,
+	actualSizes map[string]string,
 ) {
 	// Update state
 	switch result.Action {
@@ -496,6 +549,11 @@ func updateVolumeStatus(
 		if next != nil {
 			status.NextMaintenanceWindow = &metav1.Time{Time: *next}
 		}
+	}
+
+	// Update actual sizes
+	if len(actualSizes) > 0 {
+		status.ActualSizes = actualSizes
 	}
 
 	// Update budget
