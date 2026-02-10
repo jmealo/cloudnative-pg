@@ -85,7 +85,8 @@ readonly ROOT_DIR
 CONTROLLER_IMG_BASE=${CONTROLLER_IMG_BASE:-ghcr.io/jmealo/cloudnative-pg-testing}
 CONTROLLER_IMG_TAG=${CONTROLLER_IMG_TAG:-feat-pvc-autoresizing-$(git -C "$(dirname "$0")/../../" rev-parse --short HEAD)}
 CONTROLLER_IMG=${CONTROLLER_IMG:-${CONTROLLER_IMG_BASE}:${CONTROLLER_IMG_TAG}}
-GINKGO_NODES=${GINKGO_NODES:-6}
+GINKGO_NODES=${GINKGO_NODES:-}
+GINKGO_MAX_NODES=${GINKGO_MAX_NODES:-6}
 GINKGO_TIMEOUT=${GINKGO_TIMEOUT:-3h}
 SKIP_BUILD=${SKIP_BUILD:-false}
 SKIP_DEPLOY=${SKIP_DEPLOY:-false}
@@ -93,6 +94,11 @@ DIAGNOSE_ONLY=${DIAGNOSE_ONLY:-false}
 GINKGO_FOCUS=${GINKGO_FOCUS:-}
 # Set cloud vendor for test profile selection
 export TEST_CLOUD_VENDOR=${TEST_CLOUD_VENDOR:-aks}
+
+# Namespace configuration
+OPERATOR_NAMESPACE=${OPERATOR_NAMESPACE:-cnpg-system}
+MINIO_NAMESPACE=${MINIO_NAMESPACE:-minio}
+TEST_NAMESPACE_PREFIX=${TEST_NAMESPACE_PREFIX:-dynamic-storage}
 
 # Colors (defined early for use in flag parsing)
 RED='\033[0;31m'
@@ -182,10 +188,10 @@ print_victorialogs_hint() {
   info "=== VictoriaLogs Query Hint ==="
   info "To view all logs relevant to auto-resize E2E tests in VictoriaLogs, use the victorialogs-infra MCP:"
   info ""
-  info '  {namespace=~"dynamic-storage-.*|cnpg-system"}'
+  info "  {namespace=~\"${TEST_NAMESPACE_PREFIX}-.*|${OPERATOR_NAMESPACE}\"}"
   info ""
   info "To further filter for volume/resize issues:"
-  info '  {namespace=~"dynamic-storage-.*|cnpg-system"} AND (_msg:~"resize|volume|attach|disk|pvc")'
+  info "  {namespace=~\"${TEST_NAMESPACE_PREFIX}-.*|${OPERATOR_NAMESPACE}\"} AND (_msg:~\"resize|volume|attach|disk|pvc\")"
   info ""
   info "For Azure CSI driver logs specifically:"
   info '  {namespace="kube-system"} AND (_msg:~"csi|azuredisk|attach|detach")'
@@ -242,6 +248,15 @@ fi
 KUBE_CONTEXT=$(kubectl config current-context)
 ok "Connected to cluster via context: ${KUBE_CONTEXT}"
 
+# Gate: only allow running on infra cluster
+if [[ "${KUBE_CONTEXT}" != *infra* ]]; then
+  fail "This script must only run on the infra cluster."
+  fail "Current context '${KUBE_CONTEXT}' does not contain 'infra'."
+  fail "Switch to the infra cluster context and try again."
+  exit 1
+fi
+ok "Verified running on infra cluster"
+
 # 2. Node count
 NODE_COUNT=$(kubectl get nodes --no-headers 2>/dev/null | wc -l)
 info "Cluster has ${NODE_COUNT} nodes"
@@ -249,6 +264,33 @@ if [[ "${NODE_COUNT}" -lt 1 ]]; then
   fail "No nodes available"
   exit 1
 fi
+
+# 2b. Smart Ginkgo parallelism (caps at node count to avoid CSI contention)
+if ! [[ "${GINKGO_MAX_NODES}" =~ ^[0-9]+$ ]] || [[ "${GINKGO_MAX_NODES}" -lt 1 ]]; then
+  fail "GINKGO_MAX_NODES must be an integer >= 1 (got: ${GINKGO_MAX_NODES})"
+  exit 1
+fi
+
+if [ -z "${GINKGO_NODES}" ]; then
+  GINKGO_NODES="${GINKGO_MAX_NODES}"
+fi
+
+if ! [[ "${GINKGO_NODES}" =~ ^[0-9]+$ ]] || [[ "${GINKGO_NODES}" -lt 1 ]]; then
+  fail "GINKGO_NODES must be an integer >= 1 (got: ${GINKGO_NODES})"
+  exit 1
+fi
+
+if [[ "${GINKGO_NODES}" -gt "${GINKGO_MAX_NODES}" ]]; then
+  warn "Capping GINKGO_NODES from ${GINKGO_NODES} to max ${GINKGO_MAX_NODES}"
+  GINKGO_NODES="${GINKGO_MAX_NODES}"
+fi
+
+if [[ "${GINKGO_NODES}" -gt "${NODE_COUNT}" ]]; then
+  warn "Capping GINKGO_NODES from ${GINKGO_NODES} to cluster node count ${NODE_COUNT}"
+  GINKGO_NODES="${NODE_COUNT}"
+fi
+
+info "Using Ginkgo parallel workers: ${GINKGO_NODES} (cluster nodes=${NODE_COUNT}, cap=${GINKGO_MAX_NODES})"
 
 # 3. StorageClass with volume expansion
 if [ -z "${E2E_DEFAULT_STORAGE_CLASS:-}" ]; then
@@ -376,22 +418,39 @@ if [[ "${SKIP_DEPLOY}" != "true" ]]; then
   info "=== Deploying Operator ==="
 
   # Recreate the namespace to get a clean state
-  kubectl delete namespace cnpg-system --ignore-not-found=true --wait=true 2>/dev/null || true
-  kubectl create namespace cnpg-system
+  kubectl delete namespace ${OPERATOR_NAMESPACE} --ignore-not-found=true --wait=true 2>/dev/null || true
+  kubectl create namespace ${OPERATOR_NAMESPACE}
 
-  # Deploy operator manifests
-  CONTROLLER_IMG="${CONTROLLER_IMG}" \
-    POSTGRES_IMAGE_NAME="${POSTGRES_IMG}" \
-    PGBOUNCER_IMAGE_NAME="${PGBOUNCER_IMG}" \
-    make -C "${ROOT_DIR}" deploy
+  # Generate manifests with custom namespace
+  # We need to override the hardcoded namespace in kustomization.yaml
+  CONFIG_TMP_DIR=$(mktemp -d)
+  cp -r "${ROOT_DIR}/config"/* "$CONFIG_TMP_DIR"
+
+  # Update namespace in kustomization
+  cd "$CONFIG_TMP_DIR/default"
+  "${ROOT_DIR}/bin/kustomize" edit set namespace "${OPERATOR_NAMESPACE}"
+  "${ROOT_DIR}/bin/kustomize" edit add patch --path manager_image_pull_secret.yaml
+
+  cd "$CONFIG_TMP_DIR/manager"
+  "${ROOT_DIR}/bin/kustomize" edit set image controller="${CONTROLLER_IMG}"
+  "${ROOT_DIR}/bin/kustomize" edit add patch --path env_override.yaml
+  "${ROOT_DIR}/bin/kustomize" edit add configmap controller-manager-env \
+    --from-literal="POSTGRES_IMAGE_NAME=${POSTGRES_IMG}" \
+    --from-literal="PGBOUNCER_IMAGE_NAME=${PGBOUNCER_IMG}"
+
+  # Build and apply
+  "${ROOT_DIR}/bin/kustomize" build "$CONFIG_TMP_DIR/default" | \
+    kubectl apply --server-side --force-conflicts -f -
+
+  rm -rf "$CONFIG_TMP_DIR"
 
   # Wait for the operator to be ready
   info "Waiting for operator deployment..."
   if ! kubectl wait --for=condition=Available --timeout=3m \
-    -n cnpg-system deployments cnpg-controller-manager; then
+    -n ${OPERATOR_NAMESPACE} deployments cnpg-controller-manager; then
     fail "Operator deployment not ready after 3 minutes"
-    kubectl get pods -n cnpg-system
-    kubectl describe deployment -n cnpg-system cnpg-controller-manager
+    kubectl get pods -n ${OPERATOR_NAMESPACE}
+    kubectl describe deployment -n ${OPERATOR_NAMESPACE} cnpg-controller-manager
     exit 1
   fi
   ok "Operator deployed and ready"
@@ -399,8 +458,8 @@ if [[ "${SKIP_DEPLOY}" != "true" ]]; then
 else
   info "Skipping deploy (--skip-deploy)"
   # Verify operator is running
-  if ! kubectl get deployment -n cnpg-system cnpg-controller-manager >/dev/null 2>&1; then
-    fail "Operator not found in cnpg-system namespace. Run without --skip-deploy."
+  if ! kubectl get deployment -n ${OPERATOR_NAMESPACE} cnpg-controller-manager >/dev/null 2>&1; then
+    fail "Operator not found in ${OPERATOR_NAMESPACE} namespace. Run without --skip-deploy."
     exit 1
   fi
 fi
@@ -455,7 +514,7 @@ info "=== Pre-test Cleanup ==="
 # These leave behind PVCs with Azure Disks attached, which saturate
 # the attach queue and cause timeouts for new tests.
 # Clean up: dynamic-storage-* (test namespaces) and minio (object store for backup tests)
-ORPHAN_NS=$(kubectl get namespaces -o name 2>/dev/null | grep -E 'dynamic-storage-|^namespace/minio$' | cut -d/ -f2 || true)
+ORPHAN_NS=$(kubectl get namespaces -o name 2>/dev/null | grep -E 'dynamic-storage-|^namespace/${MINIO_NAMESPACE}$' | cut -d/ -f2 || true)
 if [ -n "${ORPHAN_NS}" ]; then
   warn "Found orphaned namespaces from prior runs:"
   echo "${ORPHAN_NS}"

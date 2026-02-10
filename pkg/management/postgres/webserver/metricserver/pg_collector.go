@@ -51,6 +51,7 @@ type Exporter struct {
 	instance *postgres.Instance
 	Metrics  *metrics
 	queries  *m.QueriesCollector
+	disk     *diskCollector
 	// this is used for two reasons:
 	// - to ensure we are able to unit test
 	// - to make the struct adhere to the composition pattern instead of hardcoding dependencies inside the functions
@@ -100,6 +101,7 @@ func NewExporter(instance *postgres.Instance, pluginCollector m.PluginCollector)
 	return &Exporter{
 		instance:        instance,
 		Metrics:         newMetrics(),
+		disk:            newDiskCollector(instance),
 		getCluster:      clusterGetter,
 		pluginCollector: pluginCollector,
 	}
@@ -293,6 +295,8 @@ func (e *Exporter) Describe(ch chan<- *prometheus.Desc) {
 	e.Metrics.LastAvailableBackupTimestamp.Describe(ch)
 	e.Metrics.NodesUsed.Describe(ch)
 
+	e.disk.Describe(ch)
+
 	if e.queries != nil {
 		e.queries.Describe(ch)
 	}
@@ -321,6 +325,7 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 	log.Debug("collecting Postgres instance metrics")
 	e.updateInstanceMetrics()
 	e.collectInstanceMetrics(ch)
+	e.disk.Collect(ch)
 
 	if e.queries != nil {
 		var defaultClusterForTTL apiv1.Cluster
