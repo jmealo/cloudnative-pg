@@ -103,6 +103,16 @@ var _ = Describe("Dynamic storage management extended scenarios",
 					Expect(err).ToNot(HaveOccurred())
 				})
 
+				By("waiting for storage sizing to detect growth need", func() {
+					Eventually(func(g Gomega) {
+						cluster, err := clusterutils.Get(env.Ctx, env.Client, namespace, clusterName)
+						g.Expect(err).ToNot(HaveOccurred())
+						g.Expect(cluster.Status.StorageSizing).ToNot(BeNil(),
+							"Expected StorageSizing status to be populated before concurrent operations")
+					}).WithTimeout(time.Duration(testTimeouts[timeouts.StorageSizingDetection]) * time.Second).
+						WithPolling(time.Duration(testTimeouts[timeouts.StorageSizingPolling]) * time.Second).Should(Succeed())
+				})
+
 				By("starting concurrent operations", func() {
 					// 1. Create backup
 					backup := &apiv1.Backup{
