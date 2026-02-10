@@ -444,6 +444,16 @@ if [[ "${SKIP_DEPLOY}" != "true" ]]; then
 
   rm -rf "$CONFIG_TMP_DIR"
 
+  # Fix ClusterRoleBinding namespace (kustomize doesn't override cluster-scoped resources)
+  if [[ "${OPERATOR_NAMESPACE}" != "cnpg-system" ]]; then
+    info "Fixing ClusterRoleBinding for namespace ${OPERATOR_NAMESPACE}..."
+    kubectl delete clusterrolebinding cnpg-manager-rolebinding --ignore-not-found=true
+    kubectl create clusterrolebinding cnpg-manager-rolebinding \
+      --clusterrole=cnpg-manager \
+      --serviceaccount=${OPERATOR_NAMESPACE}:cnpg-manager
+    ok "ClusterRoleBinding updated for ${OPERATOR_NAMESPACE}"
+  fi
+
   # Wait for the operator to be ready
   info "Waiting for operator deployment..."
   if ! kubectl wait --for=condition=Available --timeout=3m \

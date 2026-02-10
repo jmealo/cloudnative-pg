@@ -22,6 +22,8 @@ package e2e
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"os"
 	"testing"
 	"time"
 
@@ -56,6 +58,20 @@ const (
 	PollingTime  = objects.PollingTime
 )
 
+// getMinioEnv returns MinIO environment configuration from env vars or defaults
+func getMinioEnv() *minio.Env {
+	minioNamespace := os.Getenv("MINIO_NAMESPACE")
+	if minioNamespace == "" {
+		minioNamespace = "minio"
+	}
+	return &minio.Env{
+		Namespace:    minioNamespace,
+		ServiceName:  fmt.Sprintf("minio-service.%s", minioNamespace),
+		CaSecretName: "minio-server-ca-secret",
+		TLSSecret:    "minio-server-tls-secret",
+	}
+}
+
 var (
 	env                     *environment.TestingEnvironment
 	testLevelEnv            *tests.TestEnvLevel
@@ -65,12 +81,7 @@ var (
 	operatorWasRestarted    bool
 	quickDeletionPeriod     = int64(1)
 	testTimeouts            map[timeouts.Timeout]int
-	minioEnv                = &minio.Env{
-		Namespace:    "minio",
-		ServiceName:  "minio-service.minio",
-		CaSecretName: "minio-server-ca-secret",
-		TLSSecret:    "minio-server-tls-secret",
-	}
+	minioEnv                = getMinioEnv()
 )
 
 var _ = SynchronizedBeforeSuite(func() []byte {

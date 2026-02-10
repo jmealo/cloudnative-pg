@@ -281,7 +281,6 @@ func (instance *Instance) fillStatus(result *postgres.PostgresqlStatus) error {
 		return err
 	}
 
-	instance.fillDiskStatus(result)
 	return nil
 }
 
