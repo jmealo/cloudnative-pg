@@ -85,6 +85,104 @@ func getDiskUsagePercent(
 	return usage, nil
 }
 
+// getTablespaceDiskUsagePercent returns the disk usage percentage for a specific tablespace
+func getTablespaceDiskUsagePercent(
+	pod *corev1.Pod,
+	tbsName string,
+) (int, error) {
+	timeout := 10 * time.Second
+	tsPath := specs.MountForTablespace(tbsName)
+	stdout, stderr, err := exec.CommandInContainer(
+		env.Ctx, env.Client, env.Interface, env.RestClientConfig,
+		exec.ContainerLocator{
+			Namespace:     pod.Namespace,
+			PodName:       pod.Name,
+			ContainerName: specs.PostgresContainerName,
+		},
+		&timeout,
+		"df", "--output=pcent", tsPath,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("df command failed for tablespace %s: %w, stderr: %s", tbsName, err, stderr)
+	}
+
+	lines := strings.Split(strings.TrimSpace(stdout), "\n")
+	if len(lines) < 2 {
+		return 0, fmt.Errorf("unexpected df output for tablespace %s: %s", tbsName, stdout)
+	}
+	usageStr := strings.TrimSpace(lines[1])
+	usageStr = strings.TrimSuffix(usageStr, "%")
+	usage, err := strconv.Atoi(usageStr)
+	if err != nil {
+		return 0, fmt.Errorf("failed to parse usage percentage for tablespace %s from '%s': %w",
+			tbsName, usageStr, err)
+	}
+	return usage, nil
+}
+
+// fillTablespaceDiskIncrementally fills the disk on a specific tablespace
+func fillTablespaceDiskIncrementally(
+	pod *corev1.Pod,
+	tbsName string,
+	targetUsagePercent int,
+	maxUsagePercent int,
+	batchRows int,
+) (int, error) {
+	GinkgoWriter.Printf("Starting incremental disk fill on tablespace %s, pod %s, target: %d%%, max: %d%%\n",
+		tbsName, pod.Name, targetUsagePercent, maxUsagePercent)
+
+	currentUsage, err := getTablespaceDiskUsagePercent(pod, tbsName)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get initial tablespace disk usage: %w", err)
+	}
+
+	// Create the fill table in the tablespace
+	createTableQuery := fmt.Sprintf("CREATE TABLE IF NOT EXISTS fill_tbs (id bigint, data text) TABLESPACE %s;",
+		tbsName)
+	timeout := time.Minute
+	_, _, err = exec.QueryInInstancePodWithTimeout(
+		env.Ctx, env.Client, env.Interface, env.RestClientConfig,
+		exec.PodLocator{Namespace: pod.Namespace, PodName: pod.Name},
+		postgres.AppDBName,
+		createTableQuery,
+		timeout,
+	)
+	if err != nil {
+		return currentUsage, fmt.Errorf("failed to create fill table in tablespace: %w", err)
+	}
+
+	batchNum := 0
+	for currentUsage < targetUsagePercent {
+		batchNum++
+		if currentUsage >= maxUsagePercent {
+			break
+		}
+
+		startID := (batchNum-1)*batchRows + 1
+		endID := batchNum * batchRows
+		insertQuery := fmt.Sprintf(
+			"INSERT INTO fill_tbs SELECT id, repeat('x', 1000) FROM generate_series(%d, %d) AS id;",
+			startID, endID,
+		)
+
+		_, _, err := exec.QueryInInstancePodWithTimeout(
+			env.Ctx, env.Client, env.Interface, env.RestClientConfig,
+			exec.PodLocator{Namespace: pod.Namespace, PodName: pod.Name},
+			postgres.AppDBName,
+			insertQuery,
+			time.Minute*5,
+		)
+		if err != nil {
+			return currentUsage, err
+		}
+
+		time.Sleep(2 * time.Second)
+		currentUsage, _ = getTablespaceDiskUsagePercent(pod, tbsName)
+	}
+
+	return currentUsage, nil
+}
+
 // fillDiskIncrementally fills the disk on the given pod incrementally until
 // the target usage percentage is reached. It inserts data in batches and checks
 // disk usage between batches to avoid overshooting.
@@ -295,6 +393,61 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 		}
 	})
 
+	Context("Tablespace dynamic sizing", Label(tests.LabelDynamicStorage), func() {
+		It("grows tablespace storage when usage exceeds target buffer", func() {
+			var err error
+			namespace, err = env.CreateUniqueTestNamespace(env.Ctx, env.Client, namespacePrefix)
+			Expect(err).ToNot(HaveOccurred())
+
+			clusterName := "dynamic-tbs-grow"
+			tbsName := "tbsdynamic"
+			clusterFile := fixturesDir + "/dynamic_storage/cluster-tablespaces-dynamic.yaml.template"
+
+			By("creating cluster with tablespaces", func() {
+				AssertCreateCluster(namespace, clusterName, clusterFile, env)
+			})
+
+			var primaryPod *corev1.Pod
+			By("finding primary pod", func() {
+				primaryPod, err = clusterutils.GetPrimary(env.Ctx, env.Client, namespace, clusterName)
+				Expect(err).ToNot(HaveOccurred())
+			})
+
+			By("filling tablespace disk to trigger growth", func() {
+				finalUsage, err := fillTablespaceDiskIncrementally(primaryPod, tbsName, 85, 92, 500000)
+				if err != nil {
+					GinkgoWriter.Printf("Tablespace disk fill ended with error: %v\n", err)
+				}
+				Expect(finalUsage).To(BeNumerically(">=", 75))
+			})
+
+			By("verifying tablespace storage sizing status is updated", func() {
+				Eventually(func(g Gomega) {
+					cluster, err := clusterutils.Get(env.Ctx, env.Client, namespace, clusterName)
+					g.Expect(err).ToNot(HaveOccurred())
+					g.Expect(cluster.Status.StorageSizing).ToNot(BeNil())
+					g.Expect(cluster.Status.StorageSizing.Tablespaces).ToNot(BeNil())
+					g.Expect(cluster.Status.StorageSizing.Tablespaces[tbsName]).ToNot(BeNil())
+
+					var pvcList corev1.PersistentVolumeClaimList
+					err = env.Client.List(env.Ctx, &pvcList,
+						ctrlclient.InNamespace(namespace),
+						ctrlclient.MatchingLabels{
+							utils.ClusterLabelName:        clusterName,
+							utils.PvcRoleLabelName:        string(utils.PVCRolePgTablespace),
+							utils.TablespaceNameLabelName: tbsName,
+						})
+					g.Expect(err).ToNot(HaveOccurred())
+					g.Expect(pvcList.Items).To(HaveLen(1))
+					size := pvcList.Items[0].Spec.Resources.Requests[corev1.ResourceStorage]
+					g.Expect(size.Cmp(resource.MustParse("1Gi"))).To(BeNumerically(">", 0),
+						"Tablespace PVC request should grow beyond initial 1Gi")
+				}).WithTimeout(time.Duration(testTimeouts[timeouts.AKSVolumeResize]) * time.Second).
+					WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())
+			})
+		})
+	})
+
 	Context("Dynamic sizing validation", func() {
 		It("rejects invalid configurations", func() {
 			var err error
@@ -383,11 +536,32 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 					size := pvcList.Items[0].Spec.Resources.Requests[corev1.ResourceStorage]
 					g.Expect(size.String()).To(Equal("5Gi"))
 				}).WithTimeout(time.Duration(testTimeouts[timeouts.AKSVolumeResize]) * time.Second).
-				WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())
+					WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())
 			})
 
 			By("verifying dynamic sizing is detected as enabled", func() {
 				Expect(dynamicstorage.IsDynamicSizingEnabled(&cluster.Spec.StorageConfiguration)).To(BeTrue())
+			})
+
+			By("verifying Prometheus metrics are exposed", func() {
+				podList, err := clusterutils.ListPods(env.Ctx, env.Client, namespace, clusterName)
+				Expect(err).ToNot(HaveOccurred())
+
+				for _, pod := range podList.Items {
+					Eventually(func(g Gomega) {
+						out, err := proxy.RetrieveMetricsFromInstance(env.Ctx, env.Interface, pod, false)
+						g.Expect(err).ToNot(HaveOccurred())
+
+						// Check for disk metrics
+						g.Expect(out).To(ContainSubstring("cnpg_disk_total_bytes"))
+						g.Expect(out).To(ContainSubstring("cnpg_disk_used_bytes"))
+
+						// Check for dynamic storage metrics
+						g.Expect(out).To(ContainSubstring("cnpg_dynamic_storage_target_size_bytes"))
+						g.Expect(out).To(ContainSubstring("cnpg_dynamic_storage_state"))
+						g.Expect(out).To(ContainSubstring("cnpg_dynamic_storage_budget_total"))
+					}, testTimeouts[timeouts.Short]).Should(Succeed())
+				}
 			})
 		})
 
@@ -463,7 +637,7 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 					g.Expect(size.Cmp(resource.MustParse("5Gi"))).To(BeNumerically(">", 0),
 						"PVC request should grow beyond initial 5Gi after sizing logic runs")
 				}).WithTimeout(time.Duration(testTimeouts[timeouts.AKSVolumeResize]) * time.Second).
-				WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())
+					WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())
 			})
 		})
 
@@ -504,7 +678,7 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 						g.Expect(size.Cmp(limit)).To(BeNumerically("<=", 0))
 					}
 				}).WithTimeout(time.Duration(testTimeouts[timeouts.AKSVolumeResize]) * time.Second).
-				WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())
+					WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())
 			})
 		})
 
@@ -560,7 +734,7 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 					}
 					g.Expect(sizes).To(HaveLen(1))
 				}).WithTimeout(time.Duration(testTimeouts[timeouts.AKSVolumeResize]) * time.Second).
-				WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())
+					WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())
 			})
 		})
 	})
@@ -608,7 +782,7 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 						g.Expect(cluster.Status.StorageSizing.Data.NextMaintenanceWindow).ToNot(BeNil())
 					}
 				}).WithTimeout(time.Duration(testTimeouts[timeouts.AKSVolumeResize]) * time.Second).
-				WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())
+					WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())
 			})
 		})
 	})
@@ -684,7 +858,7 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 						g.Expect(cluster.Status.StorageSizing.Data.LastAction.Kind).To(Equal("EmergencyGrow"))
 					}
 				}).WithTimeout(time.Duration(testTimeouts[timeouts.AKSVolumeResize]) * time.Second).
-				WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())
+					WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())
 			})
 		})
 	})
@@ -730,7 +904,7 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 						g.Expect(cluster.Status.StorageSizing.Data.Budget.AvailableForEmergency).To(BeNumerically(">=", 0))
 					}
 				}).WithTimeout(time.Duration(testTimeouts[timeouts.AKSVolumeResize]) * time.Second).
-				WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())
+					WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())
 			})
 		})
 	})
@@ -801,7 +975,7 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 						g.Expect(cluster.Status.StorageSizing).ToNot(BeNil())
 						g.Expect(cluster.Status.StorageSizing.Data).ToNot(BeNil())
 					}).WithTimeout(time.Duration(testTimeouts[timeouts.AKSVolumeResize]) * time.Second).
-				WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())
+						WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())
 				})
 
 				By("restarting operator pod during growth operation", func() {
@@ -819,7 +993,7 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 						g.Expect(err).ToNot(HaveOccurred())
 						g.Expect(cluster.Status.StorageSizing).ToNot(BeNil())
 					}).WithTimeout(time.Duration(testTimeouts[timeouts.AKSVolumeResize]) * time.Second).
-				WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())
+						WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())
 				})
 
 				By("verifying data integrity after operator restart", func() {
@@ -902,7 +1076,7 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 						g.Expect(err).ToNot(HaveOccurred())
 						g.Expect(cluster.Status.StorageSizing).ToNot(BeNil())
 					}).WithTimeout(time.Duration(testTimeouts[timeouts.StorageSizingDetection]) * time.Second).
-					WithPolling(time.Duration(testTimeouts[timeouts.StorageSizingPolling]) * time.Second).Should(Succeed())
+						WithPolling(time.Duration(testTimeouts[timeouts.StorageSizingPolling]) * time.Second).Should(Succeed())
 				})
 
 				By("waiting for PVC capacity to update (CSI resize completion)", func() {
@@ -934,7 +1108,7 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 						g.Expect(err).ToNot(HaveOccurred())
 						g.Expect(cluster.Status.StorageSizing).ToNot(BeNil())
 					}).WithTimeout(time.Duration(testTimeouts[timeouts.AKSVolumeResize]) * time.Second).
-				WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())
+						WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())
 				})
 			})
 		})
@@ -1041,11 +1215,15 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 				Expect(err).ToNot(HaveOccurred())
 
 				// Wait for switchover to complete with longer timeout
+				// After a storage resize on AKS, pods need additional time to stabilize
+				// before they can successfully complete a switchover. Use the AKS-specific
+				// timeout which accounts for CSI operations.
 				Eventually(func(g Gomega) {
 					cluster, err := clusterutils.Get(env.Ctx, env.Client, namespace, clusterName)
 					g.Expect(err).ToNot(HaveOccurred())
 					g.Expect(cluster.Status.CurrentPrimary).To(Equal(targetPrimary))
-				}, testTimeouts[timeouts.NewPrimaryAfterSwitchover]).Should(Succeed())
+				}).WithTimeout(time.Duration(testTimeouts[timeouts.AKSVolumeResize]) * time.Second).
+					WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())
 
 				// Wait for cluster to be ready (using the configured timeout)
 				AssertClusterIsReady(namespace, clusterName, testTimeouts[timeouts.ClusterIsReady], env)
@@ -1057,7 +1235,7 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 					g.Expect(err).ToNot(HaveOccurred())
 					g.Expect(cluster.Status.CurrentPrimary).ToNot(Equal(originalPrimary))
 				}).WithTimeout(time.Duration(testTimeouts[timeouts.AKSVolumeResize]) * time.Second).
-				WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())
+					WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())
 			})
 
 			By("verifying data integrity after switchover", func() {
@@ -1140,7 +1318,7 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 					g.Expect(err).ToNot(HaveOccurred())
 					g.Expect(cluster.Status.StorageSizing).ToNot(BeNil())
 				}).WithTimeout(time.Duration(testTimeouts[timeouts.AKSVolumeResize]) * time.Second).
-				WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())
+					WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())
 			})
 
 			By("mutating spec: increasing limit", func() {
@@ -1159,7 +1337,7 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 					g.Expect(err).ToNot(HaveOccurred())
 					g.Expect(cluster.Spec.StorageConfiguration.Limit).To(Equal("25Gi"))
 				}).WithTimeout(time.Duration(testTimeouts[timeouts.AKSVolumeResize]) * time.Second).
-				WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())
+					WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())
 			})
 
 			By("mutating spec: adjusting targetBuffer", func() {
@@ -1253,7 +1431,7 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 						g.Expect(err).ToNot(HaveOccurred())
 						g.Expect(cluster.Status.StorageSizing).ToNot(BeNil())
 					}).WithTimeout(time.Duration(testTimeouts[timeouts.AKSVolumeResize]) * time.Second).
-				WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())
+						WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())
 				})
 
 				By("draining node containing primary", func() {
@@ -1280,7 +1458,7 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 						g.Expect(err).ToNot(HaveOccurred())
 						g.Expect(cluster.Status.StorageSizing).ToNot(BeNil())
 					}).WithTimeout(time.Duration(testTimeouts[timeouts.AKSVolumeResize]) * time.Second).
-				WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())
+						WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())
 				})
 
 				By("verifying data integrity after drain", func() {
@@ -1362,7 +1540,7 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 					g.Expect(err).ToNot(HaveOccurred())
 					g.Expect(cluster.Status.StorageSizing).ToNot(BeNil())
 				}).WithTimeout(time.Duration(testTimeouts[timeouts.AKSVolumeResize]) * time.Second).
-				WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())
+					WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())
 			})
 
 			// Note: Full backup test requires object storage (MinIO/Azure).
@@ -1377,7 +1555,7 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 					g.Expect(err).ToNot(HaveOccurred())
 					g.Expect(cluster.Status.StorageSizing).ToNot(BeNil())
 				}).WithTimeout(time.Duration(testTimeouts[timeouts.AKSVolumeResize]) * time.Second).
-				WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())
+					WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())
 			})
 
 			By("verifying data integrity", func() {
@@ -1455,7 +1633,7 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 					g.Expect(cluster.Status.StorageSizing).ToNot(BeNil())
 					g.Expect(cluster.Status.StorageSizing.Data).ToNot(BeNil())
 				}).WithTimeout(time.Duration(testTimeouts[timeouts.AKSVolumeResize]) * time.Second).
-				WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())
+					WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())
 			})
 
 			// The effective size may or may not be set depending on whether growth was triggered.
@@ -1517,7 +1695,7 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 								pvc.Name, size.String(), effectiveSize))
 					}
 				}).WithTimeout(time.Duration(testTimeouts[timeouts.AKSVolumeResize]) * time.Second).
-				WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())
+					WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())
 			})
 
 			By("verifying data integrity on new replica", func() {
@@ -1572,7 +1750,7 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 						g.Expect(budget.BudgetResetsAt.IsZero()).To(BeFalse())
 					}
 				}).WithTimeout(time.Duration(testTimeouts[timeouts.AKSVolumeResize]) * time.Second).
-				WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())
+					WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())
 			})
 
 			By("verifying budget status is exposed in cluster status", func() {
@@ -1583,7 +1761,7 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 					g.Expect(cluster.Status.StorageSizing.Data).ToNot(BeNil())
 					g.Expect(cluster.Status.StorageSizing.Data.Budget).ToNot(BeNil())
 				}).WithTimeout(time.Duration(testTimeouts[timeouts.AKSVolumeResize]) * time.Second).
-				WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())
+					WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())
 			})
 		})
 	})
@@ -1856,7 +2034,7 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 					g.Expect(state).ToNot(Equal("Resizing"),
 						"Waiting for storage sizing to complete resizing")
 				}).WithTimeout(time.Duration(testTimeouts[timeouts.AKSVolumeResize]) * time.Second).
-				WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())
+					WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())
 
 				podList, err := clusterutils.ListPods(env.Ctx, env.Client, namespace, clusterName)
 				Expect(err).ToNot(HaveOccurred())
@@ -1884,7 +2062,7 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 					g.Expect(err).ToNot(HaveOccurred())
 					g.Expect(cluster.Status.ReadyInstances).To(Equal(3))
 				}).WithTimeout(time.Duration(testTimeouts[timeouts.AKSVolumeResize]) * time.Second).
-				WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())
+					WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())
 			})
 
 			By("verifying all PVCs are consistent", func() {

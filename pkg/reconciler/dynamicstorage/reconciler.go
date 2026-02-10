@@ -69,12 +69,13 @@ const (
 
 // ReconcileResult contains the result of a sizing evaluation.
 type ReconcileResult struct {
-	Action       ActionType
-	TargetSize   resource.Quantity
-	CurrentSize  resource.Quantity
-	Reason       string
-	VolumeType   VolumeType
-	InstanceName string
+	Action         ActionType
+	TargetSize     resource.Quantity
+	CurrentSize    resource.Quantity
+	Reason         string
+	VolumeType     VolumeType
+	InstanceName   string
+	TablespaceName string
 }
 
 // DiskInfo contains disk usage information for an instance.
@@ -112,7 +113,7 @@ func Reconcile(
 		"pvcCount", len(pvcs))
 
 	// Collect disk status from instance statuses
-	diskStatusMap := collectDiskStatus(instanceStatuses)
+	diskStatusMap := collectDiskStatusForVolume(instanceStatuses, VolumeTypeData, "")
 	if len(diskStatusMap) == 0 {
 		// If we have instance statuses but no disk status yet, they might still be initializing.
 		// Requeue after a short delay to retry collecting disk status.
@@ -140,7 +141,7 @@ func Reconcile(
 	}
 
 	// Evaluate sizing for data volume
-	result := evaluateSizing(cluster, VolumeTypeData, diskStatusMap)
+	result := evaluateSizing(cluster, &cluster.Spec.StorageConfiguration, VolumeTypeData, "", diskStatusMap)
 
 	// Initialize storage sizing status if needed
 	if cluster.Status.StorageSizing == nil {
@@ -167,25 +168,101 @@ func Reconcile(
 			"reason", result.Reason)
 	}
 
+	// Reconcile tablespaces
+	if err := reconcileTablespaces(ctx, c, cluster, instanceStatuses, pvcs); err != nil {
+		return ctrl.Result{}, err
+	}
+
 	return ctrl.Result{}, nil
 }
 
-// collectDiskStatus collects disk status from all instance statuses.
-func collectDiskStatus(statuses *postgres.PostgresqlStatusList) map[string]*DiskInfo {
+// reconcileTablespaces performs dynamic storage reconciliation for all tablespaces.
+func reconcileTablespaces(
+	ctx context.Context,
+	c client.Client,
+	cluster *apiv1.Cluster,
+	instanceStatuses *postgres.PostgresqlStatusList,
+	pvcs []corev1.PersistentVolumeClaim,
+) error {
+	contextLogger := log.FromContext(ctx)
+
+	for i := range cluster.Spec.Tablespaces {
+		tbs := &cluster.Spec.Tablespaces[i]
+		if !IsDynamicSizingEnabled(&tbs.Storage) {
+			continue
+		}
+
+		diskStatusMap := collectDiskStatusForVolume(instanceStatuses, VolumeTypeTablespace, tbs.Name)
+		if len(diskStatusMap) == 0 {
+			continue
+		}
+
+		result := evaluateSizing(cluster, &tbs.Storage, VolumeTypeTablespace, tbs.Name, diskStatusMap)
+		result.TablespaceName = tbs.Name
+
+		// Initialize status
+		if cluster.Status.StorageSizing.Tablespaces == nil {
+			cluster.Status.StorageSizing.Tablespaces = make(map[string]*apiv1.VolumeSizingStatus)
+		}
+		if cluster.Status.StorageSizing.Tablespaces[tbs.Name] == nil {
+			cluster.Status.StorageSizing.Tablespaces[tbs.Name] = &apiv1.VolumeSizingStatus{}
+		}
+
+		updateVolumeStatus(cluster.Status.StorageSizing.Tablespaces[tbs.Name], &tbs.Storage, result)
+
+		if result.Action != ActionNoOp && result.Action != ActionPendingGrowth {
+			if err := executeAction(ctx, c, cluster, pvcs, result); err != nil {
+				return fmt.Errorf("while executing tablespace %s dynamic storage action: %w", tbs.Name, err)
+			}
+
+			contextLogger.Info("Tablespace dynamic storage action executed",
+				"tablespace", tbs.Name,
+				"action", result.Action,
+				"currentSize", result.CurrentSize.String(),
+				"targetSize", result.TargetSize.String())
+		}
+	}
+
+	return nil
+}
+
+// collectDiskStatusForVolume collects disk status for a specific volume type from all instance statuses.
+func collectDiskStatusForVolume(
+	statuses *postgres.PostgresqlStatusList,
+	volumeType VolumeType,
+	tbsName string,
+) map[string]*DiskInfo {
 	if statuses == nil {
 		return nil
 	}
 
 	result := make(map[string]*DiskInfo)
 	for _, status := range statuses.Items {
-		if status.DiskStatus == nil || status.Pod == nil {
+		if status.Pod == nil {
 			continue
 		}
+
+		var ds *postgres.DiskStatus
+		switch volumeType {
+		case VolumeTypeData:
+			ds = status.DiskStatus
+		case VolumeTypeWAL:
+			ds = status.WALDiskStatus
+		case VolumeTypeTablespace:
+			if status.TablespaceDiskStatus != nil {
+				ds = status.TablespaceDiskStatus[tbsName]
+			}
+		}
+
+		if ds == nil {
+			continue
+		}
+
 		result[status.Pod.Name] = &DiskInfo{
-			TotalBytes:     status.DiskStatus.TotalBytes,
-			UsedBytes:      status.DiskStatus.UsedBytes,
-			AvailableBytes: status.DiskStatus.AvailableBytes,
-			PercentUsed:    status.DiskStatus.PercentUsed,
+			TotalBytes:     ds.TotalBytes,
+			UsedBytes:      ds.UsedBytes,
+			AvailableBytes: ds.AvailableBytes,
+			PercentUsed:    ds.PercentUsed,
 		}
 	}
 	return result
@@ -194,11 +271,11 @@ func collectDiskStatus(statuses *postgres.PostgresqlStatusList) map[string]*Disk
 // evaluateSizing evaluates the sizing needs for a volume type.
 func evaluateSizing(
 	cluster *apiv1.Cluster,
+	cfg *apiv1.StorageConfiguration,
 	volumeType VolumeType,
+	tbsName string,
 	diskStatusMap map[string]*DiskInfo,
 ) *ReconcileResult {
-	cfg := &cluster.Spec.StorageConfiguration
-
 	// Get the maximum usage across all instances
 	var maxUsed, maxTotal, minAvailable uint64
 	var highestUsageInstance string
@@ -246,7 +323,16 @@ func evaluateSizing(
 		// Get volume sizing status for budget check
 		var volumeStatus *apiv1.VolumeSizingStatus
 		if cluster.Status.StorageSizing != nil {
-			volumeStatus = cluster.Status.StorageSizing.Data
+			switch volumeType {
+			case VolumeTypeData:
+				volumeStatus = cluster.Status.StorageSizing.Data
+			case VolumeTypeWAL:
+				volumeStatus = cluster.Status.StorageSizing.WAL
+			case VolumeTypeTablespace:
+				if cluster.Status.StorageSizing.Tablespaces != nil {
+					volumeStatus = cluster.Status.StorageSizing.Tablespaces[tbsName]
+				}
+			}
 		}
 
 		if HasBudgetForEmergency(cfg, volumeStatus) {
@@ -286,7 +372,16 @@ func evaluateSizing(
 
 		var volumeStatus *apiv1.VolumeSizingStatus
 		if cluster.Status.StorageSizing != nil {
-			volumeStatus = cluster.Status.StorageSizing.Data
+			switch volumeType {
+			case VolumeTypeData:
+				volumeStatus = cluster.Status.StorageSizing.Data
+			case VolumeTypeWAL:
+				volumeStatus = cluster.Status.StorageSizing.WAL
+			case VolumeTypeTablespace:
+				if cluster.Status.StorageSizing.Tablespaces != nil {
+					volumeStatus = cluster.Status.StorageSizing.Tablespaces[tbsName]
+				}
+			}
 		}
 
 		// Check maintenance window and budget
@@ -368,14 +463,29 @@ func executeAction(
 ) error {
 	contextLogger := log.FromContext(ctx)
 
-	// Find data PVCs and patch them
+	// Find relevant PVCs and patch them
 	for i := range pvcs {
 		pvc := &pvcs[i]
 
-		// Check if this is a data PVC
+		// Check if this PVC belongs to the volume type we're reconciling
 		role := pvc.Labels[utils.PvcRoleLabelName]
-		if role != string(utils.PVCRolePgData) {
-			continue
+		switch result.VolumeType {
+		case VolumeTypeData:
+			if role != string(utils.PVCRolePgData) {
+				continue
+			}
+		case VolumeTypeWAL:
+			if role != string(utils.PVCRolePgWal) {
+				continue
+			}
+		case VolumeTypeTablespace:
+			if role != string(utils.PVCRolePgTablespace) {
+				continue
+			}
+			tbsName := pvc.Labels[utils.TablespaceNameLabelName]
+			if tbsName != result.TablespaceName {
+				continue
+			}
 		}
 
 		currentSize := pvc.Spec.Resources.Requests[corev1.ResourceStorage]
@@ -386,6 +496,7 @@ func executeAction(
 
 		contextLogger.Info("Patching PVC for dynamic storage growth",
 			"pvcName", pvc.Name,
+			"volumeType", result.VolumeType,
 			"currentSize", currentSize.String(),
 			"targetSize", result.TargetSize.String())
 
@@ -396,9 +507,33 @@ func executeAction(
 		}
 	}
 
-	// Record the action
-	if cluster.Status.StorageSizing != nil && cluster.Status.StorageSizing.Data != nil {
-		status := cluster.Status.StorageSizing.Data
+	// Record the action in status
+	var status *apiv1.VolumeSizingStatus
+	var cfg *apiv1.StorageConfiguration
+
+	if cluster.Status.StorageSizing != nil {
+		switch result.VolumeType {
+		case VolumeTypeData:
+			status = cluster.Status.StorageSizing.Data
+			cfg = &cluster.Spec.StorageConfiguration
+		case VolumeTypeWAL:
+			status = cluster.Status.StorageSizing.WAL
+			cfg = cluster.Spec.WalStorage
+		case VolumeTypeTablespace:
+			tbsName := result.TablespaceName
+			if cluster.Status.StorageSizing.Tablespaces != nil {
+				status = cluster.Status.StorageSizing.Tablespaces[tbsName]
+			}
+			for i := range cluster.Spec.Tablespaces {
+				if cluster.Spec.Tablespaces[i].Name == tbsName {
+					cfg = &cluster.Spec.Tablespaces[i].Storage
+					break
+				}
+			}
+		}
+	}
+
+	if status != nil && cfg != nil {
 		status.LastAction = &apiv1.SizingAction{
 			Kind:      string(result.Action),
 			From:      result.CurrentSize.String(),
@@ -408,7 +543,7 @@ func executeAction(
 			Result:    "Success",
 		}
 		status.EffectiveSize = result.TargetSize.String()
-		status.Budget = IncrementBudgetUsage(&cluster.Spec.StorageConfiguration, status)
+		status.Budget = IncrementBudgetUsage(cfg, status)
 	}
 
 	return nil

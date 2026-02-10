@@ -34,10 +34,27 @@ az account show
 export CONTROLLER_IMG_BASE=${CONTROLLER_IMG_BASE:-ghcr.io/jmealo/cloudnative-pg-testing}
 
 # Optional: Customize test run
-export GINKGO_NODES=${GINKGO_NODES:-1}  # Sequential for dynamic storage
+export GINKGO_NODES=${GINKGO_NODES:-6}  # Parallel execution (capped by node count)
 export GINKGO_TIMEOUT=${GINKGO_TIMEOUT:-3h}
 export TEST_CLOUD_VENDOR=aks
+
+# Namespace isolation (for running both repos on same cluster)
+# This repo (gemini) uses separate namespaces to avoid conflicts
+export OPERATOR_NAMESPACE=${OPERATOR_NAMESPACE:-cnpg-system-gemini}
+export MINIO_NAMESPACE=${MINIO_NAMESPACE:-minio-gemini}
+export TEST_NAMESPACE_PREFIX=${TEST_NAMESPACE_PREFIX:-ds-gemini}
 ```
+
+### 2.1 Running Both Repos Simultaneously
+
+To run tests from both `cloudnative-pg` and `cloudnative-pg-gemini` on the same AKS cluster:
+
+| Repo | OPERATOR_NAMESPACE | MINIO_NAMESPACE | TEST_NAMESPACE_PREFIX |
+|------|-------------------|-----------------|----------------------|
+| cloudnative-pg | `cnpg-system` (default) | `minio` | `dynamic-storage` |
+| cloudnative-pg-gemini | `cnpg-system-gemini` | `minio-gemini` | `ds-gemini` |
+
+**Important**: Each repo deploys its own operator. Both can run simultaneously without conflicts.
 
 ### 3. Git Status Verification
 
@@ -56,18 +73,23 @@ git log --oneline -5
 
 ---
 
-## Phase 1: Initial E2E Test Run
+## Phase 1: Initial E2E Test Run (Parallel Mode)
 
-### 1.1 Full Test Execution
+### Strategy: Fix While Tests Run
 
-Run the complete dynamic storage E2E test suite:
+E2E tests take 2-3 hours. **Do NOT wait for completion.** Run tests in background and fix failures as they appear. This maximizes efficiency by parallelizing test execution with debugging.
+
+### 1.1 Start Tests in Background
 
 ```bash
 # From repo root
 cd /Users/jmealo/repos/cloudnative-pg-gemini
 
-# Run all dynamic storage tests
-./hack/e2e/run-aks-e2e.sh
+# Start tests in background with live output to file
+LOG_FILE="/tmp/e2e-run-$(date +%Y%m%d-%H%M%S).log"
+./hack/e2e/run-aks-e2e.sh 2>&1 | tee "$LOG_FILE" &
+E2E_PID=$!
+echo "Tests running as PID $E2E_PID, logging to $LOG_FILE"
 ```
 
 **What this does:**
@@ -77,13 +99,97 @@ cd /Users/jmealo/repos/cloudnative-pg-gemini
 4. Runs all tests labeled with `dynamic-storage` or `dynamic-storage-p0` or `dynamic-storage-p1`
 5. Captures test output and diagnostics
 
-### 1.2 Expected Duration
+### 1.2 Monitor for Failures (Parallel Fixing)
+
+While tests run, monitor for failures and spawn sub-agents to investigate:
+
+```bash
+# Check for failures in real-time (run periodically)
+tail -100 "$LOG_FILE" | grep -E "(FAIL|Error|panic|\[FAILED\])"
+
+# Check JSON report if available (updated after each spec)
+jq -r '.[] | select(.SpecReports != null) | .SpecReports[] | select(.State == "failed") | .LeafNodeText' tests/e2e/out/dynamic_storage_report.json 2>/dev/null
+```
+
+**When a failure is detected:**
+
+1. **Identify the failing test** - Note the test name, error message, stack trace
+2. **Spawn a sub-agent** using the Task tool to investigate:
+
+```
+Use Task tool with:
+- subagent_type: "debugger" or "golang-pro"
+- prompt: Include:
+  - The failing test name and error message
+  - Instructions to:
+    1. Read AI_CONTRIBUTING.md for CNPG standards
+    2. Analyze the failure (test code in tests/e2e/, operator code)
+    3. Propose a minimal fix following CNPG patterns
+    4. Do NOT commit - just propose the fix and explain why
+```
+
+3. **Review sub-agent output** and apply fix if correct
+4. **Continue monitoring** for more failures
+
+### 1.3 Parallel Sub-Agent Guidelines
+
+| Sub-Agent Task | Agent Type | Key Instructions |
+|----------------|------------|------------------|
+| Analyze test failure | `debugger` | Read test, find root cause, suggest fix |
+| Fix Go code bug | `golang-pro` | Follow CNPG error/logging patterns |
+| Fix timing issue | `debugger` | Analyze timeouts, suggest retry logic |
+| Gather K8s context | `Bash` agent | Get pod logs, events, PVC status |
+
+**Critical Rules:**
+- Sub-agents **analyze and propose**, not commit
+- Main agent integrates fixes and commits with proper sign-off
+- One sub-agent per distinct failure to parallelize
+- Share context: test name, error, relevant file paths
+
+### 1.4 Apply Fixes Without Blocking Tests
+
+While tests continue running:
+
+```bash
+# Apply proposed fixes (edit files as needed)
+
+# Run quick validation
+make fmt
+make lint
+
+# Stage but don't commit yet - batch commits after test run
+git add -A
+```
+
+### 1.5 Wait for Test Completion
+
+```bash
+# Wait for background test to finish
+wait $E2E_PID
+EXIT_CODE=$?
+echo "Tests completed with exit code: $EXIT_CODE"
+```
+
+### 1.6 Expected Duration
 
 - Build + Push: 10-15 minutes
 - Deploy: 5 minutes
 - Test Execution: 2-3 hours (19 tests, some are Serial/Disruptive)
+- **With parallel fixing**: Fixes are ready when tests complete
 
-### 1.3 Monitor Progress
+### 1.7 Sequential Fallback Mode
+
+If parallel fixing is too complex or you prefer sequential:
+
+```bash
+# Run full suite (wait for completion)
+./hack/e2e/run-aks-e2e.sh 2>&1 | tee /tmp/e2e-run-$(date +%Y%m%d-%H%M%S).log
+echo "Exit code: $?"
+```
+
+Then proceed to Phase 2 for analysis.
+
+### 1.8 Monitor Progress
 
 Watch for output sections:
 - `=== Build Stage ===`
@@ -141,6 +247,15 @@ kubectl get clusters.postgresql.cnpg.io -n <test-namespace> -o yaml
 ---
 
 ## Phase 3: Iteration Loop (If Tests Fail)
+
+### 3.0 Parallel vs Sequential Fixing
+
+**Parallel Mode (Recommended):** If using parallel mode from Phase 1, you've already been fixing tests as they fail. After test completion:
+1. Commit all staged fixes with proper sign-off
+2. Re-run failed tests with `--focus` to verify fixes
+3. Skip to Phase 4 if all tests pass
+
+**Sequential Mode:** If you waited for tests to complete, follow the workflow below.
 
 ### 3.1 Debug Methodology
 

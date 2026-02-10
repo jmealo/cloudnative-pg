@@ -37,3 +37,6 @@ bundle.Dockerfile
 catalog
 catalog.Dockerfile
 cloudnative-pg-catalog.yaml
+
+# Claude Code local state
+.claude/ralph-loop.local.md
