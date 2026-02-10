@@ -195,16 +195,27 @@ func updateCluster(namespace, clusterName string, mutator func(*apiv1.Cluster)) 
 	Expect(err).ToNot(HaveOccurred())
 }
 
-// verifyGrowthCompletion waits for a growth operation to complete
+// verifyGrowthCompletion waits for a growth operation to complete, including:
+// 1. StorageSizing status reaching a stable state (Balanced or empty)
+// 2. PVC capacity actually reflecting the resize (CSI driver completion)
 func verifyGrowthCompletion(namespace, clusterName string) {
-	Eventually(func(g Gomega) {
-		cluster, err := clusterutils.Get(env.Ctx, env.Client, namespace, clusterName)
-		g.Expect(err).ToNot(HaveOccurred())
-		if cluster.Status.StorageSizing != nil && cluster.Status.StorageSizing.Data != nil {
-			state := cluster.Status.StorageSizing.Data.State
-			g.Expect(state).To(Or(Equal("Balanced"), Equal("")), "Waiting for growth to complete, current state: %s", state)
-		}
-	}).WithTimeout(time.Minute * 10).Should(Succeed())
+	By("waiting for storage sizing state to stabilize", func() {
+		Eventually(func(g Gomega) {
+			cluster, err := clusterutils.Get(env.Ctx, env.Client, namespace, clusterName)
+			g.Expect(err).ToNot(HaveOccurred())
+			if cluster.Status.StorageSizing != nil && cluster.Status.StorageSizing.Data != nil {
+				state := cluster.Status.StorageSizing.Data.State
+				g.Expect(state).To(Or(Equal("Balanced"), Equal("")),
+					"Waiting for growth to complete, current state: %s", state)
+			}
+		}).WithTimeout(time.Duration(testTimeouts[timeouts.AKSVolumeResize]) * time.Second).
+			WithPolling(time.Duration(testTimeouts[timeouts.StorageSizingPolling]) * time.Second).Should(Succeed())
+	})
+
+	By("waiting for PVC capacity to update (CSI resize completion)", func() {
+		waitForPVCCapacityUpdate(namespace, clusterName,
+			time.Duration(testTimeouts[timeouts.AKSVolumeResize])*time.Second)
+	})
 }
 
 // assertDataConsistency verifies that data is consistent across replicas
@@ -212,6 +223,59 @@ func assertDataConsistency(namespace, clusterName string) {
 	cluster, err := clusterutils.Get(env.Ctx, env.Client, namespace, clusterName)
 	Expect(err).ToNot(HaveOccurred())
 	Expect(cluster.Status.Phase).To(Equal(apiv1.PhaseHealthy))
+}
+
+// waitForPVCCapacityUpdate waits for PVC Status.Capacity to reflect the resize completion.
+// This is critical for Azure AKS CSI operations which can take 5-10 minutes.
+// The function verifies that all PVCs have capacity >= their request, indicating the
+// CSI driver has completed the filesystem resize.
+func waitForPVCCapacityUpdate(namespace, clusterName string, timeout time.Duration) {
+	GinkgoWriter.Printf("Waiting for PVC capacity update in cluster %s/%s (timeout: %v)\n",
+		namespace, clusterName, timeout)
+
+	Eventually(func(g Gomega) {
+		var pvcList corev1.PersistentVolumeClaimList
+		err := env.Client.List(env.Ctx, &pvcList,
+			ctrlclient.InNamespace(namespace),
+			ctrlclient.MatchingLabels{utils.ClusterLabelName: clusterName})
+		g.Expect(err).ToNot(HaveOccurred())
+		g.Expect(pvcList.Items).ToNot(BeEmpty(), "Expected at least one PVC for cluster")
+
+		for _, pvc := range pvcList.Items {
+			request := pvc.Spec.Resources.Requests[corev1.ResourceStorage]
+			capacity := pvc.Status.Capacity[corev1.ResourceStorage]
+
+			// Capacity should be >= request once resize is complete
+			g.Expect(capacity.Cmp(request)).To(BeNumerically(">=", 0),
+				"PVC %s: capacity (%s) should be >= request (%s)",
+				pvc.Name, capacity.String(), request.String())
+
+			GinkgoWriter.Printf("PVC %s: request=%s, capacity=%s (OK)\n",
+				pvc.Name, request.String(), capacity.String())
+		}
+	}).WithTimeout(timeout).WithPolling(time.Duration(testTimeouts[timeouts.StorageSizingPolling]) * time.Second).Should(Succeed())
+
+	GinkgoWriter.Printf("All PVCs have updated capacity\n")
+}
+
+// waitForStorageSizingAndPVCUpdate waits for both the operator to detect the growth need
+// AND for the CSI driver to complete the resize. This is the proper sequence for Azure AKS.
+func waitForStorageSizingAndPVCUpdate(namespace, clusterName string) {
+	By("waiting for storage sizing status to be populated", func() {
+		Eventually(func(g Gomega) {
+			cluster, err := clusterutils.Get(env.Ctx, env.Client, namespace, clusterName)
+			g.Expect(err).ToNot(HaveOccurred())
+			g.Expect(cluster.Status.StorageSizing).ToNot(BeNil(),
+				"Expected StorageSizing status to be populated")
+		}).WithTimeout(time.Duration(testTimeouts[timeouts.StorageSizingDetection]) * time.Second).
+			WithPolling(time.Duration(testTimeouts[timeouts.StorageSizingPolling]) * time.Second).Should(Succeed())
+	})
+
+	By("waiting for PVC capacity to update (CSI resize completion)", func() {
+		// Use the AKS volume resize timeout (15 min) for Azure CSI operations
+		waitForPVCCapacityUpdate(namespace, clusterName,
+			time.Duration(testTimeouts[timeouts.AKSVolumeResize])*time.Second)
+	})
 }
 
 var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamicStorage), func() {
@@ -318,7 +382,8 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 					g.Expect(pvcList.Items).To(HaveLen(1))
 					size := pvcList.Items[0].Spec.Resources.Requests[corev1.ResourceStorage]
 					g.Expect(size.String()).To(Equal("5Gi"))
-				}).WithTimeout(time.Minute).WithPolling(2 * time.Second).Should(Succeed())
+				}).WithTimeout(time.Duration(testTimeouts[timeouts.AKSVolumeResize]) * time.Second).
+				WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())
 			})
 
 			By("verifying dynamic sizing is detected as enabled", func() {
@@ -397,7 +462,8 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 					size := pvcList.Items[0].Spec.Resources.Requests[corev1.ResourceStorage]
 					g.Expect(size.Cmp(resource.MustParse("5Gi"))).To(BeNumerically(">", 0),
 						"PVC request should grow beyond initial 5Gi after sizing logic runs")
-				}).WithTimeout(time.Minute * 5).WithPolling(time.Second * 10).Should(Succeed())
+				}).WithTimeout(time.Duration(testTimeouts[timeouts.AKSVolumeResize]) * time.Second).
+				WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())
 			})
 		})
 
@@ -437,7 +503,8 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 						limit := resource.MustParse("6Gi")
 						g.Expect(size.Cmp(limit)).To(BeNumerically("<=", 0))
 					}
-				}).WithTimeout(time.Minute).WithPolling(2 * time.Second).Should(Succeed())
+				}).WithTimeout(time.Duration(testTimeouts[timeouts.AKSVolumeResize]) * time.Second).
+				WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())
 			})
 		})
 
@@ -492,7 +559,8 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 						sizes[size.String()] = true
 					}
 					g.Expect(sizes).To(HaveLen(1))
-				}).WithTimeout(time.Minute * 5).WithPolling(2 * time.Second).Should(Succeed())
+				}).WithTimeout(time.Duration(testTimeouts[timeouts.AKSVolumeResize]) * time.Second).
+				WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())
 			})
 		})
 	})
@@ -539,7 +607,8 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 						cluster.Status.StorageSizing.Data.State == "PendingGrowth" {
 						g.Expect(cluster.Status.StorageSizing.Data.NextMaintenanceWindow).ToNot(BeNil())
 					}
-				}).WithTimeout(time.Minute).Should(Succeed())
+				}).WithTimeout(time.Duration(testTimeouts[timeouts.AKSVolumeResize]) * time.Second).
+				WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())
 			})
 		})
 	})
@@ -614,7 +683,8 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 						cluster.Status.StorageSizing.Data.LastAction != nil {
 						g.Expect(cluster.Status.StorageSizing.Data.LastAction.Kind).To(Equal("EmergencyGrow"))
 					}
-				}).WithTimeout(time.Minute * 5).Should(Succeed())
+				}).WithTimeout(time.Duration(testTimeouts[timeouts.AKSVolumeResize]) * time.Second).
+				WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())
 			})
 		})
 	})
@@ -659,7 +729,8 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 						g.Expect(cluster.Status.StorageSizing.Data.Budget.AvailableForPlanned).To(BeNumerically(">=", 0))
 						g.Expect(cluster.Status.StorageSizing.Data.Budget.AvailableForEmergency).To(BeNumerically(">=", 0))
 					}
-				}).WithTimeout(time.Minute).Should(Succeed())
+				}).WithTimeout(time.Duration(testTimeouts[timeouts.AKSVolumeResize]) * time.Second).
+				WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())
 			})
 		})
 	})
@@ -729,7 +800,8 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 						g.Expect(err).ToNot(HaveOccurred())
 						g.Expect(cluster.Status.StorageSizing).ToNot(BeNil())
 						g.Expect(cluster.Status.StorageSizing.Data).ToNot(BeNil())
-					}).WithTimeout(time.Minute * 5).WithPolling(time.Second * 10).Should(Succeed())
+					}).WithTimeout(time.Duration(testTimeouts[timeouts.AKSVolumeResize]) * time.Second).
+				WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())
 				})
 
 				By("restarting operator pod during growth operation", func() {
@@ -746,7 +818,8 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 						cluster, err := clusterutils.Get(env.Ctx, env.Client, namespace, clusterName)
 						g.Expect(err).ToNot(HaveOccurred())
 						g.Expect(cluster.Status.StorageSizing).ToNot(BeNil())
-					}).WithTimeout(time.Minute * 2).Should(Succeed())
+					}).WithTimeout(time.Duration(testTimeouts[timeouts.AKSVolumeResize]) * time.Second).
+				WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())
 				})
 
 				By("verifying data integrity after operator restart", func() {
@@ -828,7 +901,15 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 						cluster, err := clusterutils.Get(env.Ctx, env.Client, namespace, clusterName)
 						g.Expect(err).ToNot(HaveOccurred())
 						g.Expect(cluster.Status.StorageSizing).ToNot(BeNil())
-					}).WithTimeout(time.Minute * 5).WithPolling(time.Second * 10).Should(Succeed())
+					}).WithTimeout(time.Duration(testTimeouts[timeouts.StorageSizingDetection]) * time.Second).
+					WithPolling(time.Duration(testTimeouts[timeouts.StorageSizingPolling]) * time.Second).Should(Succeed())
+				})
+
+				By("waiting for PVC capacity to update (CSI resize completion)", func() {
+					// CRITICAL: Wait for CSI driver to complete the resize before disrupting the pod.
+					// Azure AKS CSI operations can take 5-10 minutes.
+					waitForPVCCapacityUpdate(namespace, clusterName,
+						time.Duration(testTimeouts[timeouts.AKSVolumeResize])*time.Second)
 				})
 
 				By("deleting primary pod to trigger restart", func() {
@@ -852,7 +933,8 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 						cluster, err := clusterutils.Get(env.Ctx, env.Client, namespace, clusterName)
 						g.Expect(err).ToNot(HaveOccurred())
 						g.Expect(cluster.Status.StorageSizing).ToNot(BeNil())
-					}).WithTimeout(time.Minute * 2).Should(Succeed())
+					}).WithTimeout(time.Duration(testTimeouts[timeouts.AKSVolumeResize]) * time.Second).
+				WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())
 				})
 			})
 		})
@@ -915,7 +997,16 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 					cluster, err := clusterutils.Get(env.Ctx, env.Client, namespace, clusterName)
 					g.Expect(err).ToNot(HaveOccurred())
 					g.Expect(cluster.Status.StorageSizing).ToNot(BeNil())
-				}).WithTimeout(time.Minute * 5).WithPolling(time.Second * 10).Should(Succeed())
+				}).WithTimeout(time.Duration(testTimeouts[timeouts.StorageSizingDetection]) * time.Second).
+					WithPolling(time.Duration(testTimeouts[timeouts.StorageSizingPolling]) * time.Second).Should(Succeed())
+			})
+
+			By("waiting for PVC capacity to update (CSI resize completion)", func() {
+				// CRITICAL: Wait for CSI driver to complete the resize before triggering switchover.
+				// Azure AKS CSI operations can take 5-10 minutes. If we switchover while the
+				// CSI driver is still resizing, the operation may fail or the cluster may not stabilize.
+				waitForPVCCapacityUpdate(namespace, clusterName,
+					time.Duration(testTimeouts[timeouts.AKSVolumeResize])*time.Second)
 			})
 
 			By("triggering switchover", func() {
@@ -965,7 +1056,8 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 					cluster, err := clusterutils.Get(env.Ctx, env.Client, namespace, clusterName)
 					g.Expect(err).ToNot(HaveOccurred())
 					g.Expect(cluster.Status.CurrentPrimary).ToNot(Equal(originalPrimary))
-				}).WithTimeout(time.Minute * 5).Should(Succeed())
+				}).WithTimeout(time.Duration(testTimeouts[timeouts.AKSVolumeResize]) * time.Second).
+				WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())
 			})
 
 			By("verifying data integrity after switchover", func() {
@@ -1047,7 +1139,8 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 					cluster, err := clusterutils.Get(env.Ctx, env.Client, namespace, clusterName)
 					g.Expect(err).ToNot(HaveOccurred())
 					g.Expect(cluster.Status.StorageSizing).ToNot(BeNil())
-				}).WithTimeout(time.Minute * 5).WithPolling(time.Second * 10).Should(Succeed())
+				}).WithTimeout(time.Duration(testTimeouts[timeouts.AKSVolumeResize]) * time.Second).
+				WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())
 			})
 
 			By("mutating spec: increasing limit", func() {
@@ -1065,7 +1158,8 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 					cluster, err := clusterutils.Get(env.Ctx, env.Client, namespace, clusterName)
 					g.Expect(err).ToNot(HaveOccurred())
 					g.Expect(cluster.Spec.StorageConfiguration.Limit).To(Equal("25Gi"))
-				}).WithTimeout(time.Minute).Should(Succeed())
+				}).WithTimeout(time.Duration(testTimeouts[timeouts.AKSVolumeResize]) * time.Second).
+				WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())
 			})
 
 			By("mutating spec: adjusting targetBuffer", func() {
@@ -1158,7 +1252,8 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 						cluster, err := clusterutils.Get(env.Ctx, env.Client, namespace, clusterName)
 						g.Expect(err).ToNot(HaveOccurred())
 						g.Expect(cluster.Status.StorageSizing).ToNot(BeNil())
-					}).WithTimeout(time.Minute * 5).WithPolling(time.Second * 10).Should(Succeed())
+					}).WithTimeout(time.Duration(testTimeouts[timeouts.AKSVolumeResize]) * time.Second).
+				WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())
 				})
 
 				By("draining node containing primary", func() {
@@ -1184,7 +1279,8 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 						cluster, err := clusterutils.Get(env.Ctx, env.Client, namespace, clusterName)
 						g.Expect(err).ToNot(HaveOccurred())
 						g.Expect(cluster.Status.StorageSizing).ToNot(BeNil())
-					}).WithTimeout(time.Minute * 2).Should(Succeed())
+					}).WithTimeout(time.Duration(testTimeouts[timeouts.AKSVolumeResize]) * time.Second).
+				WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())
 				})
 
 				By("verifying data integrity after drain", func() {
@@ -1265,7 +1361,8 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 					cluster, err := clusterutils.Get(env.Ctx, env.Client, namespace, clusterName)
 					g.Expect(err).ToNot(HaveOccurred())
 					g.Expect(cluster.Status.StorageSizing).ToNot(BeNil())
-				}).WithTimeout(time.Minute * 5).WithPolling(time.Second * 10).Should(Succeed())
+				}).WithTimeout(time.Duration(testTimeouts[timeouts.AKSVolumeResize]) * time.Second).
+				WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())
 			})
 
 			// Note: Full backup test requires object storage (MinIO/Azure).
@@ -1279,7 +1376,8 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 					cluster, err := clusterutils.Get(env.Ctx, env.Client, namespace, clusterName)
 					g.Expect(err).ToNot(HaveOccurred())
 					g.Expect(cluster.Status.StorageSizing).ToNot(BeNil())
-				}).WithTimeout(time.Minute * 2).Should(Succeed())
+				}).WithTimeout(time.Duration(testTimeouts[timeouts.AKSVolumeResize]) * time.Second).
+				WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())
 			})
 
 			By("verifying data integrity", func() {
@@ -1356,7 +1454,8 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 					g.Expect(err).ToNot(HaveOccurred())
 					g.Expect(cluster.Status.StorageSizing).ToNot(BeNil())
 					g.Expect(cluster.Status.StorageSizing.Data).ToNot(BeNil())
-				}).WithTimeout(time.Minute * 5).WithPolling(time.Second * 10).Should(Succeed())
+				}).WithTimeout(time.Duration(testTimeouts[timeouts.AKSVolumeResize]) * time.Second).
+				WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())
 			})
 
 			// The effective size may or may not be set depending on whether growth was triggered.
@@ -1417,7 +1516,8 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 							fmt.Sprintf("PVC %s size %s should be >= effective size %s",
 								pvc.Name, size.String(), effectiveSize))
 					}
-				}).WithTimeout(time.Minute * 5).Should(Succeed())
+				}).WithTimeout(time.Duration(testTimeouts[timeouts.AKSVolumeResize]) * time.Second).
+				WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())
 			})
 
 			By("verifying data integrity on new replica", func() {
@@ -1471,7 +1571,8 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 						// Budget reset time should be set
 						g.Expect(budget.BudgetResetsAt.IsZero()).To(BeFalse())
 					}
-				}).WithTimeout(time.Minute * 2).Should(Succeed())
+				}).WithTimeout(time.Duration(testTimeouts[timeouts.AKSVolumeResize]) * time.Second).
+				WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())
 			})
 
 			By("verifying budget status is exposed in cluster status", func() {
@@ -1481,7 +1582,8 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 					g.Expect(cluster.Status.StorageSizing).ToNot(BeNil())
 					g.Expect(cluster.Status.StorageSizing.Data).ToNot(BeNil())
 					g.Expect(cluster.Status.StorageSizing.Data.Budget).ToNot(BeNil())
-				}).WithTimeout(time.Minute).Should(Succeed())
+				}).WithTimeout(time.Duration(testTimeouts[timeouts.AKSVolumeResize]) * time.Second).
+				WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())
 			})
 		})
 	})
@@ -1546,7 +1648,15 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 					cluster, err := clusterutils.Get(env.Ctx, env.Client, namespace, clusterName)
 					g.Expect(err).ToNot(HaveOccurred())
 					g.Expect(cluster.Status.StorageSizing).ToNot(BeNil())
-				}).WithTimeout(time.Minute * 5).WithPolling(time.Second * 10).Should(Succeed())
+				}).WithTimeout(time.Duration(testTimeouts[timeouts.StorageSizingDetection]) * time.Second).
+					WithPolling(time.Duration(testTimeouts[timeouts.StorageSizingPolling]) * time.Second).Should(Succeed())
+			})
+
+			By("waiting for PVC capacity to update (CSI resize completion)", func() {
+				// For T1 topology (single instance), we must wait for the CSI resize to complete
+				// before verifying data integrity, as the instance may be affected by the resize.
+				waitForPVCCapacityUpdate(namespace, clusterName,
+					time.Duration(testTimeouts[timeouts.AKSVolumeResize])*time.Second)
 			})
 
 			By("verifying data integrity", func() {
@@ -1610,7 +1720,15 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 					cluster, err := clusterutils.Get(env.Ctx, env.Client, namespace, clusterName)
 					g.Expect(err).ToNot(HaveOccurred())
 					g.Expect(cluster.Status.StorageSizing).ToNot(BeNil())
-				}).WithTimeout(time.Minute * 5).WithPolling(time.Second * 10).Should(Succeed())
+				}).WithTimeout(time.Duration(testTimeouts[timeouts.StorageSizingDetection]) * time.Second).
+					WithPolling(time.Duration(testTimeouts[timeouts.StorageSizingPolling]) * time.Second).Should(Succeed())
+			})
+
+			By("waiting for PVC capacity to update (CSI resize completion)", func() {
+				// CRITICAL: Wait for CSI driver to complete the resize before switchover.
+				// Azure AKS CSI operations can take 5-10 minutes.
+				waitForPVCCapacityUpdate(namespace, clusterName,
+					time.Duration(testTimeouts[timeouts.AKSVolumeResize])*time.Second)
 			})
 
 			By("verifying promotion/replica replacement ordering is safe", func() {
@@ -1706,7 +1824,15 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 					cluster, err := clusterutils.Get(env.Ctx, env.Client, namespace, clusterName)
 					g.Expect(err).ToNot(HaveOccurred())
 					g.Expect(cluster.Status.StorageSizing).ToNot(BeNil())
-				}).WithTimeout(time.Minute * 5).WithPolling(time.Second * 10).Should(Succeed())
+				}).WithTimeout(time.Duration(testTimeouts[timeouts.StorageSizingDetection]) * time.Second).
+					WithPolling(time.Duration(testTimeouts[timeouts.StorageSizingPolling]) * time.Second).Should(Succeed())
+			})
+
+			By("waiting for PVC capacity to update (CSI resize completion)", func() {
+				// CRITICAL: Wait for CSI driver to complete the resize before checking PVC consistency.
+				// Azure AKS CSI operations can take 5-10 minutes.
+				waitForPVCCapacityUpdate(namespace, clusterName,
+					time.Duration(testTimeouts[timeouts.AKSVolumeResize])*time.Second)
 			})
 
 			By("verifying data integrity", func() {
@@ -1729,7 +1855,8 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 					state := cluster.Status.StorageSizing.Data.State
 					g.Expect(state).ToNot(Equal("Resizing"),
 						"Waiting for storage sizing to complete resizing")
-				}).WithTimeout(time.Minute * 2).WithPolling(time.Second * 5).Should(Succeed())
+				}).WithTimeout(time.Duration(testTimeouts[timeouts.AKSVolumeResize]) * time.Second).
+				WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())
 
 				podList, err := clusterutils.ListPods(env.Ctx, env.Client, namespace, clusterName)
 				Expect(err).ToNot(HaveOccurred())
@@ -1756,7 +1883,8 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 					cluster, err := clusterutils.Get(env.Ctx, env.Client, namespace, clusterName)
 					g.Expect(err).ToNot(HaveOccurred())
 					g.Expect(cluster.Status.ReadyInstances).To(Equal(3))
-				}).WithTimeout(time.Minute * 2).Should(Succeed())
+				}).WithTimeout(time.Duration(testTimeouts[timeouts.AKSVolumeResize]) * time.Second).
+				WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())
 			})
 
 			By("verifying all PVCs are consistent", func() {

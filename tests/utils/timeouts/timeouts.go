@@ -56,6 +56,21 @@ const (
 	Short                     Timeout = "short"
 	ManagedServices           Timeout = "managedServices"
 	DiskFill                  Timeout = "diskFill"
+
+	// AKS-specific timeouts for Azure CSI operations which can be slow
+	AKSVolumeAttach       Timeout = "aksVolumeAttach"
+	AKSVolumeDetach       Timeout = "aksVolumeDetach"
+	AKSVolumeResize       Timeout = "aksVolumeResize"
+	AKSPodReschedule      Timeout = "aksPodReschedule"
+	AKSStorageProvisioned Timeout = "aksStorageProvisioned"
+
+	// Standard polling interval for AKS operations (30 seconds)
+	AKSPollingInterval Timeout = "aksPollingInterval"
+
+	// StorageSizingDetection is the time to wait for the operator to detect a storage sizing need
+	StorageSizingDetection Timeout = "storageSizingDetection"
+	// StorageSizingPolling is the polling interval for storage sizing status checks
+	StorageSizingPolling Timeout = "storageSizingPolling"
 )
 
 // DefaultTestTimeouts contains the default timeout in seconds for various events
@@ -64,7 +79,7 @@ var DefaultTestTimeouts = map[Timeout]int{
 	NamespaceCreation:         30,
 	ClusterIsReady:            600,
 	ClusterIsReadyQuick:       300,
-	ClusterIsReadySlow:        800,
+	ClusterIsReadySlow:        900, // Increased from 800s to 15 min for AKS
 	NewPrimaryAfterSwitchover: 45,
 	NewPrimaryAfterFailover:   30,
 	NewTargetOnFailover:       120,
@@ -79,6 +94,18 @@ var DefaultTestTimeouts = map[Timeout]int{
 	Short:                     5,
 	ManagedServices:           30,
 	DiskFill:                  600,
+
+	// AKS-specific timeouts - Azure disk CSI operations are slower than other providers
+	AKSVolumeAttach:       600, // 10 min - Azure disk attach can take 5-8 min
+	AKSVolumeDetach:       600, // 10 min - Azure disk detach can be slow
+	AKSVolumeResize:       900, // 15 min - Online resize involves CSI + filesystem
+	AKSPodReschedule:      900, // 15 min - Pod reschedule with volume reattach
+	AKSStorageProvisioned: 600, // 10 min - Initial PVC provisioning on AKS
+	AKSPollingInterval:    30,  // 30 sec - Standard polling for AKS operations
+
+	// Storage sizing timeouts
+	StorageSizingDetection: 300, // 5 min - Time for operator to detect sizing need
+	StorageSizingPolling:   10,  // 10 sec - Polling interval for sizing status checks
 }
 
 // Timeouts returns the map of timeouts, where each event gets the timeout specified
