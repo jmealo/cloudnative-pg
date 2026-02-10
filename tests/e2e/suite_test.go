@@ -78,6 +78,14 @@ var _ = SynchronizedBeforeSuite(func() []byte {
 	env, err = environment.NewTestingEnvironment()
 	Expect(err).ShouldNot(HaveOccurred())
 
+	// Detect cluster capabilities (VolumeSnapshot, etc.)
+	err = cnpgUtils.DetectVolumeSnapshotExist(env.Interface.Discovery())
+	if err != nil {
+		GinkgoWriter.Printf("Warning: Failed to detect VolumeSnapshot support: %v\n", err)
+	} else {
+		GinkgoWriter.Printf("VolumeSnapshot support detected: %v\n", cnpgUtils.HaveVolumeSnapshot())
+	}
+
 	// Start stern to write the logs of every pod we are interested in. Since we don't have a way to have a selector
 	// matching both the operator's and the clusters' pods, we need to start stern twice.
 	sternClustersCtx, sternClusterCancel := context.WithCancel(env.Ctx)
