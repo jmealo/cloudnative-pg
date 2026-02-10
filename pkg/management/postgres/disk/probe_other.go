@@ -30,6 +30,7 @@ var ErrNotSupported = errors.New("disk probing is only supported on Linux")
 
 // Probe probes a filesystem mount point using statfs and returns VolumeStats.
 // On non-Linux platforms, this is a stub that returns an error.
+// This stub exists only to allow cross-compilation during development.
 type Probe struct{}
 
 // NewProbe creates a new Probe. On non-Linux platforms, this returns a stub.

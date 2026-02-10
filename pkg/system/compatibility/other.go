@@ -1,4 +1,4 @@
-//go:build windows
+//go:build !linux
 
 /*
 Copyright © contributors to CloudNativePG, established as
@@ -19,10 +19,15 @@ limitations under the License.
 SPDX-License-Identifier: Apache-2.0
 */
 
-// Package compatibility provides a layer to cross-compile with other OS than Linux
 package compatibility
 
-// SetCoredumpFilter for Windows compatibility
+import "errors"
+
+// ErrNotSupported is returned when SetCoredumpFilter is called on non-Linux platforms.
+var ErrNotSupported = errors.New("coredump filter is only supported on Linux")
+
+// SetCoredumpFilter returns an error on non-Linux platforms.
+// This stub exists only to allow cross-compilation of the kubectl plugin.
 func SetCoredumpFilter(_ string) error {
-	return nil
+	return ErrNotSupported
 }

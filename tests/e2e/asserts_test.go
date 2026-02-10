@@ -686,7 +686,7 @@ func AssertLargeObjectValue(namespace, clusterName string, oid int, data string)
 }
 
 // AssertClusterStandbysAreStreaming verifies that all the standbys of a cluster have a wal-receiver running.
-func AssertClusterStandbysAreStreaming(namespace string, clusterName string, timeout int32) {
+func AssertClusterStandbysAreStreaming(namespace string, clusterName string, _ int32) {
 	query := "SELECT count(*) FROM pg_catalog.pg_stat_wal_receiver"
 	Eventually(func() error {
 		standbyPods, err := clusterutils.GetReplicas(env.Ctx, env.Client, namespace, clusterName)

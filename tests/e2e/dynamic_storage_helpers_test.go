@@ -246,8 +246,10 @@ func assertClusterStandbysAreStreaming(namespace, clusterName string, timeoutSec
 	})
 }
 
+const walFillSizeMB = 1800
+
 // fillWALToTriggerResize fills WAL volume to trigger auto-resize
-func fillWALToTriggerResize(namespace, podName string, fillMB int) {
+func fillWALToTriggerResize(namespace, podName string) {
 	pod := &corev1.Pod{}
 	err := env.Client.Get(env.Ctx, types.NamespacedName{
 		Namespace: namespace,
@@ -259,7 +261,7 @@ func fillWALToTriggerResize(namespace, podName string, fillMB int) {
 	_, _, err = env.EventuallyExecCommand(
 		env.Ctx, *pod, specs.PostgresContainerName, &commandTimeout,
 		"sh", "-c",
-		fmt.Sprintf("dd if=/dev/zero of=/var/lib/postgresql/wal/pg_wal/fill_file bs=1M count=%d || true", fillMB),
+		fmt.Sprintf("dd if=/dev/zero of=/var/lib/postgresql/wal/pg_wal/fill_file bs=1M count=%d || true", walFillSizeMB),
 	)
 	Expect(err).ToNot(HaveOccurred())
 }
@@ -286,8 +288,10 @@ func cleanupWALFillFiles(namespace, podName string) {
 	}
 }
 
+const walResizeTimeout = 25 * time.Minute
+
 // assertWALPVCResized verifies WAL PVC has been resized
-func assertWALPVCResized(namespace, clusterName string, originalSize resource.Quantity, timeout time.Duration) {
+func assertWALPVCResized(namespace, clusterName string, originalSize resource.Quantity) {
 	Eventually(func(g Gomega) {
 		pvcList, err := storage.GetPVCList(env.Ctx, env.Client, namespace)
 		g.Expect(err).ToNot(HaveOccurred())
@@ -304,5 +308,5 @@ func assertWALPVCResized(namespace, clusterName string, originalSize resource.Qu
 			}
 		}
 		g.Expect(resizedCount).To(BeNumerically(">", 0), "At least one WAL PVC should be resized")
-	}, timeout, helperPVCResizeInterval).Should(Succeed())
+	}, walResizeTimeout, helperPVCResizeInterval).Should(Succeed())
 }

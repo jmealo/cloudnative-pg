@@ -67,7 +67,7 @@ var _ = Describe("Dynamic Storage WAL Volume", Serial, Label(tests.LabelDisrupti
 			originalWALSize := resource.MustParse("2Gi")
 
 			By("filling the WAL volume to trigger auto-resize", func() {
-				fillWALToTriggerResize(namespace, primaryPodName, 1800)
+				fillWALToTriggerResize(namespace, primaryPodName)
 			})
 
 			By("waiting for WAL resize to be triggered", func() {
@@ -80,7 +80,7 @@ var _ = Describe("Dynamic Storage WAL Volume", Serial, Label(tests.LabelDisrupti
 			})
 
 			By("waiting for WAL PVC resize to complete", func() {
-				assertWALPVCResized(namespace, clusterName, originalWALSize, 25*time.Minute)
+				assertWALPVCResized(namespace, clusterName, originalWALSize)
 			})
 
 			By("verifying cluster is healthy", func() {
@@ -118,7 +118,7 @@ var _ = Describe("Dynamic Storage WAL Volume", Serial, Label(tests.LabelDisrupti
 			originalWALSize := resource.MustParse("2Gi")
 
 			By("filling the WAL volume to trigger auto-resize", func() {
-				fillWALToTriggerResize(namespace, primaryPodName, 1800)
+				fillWALToTriggerResize(namespace, primaryPodName)
 			})
 
 			By("waiting for WAL resize to be triggered", func() {
@@ -141,7 +141,7 @@ var _ = Describe("Dynamic Storage WAL Volume", Serial, Label(tests.LabelDisrupti
 			})
 
 			By("waiting for WAL PVC resize to complete", func() {
-				assertWALPVCResized(namespace, clusterName, originalWALSize, 25*time.Minute)
+				assertWALPVCResized(namespace, clusterName, originalWALSize)
 			})
 
 			By("verifying cluster is healthy", func() {
@@ -183,7 +183,7 @@ var _ = Describe("Dynamic Storage WAL Volume", Serial, Label(tests.LabelDisrupti
 
 			By("filling both data and WAL volumes to trigger auto-resize", func() {
 				fillDiskToTriggerResize(namespace, primaryPodName, 1800)
-				fillWALToTriggerResize(namespace, primaryPodName, 1800)
+				fillWALToTriggerResize(namespace, primaryPodName)
 			})
 
 			By("waiting for resize to be triggered", func() {
@@ -192,7 +192,7 @@ var _ = Describe("Dynamic Storage WAL Volume", Serial, Label(tests.LabelDisrupti
 
 			By("waiting for both PVC resizes to complete", func() {
 				assertPVCResized(namespace, clusterName, originalDataSize, 25*time.Minute)
-				assertWALPVCResized(namespace, clusterName, originalWALSize, 25*time.Minute)
+				assertWALPVCResized(namespace, clusterName, originalWALSize)
 			})
 
 			By("verifying cluster is healthy", func() {
@@ -231,7 +231,7 @@ var _ = Describe("Dynamic Storage WAL Volume", Serial, Label(tests.LabelDisrupti
 			originalWALSize := resource.MustParse("2Gi")
 
 			By("filling the WAL volume", func() {
-				fillWALToTriggerResize(namespace, primaryPodName, 1800)
+				fillWALToTriggerResize(namespace, primaryPodName)
 			})
 
 			By("waiting for resize trigger or block based on archive health", func() {
@@ -264,7 +264,7 @@ var _ = Describe("Dynamic Storage WAL Volume", Serial, Label(tests.LabelDisrupti
 
 			By("waiting for WAL PVC resize if archive allows", func() {
 				// Attempt to verify resize completed - may skip if blocked by archive policy
-				assertWALPVCResized(namespace, clusterName, originalWALSize, 25*time.Minute)
+				assertWALPVCResized(namespace, clusterName, originalWALSize)
 			})
 		})
 	})
