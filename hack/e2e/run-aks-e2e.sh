@@ -524,7 +524,7 @@ info "=== Pre-test Cleanup ==="
 # These leave behind PVCs with Azure Disks attached, which saturate
 # the attach queue and cause timeouts for new tests.
 # Clean up: dynamic-storage-* (test namespaces) and minio (object store for backup tests)
-ORPHAN_NS=$(kubectl get namespaces -o name 2>/dev/null | grep -E 'dynamic-storage-|^namespace/${MINIO_NAMESPACE}$' | cut -d/ -f2 || true)
+ORPHAN_NS=$(kubectl get namespaces -o name 2>/dev/null | grep -E "dynamic-storage-|^namespace/${MINIO_NAMESPACE}\$" | cut -d/ -f2 || true)
 if [ -n "${ORPHAN_NS}" ]; then
   warn "Found orphaned namespaces from prior runs:"
   echo "${ORPHAN_NS}"
