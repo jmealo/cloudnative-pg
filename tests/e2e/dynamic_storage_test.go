@@ -217,7 +217,11 @@ func fillTablespaceDiskIncrementally(
 		}
 
 		time.Sleep(2 * time.Second)
-		currentUsage, _ = getTablespaceDiskUsagePercent(pod, tbsName)
+		currentUsage, err = getTablespaceDiskUsagePercent(pod, tbsName)
+		if err != nil {
+			return currentUsage, fmt.Errorf("failed to get tablespace usage after batch %d: %w", batchNum, err)
+		}
+		GinkgoWriter.Printf("After tablespace batch %d: disk usage is %d%%\n", batchNum, currentUsage)
 	}
 
 	return currentUsage, nil
@@ -792,8 +796,9 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 			})
 
 			By("filling tablespace disk to trigger growth", func() {
-				// Use smaller batches to avoid abrupt disk exhaustion on small tablespace PVCs.
-				finalUsage, err := fillTablespaceDiskIncrementally(primaryPod, tbsName, 82, 88, 100000, namespace, clusterName)
+				// Push clearly beyond the 80% trigger threshold while retaining headroom.
+				// 86/92 reduces threshold-edge behavior where no action is emitted at exactly ~82%.
+				finalUsage, err := fillTablespaceDiskIncrementally(primaryPod, tbsName, 86, 92, 100000, namespace, clusterName)
 				if err != nil {
 					GinkgoWriter.Printf("Tablespace disk fill ended with error: %v\n", err)
 				}
@@ -802,13 +807,44 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 				GinkgoWriter.Printf("Final tablespace usage after fill: %d%%\n", finalUsage)
 			})
 
+			By("verifying tablespace sizing target is computed before PVC request update", func() {
+				Eventually(func(g Gomega) {
+					cluster, err := clusterutils.Get(env.Ctx, env.Client, namespace, clusterName)
+					g.Expect(err).ToNot(HaveOccurred())
+					g.Expect(cluster.Status.StorageSizing).ToNot(BeNil())
+					g.Expect(cluster.Status.StorageSizing.Tablespaces).ToNot(BeNil())
+
+					tbsStatus := cluster.Status.StorageSizing.Tablespaces[tbsName]
+					g.Expect(tbsStatus).ToNot(BeNil(), "tablespace status should exist for %s", tbsName)
+					g.Expect(tbsStatus.State).To(Or(
+						Equal("NeedsGrow"),
+						Equal("PendingGrowth"),
+						Equal("Resizing"),
+						Equal("Balanced"),
+						Equal("AtLimit"),
+						Equal("Emergency"),
+					), "tablespace state should reflect active sizing lifecycle")
+					g.Expect(tbsStatus.TargetSize).ToNot(BeEmpty(),
+						"tablespace target size should be computed after threshold crossing")
+
+					targetSize, parseErr := resource.ParseQuantity(tbsStatus.TargetSize)
+					g.Expect(parseErr).ToNot(HaveOccurred())
+					g.Expect(targetSize.Cmp(initialTablespaceRequest)).To(BeNumerically(">", 0),
+						"tablespace target size should exceed initial request %s", initialTablespaceRequest.String())
+				}).WithTimeout(time.Duration(testTimeouts[timeouts.StorageSizingDetection]) * time.Second).
+					WithPolling(time.Duration(testTimeouts[timeouts.StorageSizingPolling]) * time.Second).Should(Succeed())
+			})
+
 			By("verifying tablespace storage sizing status is updated", func() {
 				Eventually(func(g Gomega) {
 					cluster, err := clusterutils.Get(env.Ctx, env.Client, namespace, clusterName)
 					g.Expect(err).ToNot(HaveOccurred())
 					g.Expect(cluster.Status.StorageSizing).ToNot(BeNil())
 					g.Expect(cluster.Status.StorageSizing.Tablespaces).ToNot(BeNil())
-					g.Expect(cluster.Status.StorageSizing.Tablespaces[tbsName]).ToNot(BeNil())
+					tbsStatus := cluster.Status.StorageSizing.Tablespaces[tbsName]
+					g.Expect(tbsStatus).ToNot(BeNil())
+					g.Expect(tbsStatus.State).ToNot(Equal("WaitingForDiskStatus"),
+						"tablespace sizing should not be blocked on missing disk status")
 
 					var pvcList corev1.PersistentVolumeClaimList
 					err = env.Client.List(env.Ctx, &pvcList,
@@ -1224,6 +1260,10 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 					// Azure AKS CSI operations can take 5-10 minutes.
 					waitForPVCCapacityUpdate(namespace, clusterName,
 						time.Duration(testTimeouts[timeouts.AKSVolumeResize])*time.Second)
+				})
+
+				By("verifying standbys are streaming before restarting primary", func() {
+					AssertClusterStandbysAreStreaming(namespace, clusterName, int32(testTimeouts[timeouts.AKSVolumeAttach]))
 				})
 
 				By("deleting primary pod to trigger restart", func() {
@@ -2025,10 +2065,10 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 				primaryPod, err := clusterutils.GetPrimary(env.Ctx, env.Client, namespace, clusterName)
 				Expect(err).ToNot(HaveOccurred())
 
-				// Use lower disk fill (80-83%) for tests with switchover operations
+				// Use lower disk fill (78-80%) for tests with switchover operations
 				// to ensure WAL files are retained for pg_rewind after the switchover.
 				// Higher fill levels (85%+) cause aggressive WAL recycling which breaks pg_rewind.
-				finalUsage, fillErr := fillDiskIncrementally(primaryPod, 80, 83, 500000)
+				finalUsage, fillErr := fillDiskIncrementally(primaryPod, 78, 80, 500000)
 				if fillErr != nil {
 					GinkgoWriter.Printf("Disk fill ended with error (may be expected): %v\n", fillErr)
 				}
@@ -2053,6 +2093,10 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 					time.Duration(testTimeouts[timeouts.AKSVolumeResize])*time.Second)
 			})
 
+			By("verifying replica is streaming before switchover", func() {
+				AssertClusterStandbysAreStreaming(namespace, clusterName, int32(testTimeouts[timeouts.AKSVolumeAttach]))
+			})
+
 			var previousPrimary, promotedPrimary string
 			By("verifying promotion/replica replacement ordering is safe", func() {
 				previousPrimary, promotedPrimary = triggerSwitchoverAndWait(namespace, clusterName)
@@ -2068,6 +2112,10 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 					g.Expect(cluster.Status.TargetPrimary).To(Equal(promotedPrimary))
 				}).WithTimeout(time.Duration(testTimeouts[timeouts.AKSVolumeResize]) * time.Second).
 					WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())
+			})
+
+			By("verifying replica catches up and streams after switchover", func() {
+				AssertClusterStandbysAreStreaming(namespace, clusterName, int32(testTimeouts[timeouts.AKSVolumeAttach]))
 			})
 
 			By("verifying data integrity after switchover", func() {

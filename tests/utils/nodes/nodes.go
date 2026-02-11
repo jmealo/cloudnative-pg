@@ -50,6 +50,7 @@ func DrainPrimary(
 		pod, err := clusterutils.GetPrimary(ctx, crudClient, namespace, clusterName)
 		Expect(err).ToNot(HaveOccurred())
 		primaryNode = pod.Spec.NodeName
+		Expect(primaryNode).ToNot(BeEmpty(), "primary pod is not scheduled to any node")
 
 		// Gather the pods running on this node
 		podList, err := clusterutils.ListPods(ctx, crudClient, namespace, clusterName)
@@ -62,12 +63,28 @@ func DrainPrimary(
 
 		// Draining the primary pod's node
 		var stdout, stderr string
+		drainedNode := primaryNode
 		Eventually(func() error {
 			cmd := fmt.Sprintf("kubectl drain %v --ignore-daemonsets --delete-emptydir-data --force --timeout=%ds",
-				primaryNode, timeoutSeconds)
+				drainedNode, timeoutSeconds)
 			stdout, stderr, err = run.Unchecked(cmd)
+			if err == nil {
+				return nil
+			}
+
+			if isNodeNotFound(err, drainedNode) {
+				currentPrimary, getErr := clusterutils.GetPrimary(ctx, crudClient, namespace, clusterName)
+				if getErr == nil && currentPrimary.Spec.NodeName != "" && currentPrimary.Spec.NodeName != drainedNode {
+					GinkgoWriter.Printf(
+						"Drain target node %s no longer exists and primary moved to %s; treating drain as converged\n",
+						drainedNode,
+						currentPrimary.Spec.NodeName,
+					)
+					return nil
+				}
+			}
 			return err
-		}, timeoutSeconds).ShouldNot(HaveOccurred(), fmt.Sprintf("stdout: %s, stderr: %s", stdout, stderr))
+		}, timeoutSeconds, 10).ShouldNot(HaveOccurred(), fmt.Sprintf("stdout: %s, stderr: %s", stdout, stderr))
 	})
 	By("ensuring no cluster pod is still running on the drained node", func() {
 		Eventually(func() ([]string, error) {
@@ -81,6 +98,15 @@ func DrainPrimary(
 	})
 
 	return podNames
+}
+
+func isNodeNotFound(err error, nodeName string) bool {
+	if err == nil {
+		return false
+	}
+	message := err.Error()
+	return strings.Contains(message, "Error from server (NotFound)") &&
+		strings.Contains(message, fmt.Sprintf("nodes %q not found", nodeName))
 }
 
 // UncordonAll executes the 'kubectl uncordon' command on each node of the list
