@@ -607,7 +607,7 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 				// - targetUsagePercent=85: stop when we hit 85% (past the 80% trigger point)
 				// - maxUsagePercent=92: safety limit to prevent accidental disk full crash
 				// - batchRows=500000: ~500MB per batch, allows reconciler check between batches
-				finalUsage, err := fillDiskIncrementally(primaryPod, 85, 92, 500000)
+				finalUsage, err := fillDiskIncrementally(primaryPod, 85, 87, 500000)
 				// Error is acceptable if we reached a high enough usage to trigger resize
 				if err != nil {
 					GinkgoWriter.Printf("Disk fill ended with error (may be expected): %v\n", err)
@@ -671,7 +671,7 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 			By("filling disk to trigger growth toward limit", func() {
 				primaryPod, getErr := clusterutils.GetPrimary(env.Ctx, env.Client, namespace, clusterName)
 				Expect(getErr).ToNot(HaveOccurred())
-				finalUsage, fillErr := fillDiskIncrementally(primaryPod, 85, 92, 500000)
+				finalUsage, fillErr := fillDiskIncrementally(primaryPod, 85, 87, 500000)
 				if fillErr != nil {
 					GinkgoWriter.Printf("Disk fill ended with error (may be expected): %v\n", fillErr)
 				}
@@ -856,7 +856,7 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 			By("filling disk while maintenance window is closed", func() {
 				primaryPod, getErr := clusterutils.GetPrimary(env.Ctx, env.Client, namespace, clusterName)
 				Expect(getErr).ToNot(HaveOccurred())
-				finalUsage, fillErr := fillDiskIncrementally(primaryPod, 85, 92, 500000)
+				finalUsage, fillErr := fillDiskIncrementally(primaryPod, 85, 87, 500000)
 				if fillErr != nil {
 					GinkgoWriter.Printf("Disk fill ended with error (may be expected): %v\n", fillErr)
 				}
@@ -1070,7 +1070,7 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 					// Fill disk incrementally to reach ~85% usage (exceeding the 80% threshold
 					// that triggers growth when targetBuffer is 20%). We use incremental filling
 					// to give the storage reconciler time to detect the condition and respond.
-					finalUsage, fillErr := fillDiskIncrementally(primaryPod, 85, 92, 500000)
+					finalUsage, fillErr := fillDiskIncrementally(primaryPod, 85, 87, 500000)
 					if fillErr != nil {
 						GinkgoWriter.Printf("Disk fill ended with error (may be expected): %v\n", fillErr)
 					}
@@ -1281,7 +1281,7 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 				// Fill disk incrementally to reach ~85% usage (exceeding the 80% threshold
 				// that triggers growth when targetBuffer is 20%). We use incremental filling
 				// to give the storage reconciler time to detect the condition and respond.
-				finalUsage, fillErr := fillDiskIncrementally(primaryPod, 85, 92, 500000)
+				finalUsage, fillErr := fillDiskIncrementally(primaryPod, 85, 87, 500000)
 				if fillErr != nil {
 					GinkgoWriter.Printf("Disk fill ended with error (may be expected): %v\n", fillErr)
 				}
@@ -1390,7 +1390,7 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 				// Fill disk incrementally to reach ~85% usage (exceeding the 80% threshold
 				// that triggers growth when targetBuffer is 20%). We use incremental filling
 				// to give the storage reconciler time to detect the condition and respond.
-				finalUsage, fillErr := fillDiskIncrementally(primaryPod, 85, 92, 500000)
+				finalUsage, fillErr := fillDiskIncrementally(primaryPod, 85, 87, 500000)
 				if fillErr != nil {
 					GinkgoWriter.Printf("Disk fill ended with error (may be expected): %v\n", fillErr)
 				}
@@ -1503,7 +1503,7 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 					// Fill disk incrementally to reach ~85% usage (exceeding the 80% threshold
 					// that triggers growth when targetBuffer is 20%). We use incremental filling
 					// to give the storage reconciler time to detect the condition and respond.
-					finalUsage, fillErr := fillDiskIncrementally(primaryPod, 85, 92, 500000)
+					finalUsage, fillErr := fillDiskIncrementally(primaryPod, 85, 87, 500000)
 					if fillErr != nil {
 						GinkgoWriter.Printf("Disk fill ended with error (may be expected): %v\n", fillErr)
 					}
@@ -1746,7 +1746,7 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 				// Fill disk incrementally to reach ~85% usage (exceeding the 80% threshold
 				// that triggers growth when targetBuffer is 20%). We use incremental filling
 				// to give the storage reconciler time to detect the condition and respond.
-				finalUsage, fillErr := fillDiskIncrementally(primaryPod, 85, 92, 500000)
+				finalUsage, fillErr := fillDiskIncrementally(primaryPod, 85, 87, 500000)
 				if fillErr != nil {
 					GinkgoWriter.Printf("Disk fill ended with error (may be expected): %v\n", fillErr)
 				}
@@ -1939,7 +1939,7 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 				// Fill disk incrementally to reach ~85% usage (exceeding the 80% threshold
 				// that triggers growth when targetBuffer is 20%). We use incremental filling
 				// to give the storage reconciler time to detect the condition and respond.
-				finalUsage, fillErr := fillDiskIncrementally(primaryPod, 85, 92, 500000)
+				finalUsage, fillErr := fillDiskIncrementally(primaryPod, 85, 87, 500000)
 				if fillErr != nil {
 					GinkgoWriter.Printf("Disk fill ended with error (may be expected): %v\n", fillErr)
 				}
@@ -2011,7 +2011,7 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 				// Fill disk incrementally to reach ~85% usage (exceeding the 80% threshold
 				// that triggers growth when targetBuffer is 20%). We use incremental filling
 				// to give the storage reconciler time to detect the condition and respond.
-				finalUsage, fillErr := fillDiskIncrementally(primaryPod, 85, 92, 500000)
+				finalUsage, fillErr := fillDiskIncrementally(primaryPod, 85, 87, 500000)
 				if fillErr != nil {
 					GinkgoWriter.Printf("Disk fill ended with error (may be expected): %v\n", fillErr)
 				}
@@ -2127,7 +2127,7 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 				// Fill disk incrementally to reach ~85% usage (exceeding the 80% threshold
 				// that triggers growth when targetBuffer is 20%). We use incremental filling
 				// to give the storage reconciler time to detect the condition and respond.
-				finalUsage, fillErr := fillDiskIncrementally(primaryPod, 85, 92, 500000)
+				finalUsage, fillErr := fillDiskIncrementally(primaryPod, 85, 87, 500000)
 				if fillErr != nil {
 					GinkgoWriter.Printf("Disk fill ended with error (may be expected): %v\n", fillErr)
 				}
