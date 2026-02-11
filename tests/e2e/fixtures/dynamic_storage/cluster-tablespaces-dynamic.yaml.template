@@ -1,7 +1,7 @@
 apiVersion: postgresql.cnpg.io/v1
 kind: Cluster
 metadata:
-  name: cluster-tablespaces-dynamic
+  name: dynamic-tbs-grow
 spec:
   instances: 1
 
@@ -16,22 +16,3 @@ spec:
         request: 1Gi
         limit: 5Gi
         targetBuffer: 20
-
-  backup:
-    barmanObjectStore:
-      destinationPath: s3://cluster-tablespaces-dynamic/
-      endpointURL: https://minio-service.minio:9000
-      endpointCA:
-        key: ca.crt
-        name: minio-server-ca-secret
-      s3Credentials:
-        accessKeyId:
-          name: backup-storage-creds
-          key: ID
-        secretAccessKey:
-          name: backup-storage-creds
-          key: KEY
-      wal:
-        compression: gzip
-      data:
-        immediateCheckpoint: true
