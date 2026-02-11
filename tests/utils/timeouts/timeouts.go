@@ -67,6 +67,9 @@ const (
 	// Standard polling interval for AKS operations (30 seconds)
 	AKSPollingInterval Timeout = "aksPollingInterval"
 
+	// AKS backup timeout - backups during volume resize can take much longer on Azure
+	AKSBackupIsReady Timeout = "aksBackupIsReady"
+
 	// StorageSizingDetection is the time to wait for the operator to detect a storage sizing need
 	StorageSizingDetection Timeout = "storageSizingDetection"
 	// StorageSizingPolling is the polling interval for storage sizing status checks
@@ -79,7 +82,7 @@ var DefaultTestTimeouts = map[Timeout]int{
 	NamespaceCreation:         30,
 	ClusterIsReady:            600,
 	ClusterIsReadyQuick:       300,
-	ClusterIsReadySlow:        1200, // Increased from 900s to 20 min for AKS volume operations
+	ClusterIsReadySlow:        1800, // 30 min for AKS volume operations (resize + reattach after pod restart)
 	NewPrimaryAfterSwitchover: 45,
 	NewPrimaryAfterFailover:   30,
 	NewTargetOnFailover:       120,
@@ -89,7 +92,7 @@ var DefaultTestTimeouts = map[Timeout]int{
 	WalsInMinio:               60,
 	MinioInstallation:         300,
 	BackupIsReady:             180,
-	DrainNode:                 1200, // Increased from 900s to 20 min for AKS drain + volume operations
+	DrainNode:                 1800, // 30 min for AKS drain + volume operations (detach + reattach)
 	VolumeSnapshotIsReady:     300,
 	Short:                     5,
 	ManagedServices:           30,
@@ -102,6 +105,7 @@ var DefaultTestTimeouts = map[Timeout]int{
 	AKSPodReschedule:      1200, // 20 min - Pod reschedule with volume reattach
 	AKSStorageProvisioned: 600,  // 10 min - Initial PVC provisioning on AKS
 	AKSPollingInterval:    30,   // 30 sec - Standard polling for AKS operations
+	AKSBackupIsReady:      600,  // 10 min - Backups during volume resize can be slow on AKS
 
 	// Storage sizing timeouts
 	StorageSizingDetection: 300, // 5 min - Time for operator to detect sizing need

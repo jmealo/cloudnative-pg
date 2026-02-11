@@ -85,7 +85,14 @@ var _ = Describe("Dynamic storage management extended scenarios",
 							Limit:        "20Gi",
 							TargetBuffer: ptr.To(20),
 							MaintenanceWindow: &apiv1.MaintenanceWindowConfig{
-								Schedule: "0 0 4 31 2 *",
+								// Use December 31st (valid) instead of February 31st (invalid)
+								Schedule: "0 0 4 31 12 *",
+							},
+							// Set high emergency thresholds to prevent emergency growth
+							// which can cause timeouts with concurrent operations
+							EmergencyGrow: &apiv1.EmergencyGrowConfig{
+								CriticalThreshold:   99,
+								CriticalMinimumFree: "100Mi",
 							},
 						},
 					},
@@ -167,13 +174,13 @@ var _ = Describe("Dynamic storage management extended scenarios",
 							Equal(apiv1.BackupPhaseCompleted),
 							Equal(apiv1.BackupPhaseFailed),
 						))
-					}).WithTimeout(time.Duration(testTimeouts[timeouts.BackupIsReady]) * time.Second).
+					}).WithTimeout(time.Duration(testTimeouts[timeouts.AKSBackupIsReady]) * time.Second).
 						WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())
 				})
 
 				By("verifying eventual convergence", func() {
 					verifyGrowthCompletion(namespace, clusterName)
-				// Use ClusterIsReadySlow because node drain + concurrent backup + volume operations can take 20+ minutes
+					// Use ClusterIsReadySlow because node drain + concurrent backup + volume operations can take 20+ minutes
 					AssertClusterIsReady(namespace, clusterName, testTimeouts[timeouts.ClusterIsReadySlow], env)
 					AssertDataExpectedCount(env, tableLocator, 2)
 				})
@@ -193,7 +200,13 @@ var _ = Describe("Dynamic storage management extended scenarios",
 							Limit:        "20Gi",
 							TargetBuffer: ptr.To(20),
 							MaintenanceWindow: &apiv1.MaintenanceWindowConfig{
-								Schedule: "0 0 4 31 2 *",
+								// Use December 31st (valid) instead of February 31st (invalid)
+								Schedule: "0 0 4 31 12 *",
+							},
+							// Set high emergency thresholds to prevent emergency growth
+							EmergencyGrow: &apiv1.EmergencyGrowConfig{
+								CriticalThreshold:   99,
+								CriticalMinimumFree: "100Mi",
 							},
 						},
 					},
