@@ -198,17 +198,10 @@ func Reconcile(
 	// Update status based on result (status structures already initialized above)
 	updateVolumeStatus(cluster.Status.StorageSizing.Data, &cluster.Spec.StorageConfiguration, result, actualSizes)
 
-	// Execute action if needed
+	// Execute action if needed (skip NoOp and PendingGrowth which don't modify PVCs)
 	if result.Action != ActionNoOp && result.Action != ActionPendingGrowth {
 		if err := executeAction(ctx, c, cluster, pvcs, result); err != nil {
 			return ctrl.Result{}, fmt.Errorf("while executing dynamic storage action: %w", err)
-		}
-
-		// Update cluster status to persist the storage sizing changes.
-		// This is necessary because the cluster controller's status update mechanism
-		// may not detect changes to StorageSizing if no other status fields changed.
-		if err := c.Status().Update(ctx, cluster); err != nil {
-			return ctrl.Result{}, fmt.Errorf("while updating cluster status after dynamic storage action: %w", err)
 		}
 
 		contextLogger.Info("Dynamic storage action executed",
@@ -217,6 +210,15 @@ func Reconcile(
 			"currentSize", result.CurrentSize.String(),
 			"targetSize", result.TargetSize.String(),
 			"reason", result.Reason)
+	}
+
+	// Always persist status updates when the action indicates a state change.
+	// PendingGrowth needs to be persisted so the test can observe the state,
+	// and other actions need their status changes persisted as well.
+	if result.Action != ActionNoOp {
+		if err := c.Status().Update(ctx, cluster); err != nil {
+			return ctrl.Result{}, fmt.Errorf("while updating cluster status after dynamic storage action: %w", err)
+		}
 	}
 
 	// Reconcile tablespaces
@@ -288,16 +290,18 @@ func reconcileTablespaces(
 				return fmt.Errorf("while executing tablespace %s dynamic storage action: %w", tbs.Name, err)
 			}
 
-			// Update cluster status to persist the storage sizing changes
-			if err := c.Status().Update(ctx, cluster); err != nil {
-				return fmt.Errorf("while updating cluster status after tablespace %s dynamic storage action: %w", tbs.Name, err)
-			}
-
 			contextLogger.Info("Tablespace dynamic storage action executed",
 				"tablespace", tbs.Name,
 				"action", result.Action,
 				"currentSize", result.CurrentSize.String(),
 				"targetSize", result.TargetSize.String())
+		}
+
+		// Always persist status updates when the action indicates a state change
+		if result.Action != ActionNoOp {
+			if err := c.Status().Update(ctx, cluster); err != nil {
+				return fmt.Errorf("while updating cluster status after tablespace %s dynamic storage action: %w", tbs.Name, err)
+			}
 		}
 	}
 
