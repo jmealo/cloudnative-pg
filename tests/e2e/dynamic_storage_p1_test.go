@@ -315,7 +315,7 @@ var _ = Describe("Dynamic storage management extended scenarios",
 				By("triggering growth", func() {
 					primaryPod, err := clusterutils.GetPrimary(env.Ctx, env.Client, namespace, clusterName)
 					Expect(err).ToNot(HaveOccurred())
-					_, err = fillDiskIncrementally(primaryPod, 85, 87, 500000)
+					_, err = fillDiskFast(primaryPod, 85, 87)
 					Expect(err).ToNot(HaveOccurred())
 					verifyGrowthCompletion(namespace, clusterName)
 				})
@@ -371,7 +371,7 @@ var _ = Describe("Dynamic storage management extended scenarios",
 				By("triggering growth", func() {
 					primaryPod, err := clusterutils.GetPrimary(env.Ctx, env.Client, namespace, clusterName)
 					Expect(err).ToNot(HaveOccurred())
-					_, err = fillDiskIncrementally(primaryPod, 85, 87, 500000)
+					_, err = fillDiskFast(primaryPod, 85, 87)
 					Expect(err).ToNot(HaveOccurred())
 					verifyGrowthCompletion(namespace, clusterName)
 				})
