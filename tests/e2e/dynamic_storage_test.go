@@ -1150,6 +1150,12 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 					Request:      "5Gi",
 					Limit:        "20Gi",
 					TargetBuffer: ptr.To(20),
+					// Set high emergency thresholds to ensure scheduled growth
+					// instead of emergency growth which can interfere with pod restarts.
+					EmergencyGrow: &apiv1.EmergencyGrowConfig{
+						CriticalThreshold:   99,
+						CriticalMinimumFree: "100Mi",
+					},
 				}
 
 				tableLocator := TableLocator{
@@ -1580,6 +1586,13 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 				Request:      "5Gi",
 				Limit:        "20Gi",
 				TargetBuffer: ptr.To(20),
+				// Set high emergency thresholds so disk fill to 85% triggers
+				// scheduled growth instead of emergency growth. Emergency growth
+				// blocks backup operations and takes longer on AKS.
+				EmergencyGrow: &apiv1.EmergencyGrowConfig{
+					CriticalThreshold:   99,
+					CriticalMinimumFree: "100Mi",
+				},
 			}
 
 			tableLocator := TableLocator{
@@ -1642,6 +1655,8 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 			})
 
 			By("verifying backup reaches a terminal phase", func() {
+				// Use AKS-specific backup timeout since backups during volume resize
+				// operations can take significantly longer on Azure
 				Eventually(func(g Gomega) {
 					backup := &apiv1.Backup{}
 					err := env.Client.Get(env.Ctx, ctrlclient.ObjectKey{
@@ -1653,7 +1668,7 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 						Equal(apiv1.BackupPhaseCompleted),
 						Equal(apiv1.BackupPhaseFailed),
 					))
-				}).WithTimeout(time.Duration(testTimeouts[timeouts.BackupIsReady]) * time.Second).
+				}).WithTimeout(time.Duration(testTimeouts[timeouts.AKSBackupIsReady]) * time.Second).
 					WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())
 			})
 
