@@ -179,11 +179,12 @@ func Reconcile(
 			contextLogger.Info("No disk status available yet, status updated to reflect waiting state",
 				"instanceCount", len(instanceStatuses.Items))
 
-			// Return normally (not requeue) to allow status to be persisted.
-			// Normal reconciliation will retry when instance status updates.
+			// Return empty result. The cluster controller will requeue periodically
+			// when dynamic storage is enabled, so we'll retry collecting disk status.
 			return ctrl.Result{}, nil
 		}
-		// No instances at all, nothing to do
+		// No instances at all, nothing to do yet. Return empty result to allow
+		// the cluster controller to continue with instance creation.
 		contextLogger.Debug("No instances available for disk status collection")
 		return ctrl.Result{}, nil
 	}
@@ -203,6 +204,13 @@ func Reconcile(
 			return ctrl.Result{}, fmt.Errorf("while executing dynamic storage action: %w", err)
 		}
 
+		// Update cluster status to persist the storage sizing changes.
+		// This is necessary because the cluster controller's status update mechanism
+		// may not detect changes to StorageSizing if no other status fields changed.
+		if err := c.Status().Update(ctx, cluster); err != nil {
+			return ctrl.Result{}, fmt.Errorf("while updating cluster status after dynamic storage action: %w", err)
+		}
+
 		contextLogger.Info("Dynamic storage action executed",
 			"action", result.Action,
 			"volumeType", result.VolumeType,
@@ -216,6 +224,10 @@ func Reconcile(
 		return ctrl.Result{}, err
 	}
 
+	// Return empty result to allow the cluster controller to continue its reconciliation.
+	// The cluster controller handles requeueing on its own schedule. We don't request
+	// requeue here because returning a non-zero result would short-circuit the cluster
+	// controller and prevent it from completing instance status updates.
 	return ctrl.Result{}, nil
 }
 
@@ -274,6 +286,11 @@ func reconcileTablespaces(
 		if result.Action != ActionNoOp && result.Action != ActionPendingGrowth {
 			if err := executeAction(ctx, c, cluster, pvcs, result); err != nil {
 				return fmt.Errorf("while executing tablespace %s dynamic storage action: %w", tbs.Name, err)
+			}
+
+			// Update cluster status to persist the storage sizing changes
+			if err := c.Status().Update(ctx, cluster); err != nil {
+				return fmt.Errorf("while updating cluster status after tablespace %s dynamic storage action: %w", tbs.Name, err)
 			}
 
 			contextLogger.Info("Tablespace dynamic storage action executed",
