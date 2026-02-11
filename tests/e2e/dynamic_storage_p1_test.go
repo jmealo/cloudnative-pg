@@ -117,7 +117,9 @@ var _ = Describe("Dynamic storage management extended scenarios",
 				By("triggering growth condition", func() {
 					primaryPod, err := clusterutils.GetPrimary(env.Ctx, env.Client, namespace, clusterName)
 					Expect(err).ToNot(HaveOccurred())
-					_, err = fillDiskIncrementally(primaryPod, 85, 87, 500000)
+					// Use lower disk fill (80-83%) for tests with failover/switchover operations
+					// to ensure WAL files are retained for pg_rewind after the switchover completes
+					_, err = fillDiskIncrementally(primaryPod, 80, 83, 500000)
 					Expect(err).ToNot(HaveOccurred())
 				})
 
@@ -241,7 +243,9 @@ var _ = Describe("Dynamic storage management extended scenarios",
 				By("triggering growth condition", func() {
 					primaryPod, err := clusterutils.GetPrimary(env.Ctx, env.Client, namespace, clusterName)
 					Expect(err).ToNot(HaveOccurred())
-					_, err = fillDiskIncrementally(primaryPod, 85, 87, 500000)
+					// Use lower disk fill (80-83%) for tests with pod restarts/rolling upgrades
+					// to ensure WAL files are retained for pg_rewind after pods restart
+					_, err = fillDiskIncrementally(primaryPod, 80, 83, 500000)
 					Expect(err).ToNot(HaveOccurred())
 				})
 

@@ -1278,10 +1278,10 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 				Expect(err).ToNot(HaveOccurred())
 				originalPrimary = primaryPod.Name
 
-				// Fill disk incrementally to reach ~85% usage (exceeding the 80% threshold
-				// that triggers growth when targetBuffer is 20%). We use incremental filling
-				// to give the storage reconciler time to detect the condition and respond.
-				finalUsage, fillErr := fillDiskIncrementally(primaryPod, 85, 87, 500000)
+				// Use lower disk fill (80-83%) for tests with switchover operations
+				// to ensure WAL files are retained for pg_rewind after the switchover.
+				// Higher fill levels (85%+) cause aggressive WAL recycling which breaks pg_rewind.
+				finalUsage, fillErr := fillDiskIncrementally(primaryPod, 80, 83, 500000)
 				if fillErr != nil {
 					GinkgoWriter.Printf("Disk fill ended with error (may be expected): %v\n", fillErr)
 				}
@@ -2008,10 +2008,10 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 				primaryPod, err := clusterutils.GetPrimary(env.Ctx, env.Client, namespace, clusterName)
 				Expect(err).ToNot(HaveOccurred())
 
-				// Fill disk incrementally to reach ~85% usage (exceeding the 80% threshold
-				// that triggers growth when targetBuffer is 20%). We use incremental filling
-				// to give the storage reconciler time to detect the condition and respond.
-				finalUsage, fillErr := fillDiskIncrementally(primaryPod, 85, 87, 500000)
+				// Use lower disk fill (80-83%) for tests with switchover operations
+				// to ensure WAL files are retained for pg_rewind after the switchover.
+				// Higher fill levels (85%+) cause aggressive WAL recycling which breaks pg_rewind.
+				finalUsage, fillErr := fillDiskIncrementally(primaryPod, 80, 83, 500000)
 				if fillErr != nil {
 					GinkgoWriter.Printf("Disk fill ended with error (may be expected): %v\n", fillErr)
 				}
