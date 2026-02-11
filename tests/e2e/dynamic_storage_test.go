@@ -227,9 +227,164 @@ func fillTablespaceDiskIncrementally(
 	return currentUsage, nil
 }
 
+// fillDiskFast fills the PGDATA filesystem using dd to write a raw zero file.
+// This is much faster than SQL-based fills (~5s vs ~3-5min) because it avoids
+// kubectl exec round-trips per batch, WAL generation, and checkpoint overhead.
+//
+// Use this for tests that only need the reconciler to detect disk pressure via
+// statfs (the reconciler uses syscall.Statfs, not Postgres stats). Tests that
+// need WAL history for pg_rewind, realistic replication, or backup interactions
+// should use fillDiskIncrementally instead.
+//
+// The fill file is written to /var/lib/postgresql/data/pgdata/fill_ballast.
+// It is cleaned up automatically when the test namespace is torn down.
+func fillDiskFast(
+	pod *corev1.Pod,
+	targetUsagePercent int,
+	maxUsagePercent int,
+) (int, error) {
+	GinkgoWriter.Printf("Starting fast disk fill (dd) on pod %s, target: %d%%, max: %d%%\n",
+		pod.Name, targetUsagePercent, maxUsagePercent)
+
+	currentUsage, err := getDiskUsagePercent(pod)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get initial disk usage: %w", err)
+	}
+	GinkgoWriter.Printf("Initial disk usage: %d%%\n", currentUsage)
+
+	if currentUsage >= targetUsagePercent {
+		GinkgoWriter.Printf("Disk already at target usage (%d%% >= %d%%)\n", currentUsage, targetUsagePercent)
+		return currentUsage, nil
+	}
+
+	// Get total filesystem size to calculate how many bytes to write.
+	timeout := 10 * time.Second
+	stdout, stderr, err := exec.CommandInContainer(
+		env.Ctx, env.Client, env.Interface, env.RestClientConfig,
+		exec.ContainerLocator{
+			Namespace:     pod.Namespace,
+			PodName:       pod.Name,
+			ContainerName: specs.PostgresContainerName,
+		},
+		&timeout,
+		"df", "--output=size,used", "-B1", "/var/lib/postgresql/data",
+	)
+	if err != nil {
+		return currentUsage, fmt.Errorf("df failed: %w, stderr: %s", err, stderr)
+	}
+
+	// Parse: "     Size      Used\n 5368709120 1073741824\n"
+	lines := strings.Split(strings.TrimSpace(stdout), "\n")
+	if len(lines) < 2 {
+		return currentUsage, fmt.Errorf("unexpected df output: %s", stdout)
+	}
+	fields := strings.Fields(lines[1])
+	if len(fields) < 2 {
+		return currentUsage, fmt.Errorf("unexpected df fields: %s", lines[1])
+	}
+	totalBytes, err := strconv.ParseInt(fields[0], 10, 64)
+	if err != nil {
+		return currentUsage, fmt.Errorf("failed to parse total bytes '%s': %w", fields[0], err)
+	}
+	usedBytes, err := strconv.ParseInt(fields[1], 10, 64)
+	if err != nil {
+		return currentUsage, fmt.Errorf("failed to parse used bytes '%s': %w", fields[1], err)
+	}
+
+	// Calculate bytes needed to reach target. Aim for (target - 2%) to leave
+	// margin and avoid overshooting past maxUsagePercent.
+	effectiveTarget := targetUsagePercent - 2
+	if effectiveTarget < currentUsage {
+		effectiveTarget = currentUsage + 1
+	}
+	targetBytes := (int64(effectiveTarget) * totalBytes / 100) - usedBytes
+	if targetBytes <= 0 {
+		GinkgoWriter.Printf("Already at or above effective target (%d%%)\n", effectiveTarget)
+		return currentUsage, nil
+	}
+
+	// Write in megabytes
+	megabytes := targetBytes / (1024 * 1024)
+	if megabytes < 1 {
+		megabytes = 1
+	}
+
+	GinkgoWriter.Printf("Writing %dMB fill file (total=%dMB, used=%dMB, target=%d%%)\n",
+		megabytes, totalBytes/(1024*1024), usedBytes/(1024*1024), effectiveTarget)
+
+	fillTimeout := 2 * time.Minute
+	fillPath := specs.PgDataPath + "/fill_ballast"
+	_, stderr, err = exec.CommandInContainer(
+		env.Ctx, env.Client, env.Interface, env.RestClientConfig,
+		exec.ContainerLocator{
+			Namespace:     pod.Namespace,
+			PodName:       pod.Name,
+			ContainerName: specs.PostgresContainerName,
+		},
+		&fillTimeout,
+		"dd", "if=/dev/zero", fmt.Sprintf("of=%s", fillPath),
+		"bs=1M", fmt.Sprintf("count=%d", megabytes),
+	)
+	if err != nil {
+		// dd may fail with "No space left" if we slightly overshoot — check usage
+		GinkgoWriter.Printf("dd returned error (may be expected near full): %v, stderr: %s\n", err, stderr)
+	}
+
+	// Sync to ensure statfs reflects the write
+	syncTimeout := 30 * time.Second
+	_, _, _ = exec.CommandInContainer(
+		env.Ctx, env.Client, env.Interface, env.RestClientConfig,
+		exec.ContainerLocator{
+			Namespace:     pod.Namespace,
+			PodName:       pod.Name,
+			ContainerName: specs.PostgresContainerName,
+		},
+		&syncTimeout,
+		"sync",
+	)
+
+	finalUsage, err := getDiskUsagePercent(pod)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get final disk usage: %w", err)
+	}
+	GinkgoWriter.Printf("Fast fill complete. Final usage: %d%%\n", finalUsage)
+
+	if finalUsage > maxUsagePercent {
+		return finalUsage, fmt.Errorf("overshot max usage: %d%% > %d%%", finalUsage, maxUsagePercent)
+	}
+
+	return finalUsage, nil
+}
+
+// removeFillFile removes the ballast file created by fillDiskFast.
+// Call this in tests that need to free space after growth verification.
+func removeFillFile(pod *corev1.Pod) error {
+	timeout := 10 * time.Second
+	fillPath := specs.PgDataPath + "/fill_ballast"
+	_, stderr, err := exec.CommandInContainer(
+		env.Ctx, env.Client, env.Interface, env.RestClientConfig,
+		exec.ContainerLocator{
+			Namespace:     pod.Namespace,
+			PodName:       pod.Name,
+			ContainerName: specs.PostgresContainerName,
+		},
+		&timeout,
+		"rm", "-f", fillPath,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to remove fill file: %w, stderr: %s", err, stderr)
+	}
+	return nil
+}
+
 // fillDiskIncrementally fills the disk on the given pod incrementally until
 // the target usage percentage is reached. It inserts data in batches and checks
 // disk usage between batches to avoid overshooting.
+//
+// Use this instead of fillDiskFast for tests that involve switchover, failover,
+// pod restart, node drain, or backup — anywhere WAL history and realistic
+// replication state matter (e.g. pg_rewind needs WAL divergence points).
+//
 // Parameters:
 //   - pod: the pod to fill disk on
 //   - targetUsagePercent: stop when this usage is reached (e.g., 85 for 85%)
@@ -604,20 +759,13 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 			})
 
 			By("filling disk to trigger growth", func() {
-				// Fill disk incrementally to reach ~85% usage (exceeding the 80% threshold
-				// that triggers growth when targetBuffer is 20%). We use incremental filling
-				// to give the storage reconciler time to detect the condition and respond,
-				// avoiding a scenario where the disk fills to 100% before resize can occur.
-				// - targetUsagePercent=85: stop when we hit 85% (past the 80% trigger point)
-				// - maxUsagePercent=92: safety limit to prevent accidental disk full crash
-				// - batchRows=500000: ~500MB per batch, allows reconciler check between batches
-				finalUsage, err := fillDiskIncrementally(primaryPod, 85, 87, 500000)
-				// Error is acceptable if we reached a high enough usage to trigger resize
+				// Use fast dd-based fill — this test only needs disk pressure for the
+				// reconciler's statfs check, no WAL/replication concerns.
+				finalUsage, err := fillDiskFast(primaryPod, 85, 87)
 				if err != nil {
 					GinkgoWriter.Printf("Disk fill ended with error (may be expected): %v\n", err)
 				}
 				GinkgoWriter.Printf("Final disk usage after fill: %d%%\n", finalUsage)
-				// We should have reached at least 75% to trigger the resize logic
 				Expect(finalUsage).To(BeNumerically(">=", 75),
 					"Disk fill should reach at least 75%% to trigger growth")
 			})
@@ -675,7 +823,7 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 			By("filling disk to trigger growth toward limit", func() {
 				primaryPod, getErr := clusterutils.GetPrimary(env.Ctx, env.Client, namespace, clusterName)
 				Expect(getErr).ToNot(HaveOccurred())
-				finalUsage, fillErr := fillDiskIncrementally(primaryPod, 85, 87, 500000)
+				finalUsage, fillErr := fillDiskFast(primaryPod, 85, 87)
 				if fillErr != nil {
 					GinkgoWriter.Printf("Disk fill ended with error (may be expected): %v\n", fillErr)
 				}
@@ -908,7 +1056,7 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 			By("filling disk while maintenance window is closed", func() {
 				primaryPod, getErr := clusterutils.GetPrimary(env.Ctx, env.Client, namespace, clusterName)
 				Expect(getErr).ToNot(HaveOccurred())
-				finalUsage, fillErr := fillDiskIncrementally(primaryPod, 85, 87, 500000)
+				finalUsage, fillErr := fillDiskFast(primaryPod, 85, 87)
 				if fillErr != nil {
 					GinkgoWriter.Printf("Disk fill ended with error (may be expected): %v\n", fillErr)
 				}
@@ -982,20 +1130,13 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 			})
 
 			By("filling disk to emergency threshold", func() {
-				// Fill disk incrementally to reach ~96% usage (past the 95% critical threshold
-				// that triggers emergency growth). We use incremental filling to give the
-				// storage reconciler time to detect the emergency condition and respond.
-				// For emergency tests we need to push past the critical threshold (95%)
-				// while still leaving room for the filesystem overhead.
-				// - targetUsagePercent=96: past the 95% critical threshold
-				// - maxUsagePercent=98: safety limit but allows reaching emergency level
-				// - batchRows=300000: smaller batches for finer control near capacity
-				finalUsage, err := fillDiskIncrementally(primaryPod, 96, 98, 300000)
+				// Use fast dd-based fill to 96% — emergency test only needs disk
+				// pressure past the 95% critical threshold, no WAL concerns.
+				finalUsage, err := fillDiskFast(primaryPod, 96, 98)
 				if err != nil {
 					GinkgoWriter.Printf("Emergency disk fill ended with error (may be expected): %v\n", err)
 				}
 				GinkgoWriter.Printf("Final disk usage for emergency test: %d%%\n", finalUsage)
-				// We should have reached at least 90% to be near emergency threshold
 				Expect(finalUsage).To(BeNumerically(">=", 90),
 					"Emergency disk fill should reach at least 90%% to approach critical threshold")
 			})
@@ -1119,10 +1260,8 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 					primaryPod, err = clusterutils.GetPrimary(env.Ctx, env.Client, namespace, clusterName)
 					Expect(err).ToNot(HaveOccurred())
 
-					// Fill disk incrementally to reach ~85% usage (exceeding the 80% threshold
-					// that triggers growth when targetBuffer is 20%). We use incremental filling
-					// to give the storage reconciler time to detect the condition and respond.
-					finalUsage, fillErr := fillDiskIncrementally(primaryPod, 85, 87, 500000)
+					// Only the operator pod restarts here, not Postgres — no pg_rewind needed.
+					finalUsage, fillErr := fillDiskFast(primaryPod, 85, 87)
 					if fillErr != nil {
 						GinkgoWriter.Printf("Disk fill ended with error (may be expected): %v\n", fillErr)
 					}
@@ -1208,6 +1347,12 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 						CriticalThreshold:   99,
 						CriticalMinimumFree: "100Mi",
 					},
+				}
+				// Configure wal_keep_size to retain WAL segments for pg_rewind.
+				// When the primary is deleted and a failover occurs, the old primary
+				// needs pg_rewind to find the divergence point in WAL.
+				cluster.Spec.PostgresConfiguration.Parameters = map[string]string{
+					"wal_keep_size": "512MB",
 				}
 
 				tableLocator := TableLocator{
@@ -1444,10 +1589,8 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 				primaryPod, err := clusterutils.GetPrimary(env.Ctx, env.Client, namespace, clusterName)
 				Expect(err).ToNot(HaveOccurred())
 
-				// Fill disk incrementally to reach ~85% usage (exceeding the 80% threshold
-				// that triggers growth when targetBuffer is 20%). We use incremental filling
-				// to give the storage reconciler time to detect the condition and respond.
-				finalUsage, fillErr := fillDiskIncrementally(primaryPod, 85, 87, 500000)
+				// Spec mutation test — no switchover/failover, just spec changes.
+				finalUsage, fillErr := fillDiskFast(primaryPod, 85, 87)
 				if fillErr != nil {
 					GinkgoWriter.Printf("Disk fill ended with error (may be expected): %v\n", fillErr)
 				}
@@ -1557,10 +1700,9 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 					primaryPod, err := clusterutils.GetPrimary(env.Ctx, env.Client, namespace, clusterName)
 					Expect(err).ToNot(HaveOccurred())
 
-					// Fill disk incrementally to reach ~85% usage (exceeding the 80% threshold
-					// that triggers growth when targetBuffer is 20%). We use incremental filling
-					// to give the storage reconciler time to detect the condition and respond.
-					finalUsage, fillErr := fillDiskIncrementally(primaryPod, 85, 87, 500000)
+					// Node drain evicts pod but PVC persists — dd fill file survives
+					// reattachment. No pg_rewind involved.
+					finalUsage, fillErr := fillDiskFast(primaryPod, 85, 87)
 					if fillErr != nil {
 						GinkgoWriter.Printf("Disk fill ended with error (may be expected): %v\n", fillErr)
 					}
@@ -1674,12 +1816,8 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 				primaryPod, err := clusterutils.GetPrimary(env.Ctx, env.Client, namespace, clusterName)
 				Expect(err).ToNot(HaveOccurred())
 
-				// Fill disk incrementally to reach ~85% usage (exceeding the 80% threshold
-				// that triggers growth when targetBuffer is 20%). We use incremental filling
-				// to give the storage reconciler time to detect the condition and respond.
-				// Cap at 87% to avoid hitting emergency threshold (99%) since each batch
-				// adds ~10-15% and we need room for PostgreSQL overhead.
-				finalUsage, fillErr := fillDiskIncrementally(primaryPod, 85, 87, 500000)
+				// Backup deadlock test — just needs disk pressure, no WAL concerns.
+				finalUsage, fillErr := fillDiskFast(primaryPod, 85, 87)
 				if fillErr != nil {
 					GinkgoWriter.Printf("Disk fill ended with error (may be expected): %v\n", fillErr)
 				}
@@ -1800,10 +1938,8 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 				primaryPod, err := clusterutils.GetPrimary(env.Ctx, env.Client, namespace, clusterName)
 				Expect(err).ToNot(HaveOccurred())
 
-				// Fill disk incrementally to reach ~85% usage (exceeding the 80% threshold
-				// that triggers growth when targetBuffer is 20%). We use incremental filling
-				// to give the storage reconciler time to detect the condition and respond.
-				finalUsage, fillErr := fillDiskIncrementally(primaryPod, 85, 87, 500000)
+				// Replica scaling test — just needs disk pressure for growth, no pg_rewind.
+				finalUsage, fillErr := fillDiskFast(primaryPod, 85, 87)
 				if fillErr != nil {
 					GinkgoWriter.Printf("Disk fill ended with error (may be expected): %v\n", fillErr)
 				}
@@ -1993,10 +2129,8 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 				primaryPod, err := clusterutils.GetPrimary(env.Ctx, env.Client, namespace, clusterName)
 				Expect(err).ToNot(HaveOccurred())
 
-				// Fill disk incrementally to reach ~85% usage (exceeding the 80% threshold
-				// that triggers growth when targetBuffer is 20%). We use incremental filling
-				// to give the storage reconciler time to detect the condition and respond.
-				finalUsage, fillErr := fillDiskIncrementally(primaryPod, 85, 87, 500000)
+				// T1 single-instance — no replication, just needs disk pressure.
+				finalUsage, fillErr := fillDiskFast(primaryPod, 85, 87)
 				if fillErr != nil {
 					GinkgoWriter.Printf("Disk fill ended with error (may be expected): %v\n", fillErr)
 				}
@@ -2039,12 +2173,19 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 			cluster.Namespace = namespace
 			cluster.Spec.Instances = 2
 			cluster.Spec.StorageConfiguration = apiv1.StorageConfiguration{
-				Request:      "5Gi",
-				Limit:        "20Gi",
+				Request: "5Gi",
+				Limit:   "20Gi",
 				// Use a higher TargetBuffer (30%) so growth triggers at ~70% disk usage
 				// instead of 80%. This keeps disk fill pressure low, preserving WAL
 				// headroom needed for pg_rewind after the switchover in this test.
 				TargetBuffer: ptr.To(30),
+			}
+			// Configure wal_keep_size to retain WAL segments for pg_rewind.
+			// When the old primary rejoins after switchover, pg_rewind needs
+			// to find the divergence point in WAL. Without explicit retention,
+			// WAL segments may be recycled under disk pressure.
+			cluster.Spec.PostgresConfiguration.Parameters = map[string]string{
+				"wal_keep_size": "512MB",
 			}
 
 			tableLocator := TableLocator{
@@ -2237,10 +2378,8 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 				primaryPod, err := clusterutils.GetPrimary(env.Ctx, env.Client, namespace, clusterName)
 				Expect(err).ToNot(HaveOccurred())
 
-				// Fill disk incrementally to reach ~85% usage (exceeding the 80% threshold
-				// that triggers growth when targetBuffer is 20%). We use incremental filling
-				// to give the storage reconciler time to detect the condition and respond.
-				finalUsage, fillErr := fillDiskIncrementally(primaryPod, 85, 87, 500000)
+				// T3 multi-replica — no switchover, just needs disk pressure for growth.
+				finalUsage, fillErr := fillDiskFast(primaryPod, 85, 87)
 				if fillErr != nil {
 					GinkgoWriter.Printf("Disk fill ended with error (may be expected): %v\n", fillErr)
 				}

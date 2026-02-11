@@ -1,573 +1,251 @@
 # Ralph E2E Testing Prompt: Dynamic Storage on Azure AKS
 
+Use with `/ralph-loop:ralph-loop` for deterministic, fast-feedback iterations.
+
 ## Objective
 
-Run E2E tests for the dynamic storage feature on Azure AKS and iterate until all tests pass. Follow CloudNativePG contribution guidelines and make necessary fixes to ensure test success.
+Get dynamic-storage E2E to green on AKS with minimal loop latency, then run one final full-suite verification.
 
-## Context
+## Completion Promise
 
-- **Branch**: `feat/dynamic-storage-complete`
-- **Feature**: Convergent Dynamic Storage Management
-- **Test Suite**: `tests/e2e/dynamic_storage_test.go` (19 test cases)
-- **Infrastructure**: Azure AKS with Premium SSD (supports online volume expansion)
-- **Test Runner**: `hack/e2e/run-aks-e2e.sh`
+Output this exact line only when done:
 
-## Prerequisites (User Completes Before Starting)
+`ALL E2E TESTS PASS - DYNAMIC STORAGE FEATURE COMPLETE`
 
-### 1. Azure Authentication
+Do not output it early.
+
+## Operating Mode
+
+- Optimize for loop speed: one failing behavior at a time.
+- Prefer `--fail-fast` + `--focus` in development loops.
+- Do not run long background workflows as the primary strategy.
+- Do not wait for a 2-3 hour full suite unless focused gates are already green.
+
+## Preconditions
+
+Verify before first loop:
 
 ```bash
-# Login to Azure
-az login
-
-# Set subscription
-az account set --subscription <your-subscription-id>
-
-# Verify
 az account show
+kubectl cluster-info
+git status --short
 ```
 
-### 2. Environment Variables
+Set/confirm env:
 
 ```bash
-# Required: Image registry (should already be configured from previous work)
 export CONTROLLER_IMG_BASE=${CONTROLLER_IMG_BASE:-ghcr.io/jmealo/cloudnative-pg-testing}
-
-# Optional: Customize test run
-export GINKGO_NODES=${GINKGO_NODES:-6}  # Parallel execution (capped by node count)
-export GINKGO_TIMEOUT=${GINKGO_TIMEOUT:-3h}
 export TEST_CLOUD_VENDOR=aks
-
-# Namespace isolation (for running both repos on same cluster)
-# This repo (gemini) uses separate namespaces to avoid conflicts
 export OPERATOR_NAMESPACE=${OPERATOR_NAMESPACE:-cnpg-system-gemini}
 export MINIO_NAMESPACE=${MINIO_NAMESPACE:-minio-gemini}
 export TEST_NAMESPACE_PREFIX=${TEST_NAMESPACE_PREFIX:-ds-gemini}
 ```
 
-### 2.1 Running Both Repos Simultaneously
-
-To run tests from both `cloudnative-pg` and `cloudnative-pg-gemini` on the same AKS cluster:
+### Running Both Repos on Same Cluster
 
 | Repo | OPERATOR_NAMESPACE | MINIO_NAMESPACE | TEST_NAMESPACE_PREFIX |
 |------|-------------------|-----------------|----------------------|
 | cloudnative-pg | `cnpg-system` (default) | `minio` | `dynamic-storage` |
 | cloudnative-pg-gemini | `cnpg-system-gemini` | `minio-gemini` | `ds-gemini` |
 
-**Important**: Each repo deploys its own operator. Both can run simultaneously without conflicts.
-
-### 3. Git Status Verification
-
-```bash
-# Ensure we're on the correct branch
-git status
-git log --oneline -5
-
-# Expected latest commits:
-# - docs: add design documents and user documentation for dynamic storage
-# - test(dynamicstorage): add E2E tests and test infrastructure
-# - feat(dynamicstorage): implement convergent dynamic storage management
-# - test(dynamicstorage): add test for requeue behavior when disk status unavailable
-# - fix(dynamicstorage): add retry logic when disk status unavailable
-```
+Each repo deploys its own operator. Both run simultaneously without conflicts.
 
 ---
 
-## Phase 1: Initial E2E Test Run (Parallel Mode)
+## Loop Algorithm
 
-### Strategy: Fix While Tests Run
+### Iteration 0 (Bootstrap)
 
-E2E tests take 2-3 hours. **Do NOT wait for completion.** Run tests in background and fix failures as they appear. This maximizes efficiency by parallelizing test execution with debugging.
-
-### 1.1 Start Tests in Background
+Run one broad, fail-fast gate to surface the first blocker:
 
 ```bash
-# From repo root
-cd /Users/jmealo/repos/cloudnative-pg-gemini
+./hack/e2e/run-aks-e2e.sh --fail-fast --focus "dynamic storage|grows|maintenance|emergency|replica|failover|node drain"
+```
 
-# Start tests in background with live output to file
+### Iteration N (Primary Loop)
+
+1. Parse first failing spec from `tests/e2e/out/dynamic_storage_report.json`.
+2. Fix only that failure (smallest safe patch).
+3. Re-run focused fail-fast:
+
+```bash
+./hack/e2e/run-aks-e2e.sh --skip-build --skip-deploy --fail-fast --focus "<failing test regex>"
+```
+
+4. If focused gate passes, widen focus to next gate.
+5. Repeat until all gates pass.
+
+**When operator code changes** (not just test code), drop `--skip-build --skip-deploy`.
+
+### Gate Order
+
+Advance only when current gate is green.
+
+1. Validation + basic growth
+2. Maintenance + emergency
+3. Operational disruptions (restart/failover/node-drain/backup)
+4. Topology (T1/T2/T3)
+5. Final full suite (no focus)
+
+---
+
+## Test Inventory (20 tests)
+
+| # | Test Name | Gate | Priority |
+|---|-----------|------|----------|
+| 1 | rejects invalid configurations | 1 | P0 |
+| 2 | provisions PVC at request size | 1 | P0 |
+| 3 | grows storage when usage exceeds target buffer | 1 | P0 |
+| 4 | respects limit and does not grow beyond it | 1 | P0 |
+| 5 | creates new replicas at effective size | 1 | P0 |
+| 6 | grows tablespace storage when usage exceeds target buffer | 1 | P0 |
+| 7 | queues growth when outside maintenance window | 2 | P0 |
+| 8 | grows immediately when critical threshold is reached | 2 | P0 |
+| 9 | initializes max-actions budget counters | 2 | P1 |
+| 10 | resumes growth operation after operator pod restart | 3 | P1 |
+| 11 | resumes growth operation after primary pod restart | 3 | P1 |
+| 12 | continues growth safely after failover | 3 | P1 |
+| 13 | accepts storage spec mutations during growth without losing data | 3 | P1 |
+| 14 | recovers growth operation after node drain | 3 | P1 |
+| 15 | backup succeeds or fails clearly without deadlocking storage reconciliation | 3 | P1 |
+| 16 | creates new replica at effective operational size | 3 | P1 |
+| 17 | exposes planned/emergency budget split in status | 3 | P1 |
+| 18 | handles dynamic sizing with no replicas | 4 | P1 |
+| 19 | handles dynamic sizing with single replica | 4 | P1 |
+| 20 | handles dynamic sizing with multiple replicas without unnecessary churn | 4 | P1 |
+
+---
+
+## Script Reference
+
+### `hack/e2e/run-aks-e2e.sh`
+
+| Flag | Effect |
+|------|--------|
+| `--skip-build` | Skip Docker build (use when only test code changed) |
+| `--skip-deploy` | Skip operator deployment |
+| `--fail-fast` | Stop on first failing spec |
+| `--focus <regex>` | Run tests matching pattern |
+| `--diagnose-only` | Show cluster state, don't run tests |
+
+### `hack/e2e/monitor-dynamic-storage.sh`
+
+For long/full runs only (not the primary dev loop):
+
+```bash
 LOG_FILE="/tmp/e2e-run-$(date +%Y%m%d-%H%M%S).log"
 ./hack/e2e/run-aks-e2e.sh 2>&1 | tee "$LOG_FILE" &
 E2E_PID=$!
-echo "Tests running as PID $E2E_PID, logging to $LOG_FILE"
+./hack/e2e/monitor-dynamic-storage.sh --log-file "$LOG_FILE" --pid "$E2E_PID"
 ```
-
-**What this does:**
-1. Builds the operator Docker image with current code
-2. Pushes image to ghcr.io registry
-3. Deploys operator to AKS cluster
-4. Runs all tests labeled with `dynamic-storage` or `dynamic-storage-p0` or `dynamic-storage-p1`
-5. Captures test output and diagnostics
-
-### 1.2 Monitor for Failures (Parallel Fixing)
-
-While tests run, monitor for failures and spawn sub-agents to investigate:
-
-```bash
-# Check for failures in real-time (run periodically)
-tail -100 "$LOG_FILE" | grep -E "(FAIL|Error|panic|\[FAILED\])"
-
-# Check JSON report if available (updated after each spec)
-jq -r '.[] | select(.SpecReports != null) | .SpecReports[] | select(.State == "failed") | .LeafNodeText' tests/e2e/out/dynamic_storage_report.json 2>/dev/null
-```
-
-**When a failure is detected:**
-
-1. **Identify the failing test** - Note the test name, error message, stack trace
-2. **Spawn a sub-agent** using the Task tool to investigate:
-
-```
-Use Task tool with:
-- subagent_type: "debugger" or "golang-pro"
-- prompt: Include:
-  - The failing test name and error message
-  - Instructions to:
-    1. Read AI_CONTRIBUTING.md for CNPG standards
-    2. Analyze the failure (test code in tests/e2e/, operator code)
-    3. Propose a minimal fix following CNPG patterns
-    4. Do NOT commit - just propose the fix and explain why
-```
-
-3. **Review sub-agent output** and apply fix if correct
-4. **Continue monitoring** for more failures
-
-### 1.3 Parallel Sub-Agent Guidelines
-
-| Sub-Agent Task | Agent Type | Key Instructions |
-|----------------|------------|------------------|
-| Analyze test failure | `debugger` | Read test, find root cause, suggest fix |
-| Fix Go code bug | `golang-pro` | Follow CNPG error/logging patterns |
-| Fix timing issue | `debugger` | Analyze timeouts, suggest retry logic |
-| Gather K8s context | `Bash` agent | Get pod logs, events, PVC status |
-
-**Critical Rules:**
-- Sub-agents **analyze and propose**, not commit
-- Main agent integrates fixes and commits with proper sign-off
-- One sub-agent per distinct failure to parallelize
-- Share context: test name, error, relevant file paths
-
-### 1.4 Apply Fixes Without Blocking Tests
-
-While tests continue running:
-
-```bash
-# Apply proposed fixes (edit files as needed)
-
-# Run quick validation
-make fmt
-make lint
-
-# Stage but don't commit yet - batch commits after test run
-git add -A
-```
-
-### 1.5 Wait for Test Completion
-
-```bash
-# Wait for background test to finish
-wait $E2E_PID
-EXIT_CODE=$?
-echo "Tests completed with exit code: $EXIT_CODE"
-```
-
-### 1.6 Expected Duration
-
-- Build + Push: 10-15 minutes
-- Deploy: 5 minutes
-- Test Execution: 2-3 hours (19 tests, some are Serial/Disruptive)
-- **With parallel fixing**: Fixes are ready when tests complete
-
-### 1.7 Sequential Fallback Mode
-
-If parallel fixing is too complex or you prefer sequential:
-
-```bash
-# Run full suite (wait for completion)
-./hack/e2e/run-aks-e2e.sh 2>&1 | tee /tmp/e2e-run-$(date +%Y%m%d-%H%M%S).log
-echo "Exit code: $?"
-```
-
-Then proceed to Phase 2 for analysis.
-
-### 1.8 Monitor Progress
-
-Watch for output sections:
-- `=== Build Stage ===`
-- `=== Push Stage ===`
-- `=== Deploy Stage ===`
-- `=== Pre-flight Checks ===`
-- `=== Test Execution ===`
-- Test results with ✓ (pass) or ✗ (fail)
 
 ---
 
-## Phase 2: Analyze Test Results
+## Diagnostics (When Failing)
 
-### 2.1 Capture Test Output
-
-The script should produce a summary like:
-
-```
-Tests Run: 19
-Passed: X
-Failed: Y
-
-Failed Tests:
-- Test name 1: <reason>
-- Test name 2: <reason>
-```
-
-### 2.2 Diagnostic Commands (if tests fail)
-
-The script includes diagnostic helpers. If tests fail, run:
+### Quick Triage
 
 ```bash
-# Diagnose volume attachments and cluster state
-./hack/e2e/run-aks-e2e.sh --diagnose-only
+# Operator logs
+kubectl logs -n $OPERATOR_NAMESPACE deployment/cnpg-controller-manager -c manager --tail=500
 
-# Check operator logs
-kubectl logs -n cnpg-system -l app.kubernetes.io/name=cloudnative-pg --tail=200
-
-# Check test namespace resources
+# Resources in test namespace
 kubectl get all,pvc,clusters -n <test-namespace>
 
-# Check cluster status
-kubectl get clusters.postgresql.cnpg.io -n <test-namespace> -o yaml
+# Cluster status (storageSizing)
+kubectl get cluster -n <test-namespace> <cluster-name> -o yaml
+
+# Volume attachments and cluster state
+./hack/e2e/run-aks-e2e.sh --diagnose-only
 ```
 
-### 2.3 Common Failure Patterns
+### Extracting Failed Tests from Report
 
-| Symptom | Likely Cause | Investigation Steps |
-|---------|--------------|---------------------|
-| Timeout waiting for PVC growth | Disk status still not available, or reconciler not running | Check operator logs, verify reconciler is called, check instance status |
-| PVC stuck in "Resizing" | Azure CSI driver issue or node attachment problem | Check VolumeAttachment, node logs, Azure portal |
-| Test setup fails | AKS cluster or storage class issue | Verify pre-flight checks, check storage class allows expansion |
-| Instance not starting | Image pull or resource issue | Check pod events, describe pod |
+```bash
+jq -r '.[] | select(.SpecReports) | .SpecReports[] | select(.State == "failed") | .LeafNodeText' \
+  tests/e2e/out/dynamic_storage_report.json
+```
+
+### Common Failure Patterns
+
+| Symptom | Likely Cause | Action |
+|---------|-------------|--------|
+| Timeout waiting for PVC growth | DiskStatus not collected, reconciler not running | Check operator logs for "No instances available for disk status" |
+| PVC stuck in "Resizing" | Azure CSI driver or node attachment issue | Check VolumeAttachment, Azure portal |
+| Test setup fails | AKS cluster or storage class misconfigured | Run `--diagnose-only`, verify `allowVolumeExpansion` |
+| Instance not starting | Image pull or resource issue | `kubectl describe pod`, check events |
+| Cluster stuck "Failing over" | Failover not completing, often related to disk fill | Check disk usage, pg_rewind space |
+| Node drain timeout | AKS eviction policies or PDB issues | Adjust drain timeout, check PDBs |
+
+### Key Source Files
+
+| File | Purpose |
+|------|---------|
+| `pkg/reconciler/dynamicstorage/reconciler.go` | Main reconciler logic |
+| `pkg/management/postgres/probes.go` | Disk status collection |
+| `tests/e2e/dynamic_storage_test.go` | E2E test definitions |
+| `tests/utils/timeouts/timeouts.go` | Timeout configuration |
 
 ---
 
-## Phase 3: Iteration Loop (If Tests Fail)
+## Regression Ledger (Required)
 
-### 3.0 Parallel vs Sequential Fixing
+After every E2E run, append to `E2E_TEST_SUMMARY.md`:
 
-**Parallel Mode (Recommended):** If using parallel mode from Phase 1, you've already been fixing tests as they fail. After test completion:
-1. Commit all staged fixes with proper sign-off
-2. Re-run failed tests with `--focus` to verify fixes
-3. Skip to Phase 4 if all tests pass
+```markdown
+## Run: <YYYY-MM-DD HH:MM UTC>
+- Branch: <branch>
+- Commit: <sha>
+- Command: `<exact command>`
+- Totals: Total=<n> Passed=<n> Failed=<n> Skipped=<n>
 
-**Sequential Mode:** If you waited for tests to complete, follow the workflow below.
-
-### 3.1 Debug Methodology
-
-Follow this debugging workflow:
-
-1. **Identify the failing test**
-   - Read test failure output carefully
-   - Note the test name and failure reason
-
-2. **Examine logs**
-   ```bash
-   # Operator logs
-   kubectl logs -n cnpg-system deployment/cloudnative-pg-controller-manager -c manager --tail=500 | grep -i "dynamic\|storage\|resize"
-
-   # Instance logs
-   kubectl logs -n <namespace> <pod-name> -c postgres --tail=100
-   ```
-
-3. **Check cluster status**
-   ```bash
-   kubectl get cluster -n <namespace> <cluster-name> -o jsonpath='{.status.storageSizing}' | jq
-   ```
-
-4. **Verify disk status**
-   ```bash
-   # Check if disk status is being reported
-   kubectl get cluster -n <namespace> <cluster-name> -o yaml | grep -A10 "storageSizing"
-   ```
-
-### 3.2 Make Fixes
-
-When you identify an issue:
-
-1. **Edit the code** (most likely locations):
-   - `pkg/reconciler/dynamicstorage/reconciler.go` - Main logic
-   - `pkg/management/postgres/probes.go` - Disk status collection
-   - `tests/e2e/dynamic_storage_test.go` - Test expectations
-   - `tests/utils/timeouts/timeouts.go` - Timeout configuration
-
-2. **Test locally if possible**:
-   ```bash
-   # Run unit tests
-   make test
-
-   # Run specific package tests
-   go test ./pkg/reconciler/dynamicstorage/... -v
-   ```
-
-3. **Commit the fix**:
-   ```bash
-   git add <files>
-   git commit -m "fix(dynamicstorage): <description>
-
-   <detailed explanation>
-
-   Co-Authored-By: Claude Sonnet 4.5 <noreply@anthropic.com>"
-   ```
-
-### 3.3 Re-run Tests
-
-After making fixes, re-run tests:
-
-```bash
-# Quick iteration: skip build if only test code changed
-./hack/e2e/run-aks-e2e.sh --skip-build --skip-deploy
-
-# Full rebuild if operator code changed
-./hack/e2e/run-aks-e2e.sh
-
-# Run specific failing test only (faster iteration)
-./hack/e2e/run-aks-e2e.sh --skip-build --skip-deploy --focus "test name pattern"
+### Deltas vs previous run
+- REGRESSION: <tests or none>
+- FIXED: <tests or none>
+- UNCHANGED FAILING: <tests or none>
 ```
-
-**Examples:**
-```bash
-# Re-run just the normal growth test
-./hack/e2e/run-aks-e2e.sh --skip-build --skip-deploy --focus "grows storage when usage exceeds"
-
-# Re-run emergency and maintenance tests
-./hack/e2e/run-aks-e2e.sh --skip-build --skip-deploy --focus "emergency|maintenance"
-```
-
-### 3.4 Iteration Guidelines
-
-- **Maximum 10 iterations**: If tests don't pass after 10 attempts, stop and report blockers
-- **Document each fix**: Every code change needs a clear commit message
-- **Test incrementally**: Focus on failing tests, don't re-run everything if unnecessary
-- **Check Azure quotas**: Some failures might be infrastructure-related (quota exhausted, node capacity, etc.)
 
 ---
 
-## Phase 4: Success Criteria
-
-### 4.1 All Tests Must Pass
-
-```
-Tests Run: 19
-Passed: 19
-Failed: 0
-```
-
-### 4.2 Test Coverage Matrix
-
-All these must pass:
-
-**Basic Tests (P0):**
-- ✓ rejects invalid configurations
-- ✓ provisions PVC at request size
-- ✓ grows storage when usage exceeds target buffer
-- ✓ respects limit and does not grow beyond it
-- ✓ creates new replicas at effective size
-
-**Maintenance & Emergency (P0):**
-- ✓ queues growth when outside maintenance window
-- ✓ grows immediately when critical threshold is reached
-
-**Operational Tests (P1):**
-- ✓ respects max actions per day budget
-- ✓ resumes growth operation after operator pod restart
-- ✓ resumes growth operation after primary pod restart
-- ✓ continues growth safely after failover
-- ✓ re-evaluates plan deterministically when spec changes
-- ✓ recovers growth operation after node drain
-- ✓ backup succeeds without deadlocking storage reconciliation
-- ✓ creates new replica at effective operational size
-- ✓ respects planned/emergency action budget and exposes exhaustion in status
-
-**Topology Tests (P1):**
-- ✓ handles dynamic sizing with no replicas (T1: instances=1)
-- ✓ handles dynamic sizing with single replica (T2: instances=2)
-- ✓ handles dynamic sizing with multiple replicas (T3: instances>=3)
-
-### 4.3 Clean State
-
-- No failing tests
-- No timeout errors
-- All clusters reach Ready state
-- All PVCs successfully resized when expected
-- Operator logs show no errors
-
----
-
-## Phase 5: Final Verification
-
-### 5.1 Full Test Suite
-
-Once all tests pass individually, run the complete suite one final time:
+## Final Verification (Only After All Gates Green)
 
 ```bash
-# Final verification run
 ./hack/e2e/run-aks-e2e.sh
 ```
 
-### 5.2 Documentation Update
+Success criteria:
 
-If you made significant changes during iteration, update:
-
-```bash
-# Add any new troubleshooting sections
-vim docs/src/storage_dynamic.md
-
-# Update design docs if behavior changed
-vim docs/src/design/dynamic-storage-meta-rfc.md
-
-# Commit documentation updates
-git add docs/
-git commit -m "docs(dynamicstorage): update based on E2E testing insights"
-```
-
-### 5.3 Create Summary
-
-Create a final summary document:
-
-```bash
-cat > E2E_TEST_SUMMARY.md <<'EOF'
-# Dynamic Storage E2E Test Results
-
-## Test Execution
-- Date: $(date)
-- Branch: feat/dynamic-storage-spec
-- Commit: $(git rev-parse --short HEAD)
-- AKS Cluster: [cluster details]
-
-## Results
-- Total Tests: 19
-- Passed: 19
+- Tests Run: 20
+- Passed: 20
 - Failed: 0
-- Duration: [X hours Y minutes]
-
-## Issues Found and Fixed
-1. [Issue 1]: [Description and fix commit]
-2. [Issue 2]: [Description and fix commit]
-...
-
-## Test Coverage
-[List all passing tests with checkmarks]
-
-## Conclusion
-All E2E tests pass successfully. The dynamic storage feature is ready for review.
-EOF
-
-git add E2E_TEST_SUMMARY.md
-git commit -m "test: add E2E test execution summary for dynamic storage"
-```
+- No infra/auth errors blocking results
+- `E2E_TEST_SUMMARY.md` updated with final run and deltas
 
 ---
 
-## Important Notes
+## Per-Iteration Output Contract
 
-### CloudNativePG Contribution Guidelines
+At the end of each loop, report:
 
-From `CONTRIBUTING.md`:
-- Follow existing code patterns and style
-- Write clear commit messages
-- Include unit tests for all new code
-- Document new features
-- External contributors: maintainers handle comprehensive cloud E2E testing, but we're doing this with user permission
+1. Command run
+2. Pass/fail counts
+3. First failing test (or `none`)
+4. Root cause hypothesis
+5. Exact files changed
+6. Next command
 
-### Test Script Features
+If complete, output only:
 
-The `run-aks-e2e.sh` script provides:
-- `--skip-build`: Skip Docker build (use when only test code changed)
-- `--skip-deploy`: Skip operator deployment (use when only test code changed)
-- `--focus <pattern>`: Run specific tests matching regex pattern
-- `--diagnose-only`: Just show cluster state, don't run tests
-- Automatic pre-flight checks (storage class validation, node availability)
-- VictoriaLogs integration hints for log analysis
-
-### Debugging Tools
-
-If stuck, use:
-```bash
-# Describe all resources in test namespace
-kubectl describe all -n <namespace>
-
-# Get operator logs with timestamps
-kubectl logs -n cnpg-system deployment/cloudnative-pg-controller-manager -c manager --timestamps --tail=500
-
-# Check Azure Disk CSI driver
-kubectl get csidrivers
-kubectl get storageclasses -o yaml
-
-# Check node status
-kubectl get nodes -o wide
-kubectl describe node <node-name>
-
-# Check volume attachments
-kubectl get volumeattachments
-```
-
----
-
-## Success Promise
-
-When ALL tests pass (19/19), output:
-
-<promise>ALL E2E TESTS PASS - DYNAMIC STORAGE FEATURE COMPLETE</promise>
-
-Only output this promise when:
-1. Full test suite runs successfully
-2. All 19 tests pass
-3. No timeout or infrastructure errors
-4. Clean git state with all fixes committed
-5. Summary document created
-
-Do NOT output the promise if any tests fail or if you're unsure about the results.
+`ALL E2E TESTS PASS - DYNAMIC STORAGE FEATURE COMPLETE`
 
 ---
 
 ## Emergency Stop Conditions
 
 Stop immediately and report if:
+
 1. **Azure quota exhausted**: Cannot create more resources
 2. **Authentication failures**: Cannot push images or access AKS
 3. **Infrastructure down**: AKS cluster unreachable
 4. **Fundamental bug**: Issue requires major architectural change
 5. **10 iterations exceeded**: Tests still failing after 10 fix attempts
-
-In these cases, document the blocker clearly and ask for user intervention.
-
----
-
-## Execution Checklist
-
-Before starting:
-- [ ] Azure authentication verified (`az account show`)
-- [ ] On correct branch (`git status` shows `feat/dynamic-storage-spec`)
-- [ ] Latest commits include all dynamic storage implementation
-- [ ] Environment variables set (`CONTROLLER_IMG_BASE`, etc.)
-- [ ] AKS cluster accessible (`kubectl cluster-info`)
-
-During execution:
-- [ ] Monitor build stage for errors
-- [ ] Monitor push stage for authentication issues
-- [ ] Monitor deploy stage for operator startup
-- [ ] Monitor test execution for failures
-- [ ] Capture full output to file for analysis
-
-After each iteration:
-- [ ] Analyze failure reasons carefully
-- [ ] Make targeted fixes, not shotgun changes
-- [ ] Test locally before rebuilding
-- [ ] Commit with clear messages
-- [ ] Document what was fixed and why
-
-Final verification:
-- [ ] All 19 tests pass
-- [ ] No errors in operator logs
-- [ ] All clusters reach Ready state
-- [ ] Summary document created
-- [ ] All fixes committed with good messages
-
----
-
-Begin execution when user confirms readiness.
