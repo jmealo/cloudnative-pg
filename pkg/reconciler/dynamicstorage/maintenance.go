@@ -118,6 +118,10 @@ func NextMaintenanceWindow(cfg *apiv1.StorageConfiguration) *time.Time {
 
 	now := time.Now().In(loc)
 	next := cronSchedule.Next(now)
+	// If the schedule never produces a valid time (e.g., Feb 31st), return nil
+	if next.IsZero() {
+		return nil
+	}
 	return &next
 }
 
