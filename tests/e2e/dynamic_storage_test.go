@@ -829,9 +829,10 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 				Limit:        "20Gi",
 				TargetBuffer: ptr.To(20),
 				MaintenanceWindow: &apiv1.MaintenanceWindowConfig{
-					// Set maintenance window to a time that is not now
-					// robfig/cron uses 6-field format: second minute hour day-of-month month day-of-week
-					Schedule: "0 0 4 31 2 *", // February 31st at 4am (never happens)
+					// Set maintenance window to a time that won't occur during the test.
+					// Using 4am on December 31st (which is valid and will never run during tests).
+					// 6-field cron format: second minute hour day-of-month month day-of-week
+					Schedule: "0 0 4 31 12 *",
 					Duration: "1h",
 					Timezone: "UTC",
 				},
