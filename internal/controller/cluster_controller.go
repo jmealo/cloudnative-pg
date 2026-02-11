@@ -579,6 +579,14 @@ func (r *ClusterReconciler) reconcile(ctx context.Context, cluster *apiv1.Cluste
 		return hookResult.Result, hookResult.Err
 	}
 
+	// Request periodic requeue for dynamic storage monitoring.
+	// When dynamic storage is enabled, we need to periodically check disk usage
+	// to trigger storage growth when thresholds are crossed. Without this, the
+	// reconciler would only run on watch events, missing disk usage changes.
+	if dynamicstorage.IsDynamicSizingEnabled(&cluster.Spec.StorageConfiguration) {
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+
 	return setStatusPluginHook(ctx, r.Client, cnpgiClient.GetPluginClientFromContext(ctx), cluster)
 }
 

@@ -21,7 +21,6 @@ package dynamicstorage
 
 import (
 	"context"
-	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -87,8 +86,9 @@ var _ = Describe("reconciler", func() {
 			c := fake.NewClientBuilder().WithScheme(scheme.BuildWithAllKnownScheme()).Build()
 			res, err := Reconcile(ctx, c, cluster, nil, status, nil)
 			Expect(err).ToNot(HaveOccurred())
-			// Should requeue after 30 seconds
-			Expect(res.RequeueAfter).To(Equal(30 * time.Second))
+			// Should return empty result to allow cluster controller to continue.
+			// The cluster controller will requeue periodically when dynamic storage is enabled.
+			Expect(res.IsZero()).To(BeTrue())
 		})
 
 		It("trigger emergency grow when disk is full", func() {
@@ -125,7 +125,8 @@ var _ = Describe("reconciler", func() {
 
 			c := fake.NewClientBuilder().
 				WithScheme(scheme.BuildWithAllKnownScheme()).
-				WithObjects(&pvc).
+				WithObjects(cluster, &pvc).
+				WithStatusSubresource(cluster).
 				Build()
 
 			res, err := Reconcile(ctx, c, cluster, nil, status, []corev1.PersistentVolumeClaim{pvc})
@@ -140,6 +141,15 @@ var _ = Describe("reconciler", func() {
 			expected := resource.MustParse("125Gi")
 			actual := updatedPVC.Spec.Resources.Requests[corev1.ResourceStorage]
 			Expect(actual.Cmp(expected)).To(Equal(0))
+
+			// Check that cluster status was updated with LastAction
+			var updatedCluster apiv1.Cluster
+			err = c.Get(ctx, types.NamespacedName{Name: "test-cluster", Namespace: "default"}, &updatedCluster)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(updatedCluster.Status.StorageSizing).ToNot(BeNil())
+			Expect(updatedCluster.Status.StorageSizing.Data).ToNot(BeNil())
+			Expect(updatedCluster.Status.StorageSizing.Data.LastAction).ToNot(BeNil())
+			Expect(updatedCluster.Status.StorageSizing.Data.LastAction.Kind).To(Equal("EmergencyGrow"))
 		})
 
 		It("queue growth if maintenance window is closed", func() {
