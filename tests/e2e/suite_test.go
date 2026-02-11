@@ -24,6 +24,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -83,6 +84,15 @@ var (
 	testTimeouts            map[timeouts.Timeout]int
 	minioEnv                = getMinioEnv()
 )
+
+func shouldSkipOperatorPodStabilityCheck() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("TEST_SKIP_OPERATOR_POD_STABILITY_CHECK"))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
 
 var _ = SynchronizedBeforeSuite(func() []byte {
 	var err error
@@ -179,6 +189,9 @@ var _ = BeforeEach(func() {
 	if len(breakingLabelsInCurrentTest.([]string)) != 0 {
 		return
 	}
+	if shouldSkipOperatorPodStabilityCheck() {
+		return
+	}
 
 	operatorPod, err := operator.GetPod(env.Ctx, env.Client)
 	Expect(err).ToNot(HaveOccurred())
@@ -205,6 +218,9 @@ func TestE2ESuite(t *testing.T) {
 // tests will be SKIPPED, as they would always fail in this node.
 var _ = AfterEach(func() {
 	if CurrentSpecReport().State.Is(types.SpecStateSkipped) {
+		return
+	}
+	if shouldSkipOperatorPodStabilityCheck() {
 		return
 	}
 	labelsForTestsBreakingTheOperator := []string{"upgrade", "disruptive"}
