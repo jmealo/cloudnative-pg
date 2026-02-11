@@ -1180,10 +1180,11 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 					primaryPod, err = clusterutils.GetPrimary(env.Ctx, env.Client, namespace, clusterName)
 					Expect(err).ToNot(HaveOccurred())
 
-					// Fill disk incrementally to reach ~85% usage (exceeding the 80% threshold
+					// Fill disk incrementally to reach ~83% usage (exceeding the 80% threshold
 					// that triggers growth when targetBuffer is 20%). We use incremental filling
 					// to give the storage reconciler time to detect the condition and respond.
-					finalUsage, fillErr := fillDiskIncrementally(primaryPod, 85, 92, 500000)
+					// Cap at 85% to avoid WAL archiving pressure that can prevent replica recovery.
+					finalUsage, fillErr := fillDiskIncrementally(primaryPod, 83, 85, 500000)
 					if fillErr != nil {
 						GinkgoWriter.Printf("Disk fill ended with error (may be expected): %v\n", fillErr)
 					}
@@ -1619,7 +1620,9 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 				// Fill disk incrementally to reach ~85% usage (exceeding the 80% threshold
 				// that triggers growth when targetBuffer is 20%). We use incremental filling
 				// to give the storage reconciler time to detect the condition and respond.
-				finalUsage, fillErr := fillDiskIncrementally(primaryPod, 85, 92, 500000)
+				// Cap at 87% to avoid hitting emergency threshold (99%) since each batch
+				// adds ~10-15% and we need room for PostgreSQL overhead.
+				finalUsage, fillErr := fillDiskIncrementally(primaryPod, 85, 87, 500000)
 				if fillErr != nil {
 					GinkgoWriter.Printf("Disk fill ended with error (may be expected): %v\n", fillErr)
 				}
@@ -1664,9 +1667,10 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 						Name:      backupName,
 					}, backup)
 					g.Expect(err).ToNot(HaveOccurred())
+					// Use BeEquivalentTo for type-safe comparison with BackupPhase type alias
 					g.Expect(backup.Status.Phase).To(Or(
-						Equal(apiv1.BackupPhaseCompleted),
-						Equal(apiv1.BackupPhaseFailed),
+						BeEquivalentTo(apiv1.BackupPhaseCompleted),
+						BeEquivalentTo(apiv1.BackupPhaseFailed),
 					))
 				}).WithTimeout(time.Duration(testTimeouts[timeouts.AKSBackupIsReady]) * time.Second).
 					WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())

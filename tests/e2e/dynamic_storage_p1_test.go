@@ -170,9 +170,10 @@ var _ = Describe("Dynamic storage management extended scenarios",
 							Name:      backupName,
 						}, backup)
 						g.Expect(getErr).ToNot(HaveOccurred())
+						// Use BeEquivalentTo for type-safe comparison with BackupPhase type alias
 						g.Expect(backup.Status.Phase).To(Or(
-							Equal(apiv1.BackupPhaseCompleted),
-							Equal(apiv1.BackupPhaseFailed),
+							BeEquivalentTo(apiv1.BackupPhaseCompleted),
+							BeEquivalentTo(apiv1.BackupPhaseFailed),
 						))
 					}).WithTimeout(time.Duration(testTimeouts[timeouts.AKSBackupIsReady]) * time.Second).
 						WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())
