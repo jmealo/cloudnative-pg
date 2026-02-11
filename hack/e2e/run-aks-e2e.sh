@@ -95,6 +95,10 @@ GINKGO_FOCUS=${GINKGO_FOCUS:-}
 GINKGO_FAIL_FAST=${GINKGO_FAIL_FAST:-false}
 # Set cloud vendor for test profile selection
 export TEST_CLOUD_VENDOR=${TEST_CLOUD_VENDOR:-aks}
+# Operator pod name/restart stability checks in E2E are useful on stable local envs,
+# but can produce false failures on long AKS runs where the control plane may roll pods.
+# Keep this overridable and default it to true for this AKS-focused runner.
+export TEST_SKIP_OPERATOR_POD_STABILITY_CHECK=${TEST_SKIP_OPERATOR_POD_STABILITY_CHECK:-true}
 
 # Namespace configuration (exported for ginkgo tests)
 export OPERATOR_NAMESPACE=${OPERATOR_NAMESPACE:-cnpg-system}
@@ -275,7 +279,8 @@ if ! [[ "${GINKGO_MAX_NODES}" =~ ^[0-9]+$ ]] || [[ "${GINKGO_MAX_NODES}" -lt 1 ]
 fi
 
 if [ -z "${GINKGO_NODES}" ]; then
-  GINKGO_NODES="${GINKGO_MAX_NODES}"
+  # Default to sequential execution to reduce AKS disk attach/detach contention.
+  GINKGO_NODES=1
 fi
 
 if ! [[ "${GINKGO_NODES}" =~ ^[0-9]+$ ]] || [[ "${GINKGO_NODES}" -lt 1 ]]; then
@@ -513,6 +518,7 @@ info "StorageClass: ${E2E_DEFAULT_STORAGE_CLASS}"
 info "Ginkgo nodes: ${GINKGO_NODES}"
 info "Ginkgo timeout: ${GINKGO_TIMEOUT}"
 info "Ginkgo fail-fast: ${GINKGO_FAIL_FAST}"
+info "Skip operator pod stability check: ${TEST_SKIP_OPERATOR_POD_STABILITY_CHECK}"
 info "Label filter: dynamic-storage || dynamic-storage-p0 || dynamic-storage-p1"
 if [ -n "${GINKGO_FOCUS}" ]; then
   info "Focus filter: ${GINKGO_FOCUS}"
