@@ -189,11 +189,18 @@ func Reconcile(
 		return ctrl.Result{}, nil
 	}
 
-	// Evaluate sizing for data volume
-	result := evaluateSizing(cluster, &cluster.Spec.StorageConfiguration, VolumeTypeData, "", diskStatusMap)
-
-	// Collect actual PVC sizes
+	// Collect actual PVC sizes (needed for both sizing evaluation and status)
 	actualSizes := collectActualSizes(pvcs, VolumeTypeData, "")
+	contextLogger.Debug("Collected actual PVC sizes",
+		"count", len(actualSizes),
+		"sizes", actualSizes,
+		"pvcCount", len(pvcs))
+
+	// Evaluate sizing for data volume, using PVC capacity as the authoritative current size.
+	// Filesystem TotalBytes from statfs is smaller than PVC capacity due to filesystem
+	// metadata overhead (~3% for ext4/xfs), so we must use PVC capacity to avoid
+	// false growth actions (e.g., "growing" from 4.84Gi → 5Gi when PVC is already 5Gi).
+	result := evaluateSizing(cluster, &cluster.Spec.StorageConfiguration, VolumeTypeData, "", diskStatusMap, actualSizes)
 
 	// Update status based on result (status structures already initialized above)
 	updateVolumeStatus(cluster.Status.StorageSizing.Data, &cluster.Spec.StorageConfiguration, result, actualSizes)
@@ -269,9 +276,6 @@ func reconcileTablespaces(
 			continue
 		}
 
-		result := evaluateSizing(cluster, &tbs.Storage, VolumeTypeTablespace, tbs.Name, diskStatusMap)
-		result.TablespaceName = tbs.Name
-
 		// Initialize status
 		if cluster.Status.StorageSizing.Tablespaces == nil {
 			cluster.Status.StorageSizing.Tablespaces = make(map[string]*apiv1.VolumeSizingStatus)
@@ -282,6 +286,9 @@ func reconcileTablespaces(
 
 		// Collect actual PVC sizes for this tablespace
 		actualSizes := collectActualSizes(pvcs, VolumeTypeTablespace, tbs.Name)
+
+		result := evaluateSizing(cluster, &tbs.Storage, VolumeTypeTablespace, tbs.Name, diskStatusMap, actualSizes)
+		result.TablespaceName = tbs.Name
 
 		updateVolumeStatus(cluster.Status.StorageSizing.Tablespaces[tbs.Name], &tbs.Storage, result, actualSizes)
 
@@ -351,12 +358,16 @@ func collectDiskStatusForVolume(
 }
 
 // evaluateSizing evaluates the sizing needs for a volume type.
+// pvcSizes maps instance names to their PVC capacity strings (from Status.Capacity or Spec.Resources.Requests).
+// We use PVC capacity as the authoritative "current size" because filesystem TotalBytes (from statfs)
+// is reduced by filesystem metadata overhead (~3% for ext4/xfs), which would cause false growth actions.
 func evaluateSizing(
 	cluster *apiv1.Cluster,
 	cfg *apiv1.StorageConfiguration,
 	volumeType VolumeType,
 	tbsName string,
 	diskStatusMap map[string]*DiskInfo,
+	pvcSizes map[string]string,
 ) *ReconcileResult {
 	maxUsed, maxTotal, minAvailable, highestUsageInstance := findMaxUsage(diskStatusMap)
 
@@ -377,7 +388,18 @@ func evaluateSizing(
 		}
 	}
 
-	currentSize := *resource.NewQuantity(int64(maxTotal), resource.BinarySI) //nolint:gosec
+	// Use PVC capacity as currentSize rather than filesystem TotalBytes.
+	// Filesystem metadata overhead (~3% for ext4/xfs) makes statfs.TotalBytes smaller
+	// than the actual PVC capacity, which would cause false growth (e.g., "growing"
+	// from 4.84Gi → 5Gi when PVC is already 5Gi).
+	currentSize := maxPVCSize(pvcSizes)
+	pvcSizesAvailable := !currentSize.IsZero()
+	if currentSize.IsZero() {
+		// Fallback to filesystem TotalBytes if no PVC sizes available.
+		// This is only safe for emergency conditions where we must act regardless.
+		// For scheduled growth, we need accurate PVC sizes to avoid false growth.
+		currentSize = *resource.NewQuantity(int64(maxTotal), resource.BinarySI) //nolint:gosec
+	}
 
 	// Check if at limit
 	if currentSize.Cmp(limit) >= 0 {
@@ -420,6 +442,7 @@ func evaluateSizing(
 		cfg, volumeStatus, volumeType,
 		currentSize, request, limit,
 		maxTotal, maxUsed, highestUsageInstance,
+		pvcSizesAvailable,
 	)
 }
 
@@ -435,6 +458,22 @@ func findMaxUsage(diskStatusMap map[string]*DiskInfo) (uint64, uint64, uint64, s
 		}
 	}
 	return maxUsed, maxTotal, minAvailable, highestUsageInstance
+}
+
+// maxPVCSize returns the largest PVC capacity from the provided map.
+// This gives the authoritative current volume size, unaffected by filesystem overhead.
+func maxPVCSize(pvcSizes map[string]string) resource.Quantity {
+	var max resource.Quantity
+	for _, sizeStr := range pvcSizes {
+		qty, err := resource.ParseQuantity(sizeStr)
+		if err != nil {
+			continue
+		}
+		if qty.Cmp(max) > 0 {
+			max = qty
+		}
+	}
+	return max
 }
 
 func getVolumeSizingStatus(cluster *apiv1.Cluster, volumeType VolumeType, tbsName string) *apiv1.VolumeSizingStatus {
@@ -461,6 +500,7 @@ func evaluateGrowth(
 	currentSize, request, limit resource.Quantity,
 	maxTotal, maxUsed uint64,
 	highestUsageInstance string,
+	pvcSizesAvailable bool,
 ) *ReconcileResult {
 	// Calculate target size first for consistent metrics/status reporting
 	targetSize := CalculateTargetSize(maxUsed, GetTargetBuffer(cfg))
@@ -474,6 +514,20 @@ func evaluateGrowth(
 			CurrentSize: currentSize,
 			TargetSize:  targetSize,
 			Reason:      "balanced",
+		}
+	}
+
+	// If growth is needed but we don't have accurate PVC sizes, we cannot safely
+	// proceed with scheduled growth. The filesystem TotalBytes is smaller than PVC
+	// capacity due to overhead, so target calculations would be inaccurate.
+	// We return NoOp and wait for PVC size data to be available.
+	if !pvcSizesAvailable {
+		return &ReconcileResult{
+			Action:      ActionNoOp,
+			VolumeType:  volumeType,
+			CurrentSize: currentSize,
+			TargetSize:  targetSize,
+			Reason:      "waiting for PVC size data",
 		}
 	}
 
@@ -609,9 +663,26 @@ func executeAction(
 	pvcs []corev1.PersistentVolumeClaim,
 	result *ReconcileResult,
 ) error {
-	if err := patchPVCsForVolume(ctx, c, pvcs, result); err != nil {
+	contextLogger := log.FromContext(ctx)
+
+	patchedCount, err := patchPVCsForVolume(ctx, c, pvcs, result)
+	if err != nil {
 		return err
 	}
+
+	// If no PVCs were actually patched, this means the PVCs were already at or above
+	// the target size. This can happen when result.CurrentSize was calculated from
+	// filesystem TotalBytes (which has ~3% overhead) but PVC capacity is already
+	// at the target. Convert to NoOp to avoid false "Success" reports.
+	if patchedCount == 0 {
+		contextLogger.Info("No PVCs needed patching - all already at target size",
+			"action", result.Action,
+			"targetSize", result.TargetSize.String(),
+			"reason", "PVCs already at or above target size")
+		// Don't update LastAction status since no actual growth happened
+		return nil
+	}
+
 	return updateStatusAfterAction(cluster, result)
 }
 
@@ -620,8 +691,9 @@ func patchPVCsForVolume(
 	c client.Client,
 	pvcs []corev1.PersistentVolumeClaim,
 	result *ReconcileResult,
-) error {
+) (int, error) {
 	contextLogger := log.FromContext(ctx)
+	patchedCount := 0
 
 	for i := range pvcs {
 		pvc := &pvcs[i]
@@ -631,6 +703,13 @@ func patchPVCsForVolume(
 
 		currentSize := pvc.Spec.Resources.Requests[corev1.ResourceStorage]
 		if currentSize.Cmp(result.TargetSize) >= 0 {
+			// PVC already at or above target size - log this for debugging
+			contextLogger.Info("Skipping PVC patch - already at target size",
+				"pvcName", pvc.Name,
+				"volumeType", result.VolumeType,
+				"pvcCurrentSize", currentSize.String(),
+				"targetSize", result.TargetSize.String(),
+				"resultCurrentSize", result.CurrentSize.String())
 			continue
 		}
 
@@ -643,10 +722,11 @@ func patchPVCsForVolume(
 		oldPVC := pvc.DeepCopy()
 		pvc.Spec.Resources.Requests[corev1.ResourceStorage] = result.TargetSize
 		if err := c.Patch(ctx, pvc, client.MergeFrom(oldPVC)); err != nil {
-			return fmt.Errorf("error patching PVC %s: %w", pvc.Name, err)
+			return patchedCount, fmt.Errorf("error patching PVC %s: %w", pvc.Name, err)
 		}
+		patchedCount++
 	}
-	return nil
+	return patchedCount, nil
 }
 
 func isPVCForVolume(pvc *corev1.PersistentVolumeClaim, result *ReconcileResult) bool {
