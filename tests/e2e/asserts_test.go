@@ -148,7 +148,8 @@ func AssertSwitchoverWithHistory(
 			Namespace: namespace,
 			Name:      oldPrimary,
 		}
-		timeout := 120
+		// Use AKSVolumeAttach timeout (600s) to account for volume reattachment after switchover
+		timeout := testTimeouts[timeouts.AKSVolumeAttach]
 		Eventually(func() (bool, error) {
 			pod := corev1.Pod{}
 			err := env.Client.Get(env.Ctx, namespacedName, &pod)
@@ -161,7 +162,8 @@ func AssertSwitchoverWithHistory(
 			Namespace: namespace,
 			Name:      oldPrimary,
 		}
-		timeout := 120
+		// Use AKSVolumeAttach timeout (600s) to account for volume operations after switchover
+		timeout := testTimeouts[timeouts.AKSVolumeAttach]
 		Eventually(func() (bool, error) {
 			pod := corev1.Pod{}
 			err := env.Client.Get(env.Ctx, namespacedName, &pod)

@@ -237,6 +237,21 @@ func reconcileTablespaces(
 
 		diskStatusMap := collectDiskStatusForVolume(instanceStatuses, VolumeTypeTablespace, tbs.Name)
 		if len(diskStatusMap) == 0 {
+			// Initialize status for this tablespace so we can report why we're waiting
+			if cluster.Status.StorageSizing.Tablespaces == nil {
+				cluster.Status.StorageSizing.Tablespaces = make(map[string]*apiv1.VolumeSizingStatus)
+			}
+			if cluster.Status.StorageSizing.Tablespaces[tbs.Name] == nil {
+				cluster.Status.StorageSizing.Tablespaces[tbs.Name] = &apiv1.VolumeSizingStatus{}
+			}
+
+			// Set state to indicate we're waiting for disk status
+			if instanceStatuses != nil && len(instanceStatuses.Items) > 0 {
+				cluster.Status.StorageSizing.Tablespaces[tbs.Name].State = "WaitingForDiskStatus"
+				contextLogger.Info("No disk status available for tablespace yet, will retry on next reconciliation",
+					"tablespace", tbs.Name,
+					"instanceCount", len(instanceStatuses.Items))
+			}
 			continue
 		}
 
@@ -369,10 +384,13 @@ func evaluateSizing(
 				InstanceName: highestUsageInstance,
 			}
 		}
+		// Calculate target size even when budget exhausted for metrics/status
+		targetSize := CalculateTargetSize(maxUsed, GetTargetBuffer(cfg))
 		return &ReconcileResult{
 			Action:      ActionNoOp,
 			VolumeType:  volumeType,
 			CurrentSize: currentSize,
+			TargetSize:  targetSize,
 			Reason:      "emergency budget exhausted",
 		}
 	}
@@ -423,18 +441,20 @@ func evaluateGrowth(
 	maxTotal, maxUsed uint64,
 	highestUsageInstance string,
 ) *ReconcileResult {
+	// Calculate target size first for consistent metrics/status reporting
+	targetSize := CalculateTargetSize(maxUsed, GetTargetBuffer(cfg))
+	targetSize = ClampSize(targetSize, request, limit)
+
 	// Check if growth is needed
 	if !NeedsGrowth(cfg, maxTotal, maxUsed) {
 		return &ReconcileResult{
 			Action:      ActionNoOp,
 			VolumeType:  volumeType,
 			CurrentSize: currentSize,
+			TargetSize:  targetSize,
 			Reason:      "balanced",
 		}
 	}
-
-	targetSize := CalculateTargetSize(maxUsed, GetTargetBuffer(cfg))
-	targetSize = ClampSize(targetSize, request, limit)
 
 	// Only grow if target is larger than current
 	if targetSize.Cmp(currentSize) <= 0 {
