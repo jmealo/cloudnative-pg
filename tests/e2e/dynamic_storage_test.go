@@ -770,6 +770,21 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 				AssertCreateCluster(namespace, clusterName, clusterFile, env)
 			})
 
+			var initialTablespaceRequest resource.Quantity
+			By("recording initial tablespace PVC request", func() {
+				var pvcList corev1.PersistentVolumeClaimList
+				err := env.Client.List(env.Ctx, &pvcList,
+					ctrlclient.InNamespace(namespace),
+					ctrlclient.MatchingLabels{
+						utils.ClusterLabelName:        clusterName,
+						utils.PvcRoleLabelName:        string(utils.PVCRolePgTablespace),
+						utils.TablespaceNameLabelName: tbsName,
+					})
+				Expect(err).ToNot(HaveOccurred())
+				Expect(pvcList.Items).To(HaveLen(1))
+				initialTablespaceRequest = pvcList.Items[0].Spec.Resources.Requests[corev1.ResourceStorage]
+			})
+
 			var primaryPod *corev1.Pod
 			By("finding primary pod", func() {
 				primaryPod, err = clusterutils.GetPrimary(env.Ctx, env.Client, namespace, clusterName)
@@ -777,7 +792,8 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 			})
 
 			By("filling tablespace disk to trigger growth", func() {
-				finalUsage, err := fillTablespaceDiskIncrementally(primaryPod, tbsName, 85, 92, 500000, namespace, clusterName)
+				// Use smaller batches to avoid abrupt disk exhaustion on small tablespace PVCs.
+				finalUsage, err := fillTablespaceDiskIncrementally(primaryPod, tbsName, 82, 88, 100000, namespace, clusterName)
 				if err != nil {
 					GinkgoWriter.Printf("Tablespace disk fill ended with error: %v\n", err)
 				}
@@ -805,8 +821,8 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 					g.Expect(err).ToNot(HaveOccurred())
 					g.Expect(pvcList.Items).To(HaveLen(1))
 					size := pvcList.Items[0].Spec.Resources.Requests[corev1.ResourceStorage]
-					g.Expect(size.Cmp(resource.MustParse("1Gi"))).To(BeNumerically(">", 0),
-						"Tablespace PVC request should grow beyond initial 1Gi")
+					g.Expect(size.Cmp(initialTablespaceRequest)).To(BeNumerically(">", 0),
+						"Tablespace PVC request should grow beyond initial request %s", initialTablespaceRequest.String())
 				}).WithTimeout(time.Duration(testTimeouts[timeouts.AKSVolumeResize]) * time.Second).
 					WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())
 			})
@@ -1180,11 +1196,12 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 					primaryPod, err = clusterutils.GetPrimary(env.Ctx, env.Client, namespace, clusterName)
 					Expect(err).ToNot(HaveOccurred())
 
-					// Fill disk incrementally to reach ~83% usage (exceeding the 80% threshold
-					// that triggers growth when targetBuffer is 20%). We use incremental filling
-					// to give the storage reconciler time to detect the condition and respond.
-					// Cap at 85% to avoid WAL archiving pressure that can prevent replica recovery.
-					finalUsage, fillErr := fillDiskIncrementally(primaryPod, 83, 85, 500000)
+					// Use lower disk fill (78-80%) for tests that involve pod deletion/restart.
+					// When the primary pod is deleted and comes back up, it needs pg_rewind
+					// to rejoin the cluster. At higher disk usage (83%+), PostgreSQL recycles
+					// WAL segments aggressively, which can cause pg_rewind to fail when trying
+					// to find the divergence point.
+					finalUsage, fillErr := fillDiskIncrementally(primaryPod, 78, 80, 500000)
 					if fillErr != nil {
 						GinkgoWriter.Printf("Disk fill ended with error (may be expected): %v\n", fillErr)
 					}
