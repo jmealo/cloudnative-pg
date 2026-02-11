@@ -25,7 +25,7 @@
 # Handles: build, push, deploy, pre-flight checks, test execution.
 #
 # Usage:
-#   hack/e2e/run-e2e-aks-autoresize.sh [--skip-build] [--skip-deploy] [--diagnose-only]
+#   hack/e2e/run-e2e-aks-autoresize.sh [--skip-build] [--skip-deploy] [--diagnose-only] [--fail-fast]
 #   hack/e2e/run-e2e-aks-autoresize.sh --focus "archive health"
 #   hack/e2e/run-e2e-aks-autoresize.sh --focus "inactive slot" --skip-build --skip-deploy
 #
@@ -92,13 +92,14 @@ SKIP_BUILD=${SKIP_BUILD:-false}
 SKIP_DEPLOY=${SKIP_DEPLOY:-false}
 DIAGNOSE_ONLY=${DIAGNOSE_ONLY:-false}
 GINKGO_FOCUS=${GINKGO_FOCUS:-}
+GINKGO_FAIL_FAST=${GINKGO_FAIL_FAST:-false}
 # Set cloud vendor for test profile selection
 export TEST_CLOUD_VENDOR=${TEST_CLOUD_VENDOR:-aks}
 
-# Namespace configuration
-OPERATOR_NAMESPACE=${OPERATOR_NAMESPACE:-cnpg-system}
-MINIO_NAMESPACE=${MINIO_NAMESPACE:-minio}
-TEST_NAMESPACE_PREFIX=${TEST_NAMESPACE_PREFIX:-dynamic-storage}
+# Namespace configuration (exported for ginkgo tests)
+export OPERATOR_NAMESPACE=${OPERATOR_NAMESPACE:-cnpg-system}
+export MINIO_NAMESPACE=${MINIO_NAMESPACE:-minio}
+export TEST_NAMESPACE_PREFIX=${TEST_NAMESPACE_PREFIX:-dynamic-storage}
 
 # Colors (defined early for use in flag parsing)
 RED='\033[0;31m'
@@ -118,6 +119,8 @@ while [[ $# -gt 0 ]]; do
     --skip-build)  SKIP_BUILD=true; shift ;;
     --skip-deploy) SKIP_DEPLOY=true; shift ;;
     --diagnose-only) DIAGNOSE_ONLY=true; shift ;;
+    --fail-fast) GINKGO_FAIL_FAST=true; shift ;;
+    --no-fail-fast) GINKGO_FAIL_FAST=false; shift ;;
     --focus)
       if [[ -n "${2:-}" ]]; then
         GINKGO_FOCUS="$2"; shift 2
@@ -509,6 +512,7 @@ info "=== Running Dynamic Storage E2E Tests ==="
 info "StorageClass: ${E2E_DEFAULT_STORAGE_CLASS}"
 info "Ginkgo nodes: ${GINKGO_NODES}"
 info "Ginkgo timeout: ${GINKGO_TIMEOUT}"
+info "Ginkgo fail-fast: ${GINKGO_FAIL_FAST}"
 info "Label filter: dynamic-storage || dynamic-storage-p0 || dynamic-storage-p1"
 if [ -n "${GINKGO_FOCUS}" ]; then
   info "Focus filter: ${GINKGO_FOCUS}"
@@ -524,7 +528,7 @@ info "=== Pre-test Cleanup ==="
 # These leave behind PVCs with Azure Disks attached, which saturate
 # the attach queue and cause timeouts for new tests.
 # Clean up: dynamic-storage-* (test namespaces) and minio (object store for backup tests)
-ORPHAN_NS=$(kubectl get namespaces -o name 2>/dev/null | grep -E "dynamic-storage-|^namespace/${MINIO_NAMESPACE}\$" | cut -d/ -f2 || true)
+ORPHAN_NS=$(kubectl get namespaces -o name 2>/dev/null | grep -E "${TEST_NAMESPACE_PREFIX}-|^namespace/${MINIO_NAMESPACE}\$" | cut -d/ -f2 || true)
 if [ -n "${ORPHAN_NS}" ]; then
   warn "Found orphaned namespaces from prior runs:"
   echo "${ORPHAN_NS}"
@@ -532,9 +536,34 @@ if [ -n "${ORPHAN_NS}" ]; then
   for ns in ${ORPHAN_NS}; do
     kubectl delete namespace "${ns}" --wait=false 2>/dev/null || true
   done
-  # Wait briefly for namespace termination to start releasing disks
-  info "Waiting 30s for Azure Disk detach operations to begin..."
-  sleep 30
+  # Wait for namespace deletion to complete (up to 5 min)
+  # Azure Disk detach can take 1-3 minutes per disk
+  info "Waiting for namespace deletion to complete (up to 5 min)..."
+  WAIT_START=$(date +%s)
+  WAIT_MAX=300
+  while true; do
+    REMAINING_NS=$(kubectl get namespaces -o name 2>/dev/null | grep -E "${TEST_NAMESPACE_PREFIX}-|^namespace/${MINIO_NAMESPACE}\$" | cut -d/ -f2 || true)
+    if [ -z "${REMAINING_NS}" ]; then
+      ok "All orphaned namespaces deleted"
+      break
+    fi
+    ELAPSED=$(($(date +%s) - WAIT_START))
+    if [ "${ELAPSED}" -ge "${WAIT_MAX}" ]; then
+      warn "Timeout waiting for namespace deletion after ${WAIT_MAX}s"
+      warn "Remaining namespaces (may be stuck): ${REMAINING_NS}"
+      # Force remove finalizers on stuck namespaces
+      for ns in ${REMAINING_NS}; do
+        info "Force-removing finalizers from stuck namespace: ${ns}"
+        kubectl get namespace "${ns}" -o json 2>/dev/null | \
+          jq '.spec.finalizers = []' | \
+          kubectl replace --raw "/api/v1/namespaces/${ns}/finalize" -f - 2>/dev/null || true
+      done
+      sleep 5
+      break
+    fi
+    info "  Still waiting... (${ELAPSED}s elapsed, remaining: ${REMAINING_NS})"
+    sleep 10
+  done
 else
   ok "No orphaned test namespaces found"
 fi
@@ -562,10 +591,12 @@ export AZURE_STORAGE_ACCOUNT=${AZURE_STORAGE_ACCOUNT:-''}
 #   - WAL tests create 2 PVCs × 3 instances = 6 disks
 #   - With attach contention, cluster creation can take 10-15 min
 # Default ClusterIsReady is 600s (10 min) — bump to 900s (15 min)
-# Default ClusterIsReadySlow is 800s (~13 min) — bump to 1200s (20 min)
+# Default ClusterIsReadySlow is 800s (~13 min) — bump to 1800s (30 min)
+# Default DrainNode is 1200s — bump to 1800s (30 min) for AKS volume operations
+# Default BackupIsReady is 180s — bump to 600s (10 min) for AKS backup during resize
 if [ -z "${TEST_TIMEOUTS:-}" ]; then
-  export TEST_TIMEOUTS='{"clusterIsReady":900,"clusterIsReadySlow":1200}'
-  info "Using AKS-tuned timeouts: ClusterIsReady=900s, ClusterIsReadySlow=1200s"
+  export TEST_TIMEOUTS='{"clusterIsReady":900,"clusterIsReadySlow":1800,"drainNode":1800,"aksBackupIsReady":600}'
+  info "Using AKS-tuned timeouts: ClusterIsReady=900s, ClusterIsReadySlow=1800s, DrainNode=1800s"
 else
   info "Using user-provided TEST_TIMEOUTS: ${TEST_TIMEOUTS}"
 fi
@@ -581,6 +612,11 @@ RC_GINKGO=0
 FOCUS_FLAGS=()
 if [ -n "${GINKGO_FOCUS}" ]; then
   FOCUS_FLAGS=(--focus "${GINKGO_FOCUS}")
+fi
+
+FAIL_FAST_FLAGS=()
+if [ "${GINKGO_FAIL_FAST}" = "true" ]; then
+  FAIL_FAST_FLAGS=(--fail-fast)
 fi
 
 # Run with --nodes=1 (sequential) by default to avoid resource contention on
@@ -602,6 +638,7 @@ ginkgo --nodes="${GINKGO_NODES}" \
        --poll-progress-interval=150s \
        --label-filter "dynamic-storage || dynamic-storage-p0 || dynamic-storage-p1" \
        "${FOCUS_FLAGS[@]+"${FOCUS_FLAGS[@]}"}" \
+       "${FAIL_FAST_FLAGS[@]+"${FAIL_FAST_FLAGS[@]}"}" \
        --force-newlines \
        --output-dir "${ROOT_DIR}/tests/e2e/out/" \
        --json-report "dynamic_storage_report.json" \
