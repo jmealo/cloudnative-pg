@@ -2041,7 +2041,10 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 			cluster.Spec.StorageConfiguration = apiv1.StorageConfiguration{
 				Request:      "5Gi",
 				Limit:        "20Gi",
-				TargetBuffer: ptr.To(20),
+				// Use a higher TargetBuffer (30%) so growth triggers at ~70% disk usage
+				// instead of 80%. This keeps disk fill pressure low, preserving WAL
+				// headroom needed for pg_rewind after the switchover in this test.
+				TargetBuffer: ptr.To(30),
 			}
 
 			tableLocator := TableLocator{
@@ -2065,30 +2068,75 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 				primaryPod, err := clusterutils.GetPrimary(env.Ctx, env.Client, namespace, clusterName)
 				Expect(err).ToNot(HaveOccurred())
 
-				// Use lower disk fill (78-80%) for tests with switchover operations
-				// to ensure WAL files are retained for pg_rewind after the switchover.
-				// Higher fill levels (85%+) cause aggressive WAL recycling which breaks pg_rewind.
-				finalUsage, fillErr := fillDiskIncrementally(primaryPod, 78, 80, 500000)
+				// With TargetBuffer=30%, growth triggers at 70% usage (100% - 30% = 70%).
+				// Fill to 70-75% with small batches to stay well below WAL recycling pressure.
+				// This preserves pg_rewind safety while deterministically triggering growth.
+				finalUsage, fillErr := fillDiskIncrementally(primaryPod, 70, 75, 100000)
 				if fillErr != nil {
 					GinkgoWriter.Printf("Disk fill ended with error (may be expected): %v\n", fillErr)
 				}
 				GinkgoWriter.Printf("Final disk usage after fill: %d%%\n", finalUsage)
-				Expect(finalUsage).To(BeNumerically(">=", 75),
-					"Disk fill should reach at least 75%% to trigger growth")
+				Expect(finalUsage).To(BeNumerically(">=", 65),
+					"Disk fill should reach at least 65%% to trigger growth with TargetBuffer=30%%")
 			})
 
-			By("verifying storage sizing works with T2 topology", func() {
+			By("verifying dynamic sizing detected the condition", func() {
 				Eventually(func(g Gomega) {
 					cluster, err := clusterutils.Get(env.Ctx, env.Client, namespace, clusterName)
 					g.Expect(err).ToNot(HaveOccurred())
 					g.Expect(cluster.Status.StorageSizing).ToNot(BeNil())
+					g.Expect(cluster.Status.StorageSizing.Data).ToNot(BeNil())
 				}).WithTimeout(time.Duration(testTimeouts[timeouts.StorageSizingDetection]) * time.Second).
 					WithPolling(time.Duration(testTimeouts[timeouts.StorageSizingPolling]) * time.Second).Should(Succeed())
 			})
 
-			By("waiting for PVC capacity to update (CSI resize completion)", func() {
-				// CRITICAL: Wait for CSI driver to complete the resize before switchover.
-				// Azure AKS CSI operations can take 5-10 minutes.
+			By("waiting for growth to complete before switchover", func() {
+				// Require explicit evidence that growth actually occurred:
+				// 1. LastAction must be set (a grow action was taken)
+				// 2. PVC request must have increased above the initial 5Gi
+				// Without this gate, a false-positive capacity check could let the test
+				// proceed to switchover on a still-5Gi volume with 70%+ usage, causing
+				// pg_rewind failures from insufficient WAL headroom.
+				initialRequest := resource.MustParse("5Gi")
+
+				Eventually(func(g Gomega) {
+					cluster, err := clusterutils.Get(env.Ctx, env.Client, namespace, clusterName)
+					g.Expect(err).ToNot(HaveOccurred())
+					g.Expect(cluster.Status.StorageSizing).ToNot(BeNil())
+					g.Expect(cluster.Status.StorageSizing.Data).ToNot(BeNil())
+					g.Expect(cluster.Status.StorageSizing.Data.LastAction).ToNot(BeNil(),
+						"Expected a growth action to have been recorded")
+					GinkgoWriter.Printf("Growth action: %s -> %s (kind: %s, result: %s)\n",
+						cluster.Status.StorageSizing.Data.LastAction.From,
+						cluster.Status.StorageSizing.Data.LastAction.To,
+						cluster.Status.StorageSizing.Data.LastAction.Kind,
+						cluster.Status.StorageSizing.Data.LastAction.Result)
+				}).WithTimeout(time.Duration(testTimeouts[timeouts.AKSVolumeResize]) * time.Second).
+					WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())
+
+				// Verify at least one PVC request actually increased
+				Eventually(func(g Gomega) {
+					var pvcList corev1.PersistentVolumeClaimList
+					err := env.Client.List(env.Ctx, &pvcList,
+						ctrlclient.InNamespace(namespace),
+						ctrlclient.MatchingLabels{utils.ClusterLabelName: clusterName})
+					g.Expect(err).ToNot(HaveOccurred())
+
+					grewCount := 0
+					for _, pvc := range pvcList.Items {
+						request := pvc.Spec.Resources.Requests[corev1.ResourceStorage]
+						if request.Cmp(initialRequest) > 0 {
+							grewCount++
+							GinkgoWriter.Printf("PVC %s grew: request=%s (> initial %s)\n",
+								pvc.Name, request.String(), initialRequest.String())
+						}
+					}
+					g.Expect(grewCount).To(BeNumerically(">", 0),
+						"At least one PVC request should have increased above 5Gi")
+				}).WithTimeout(time.Duration(testTimeouts[timeouts.AKSVolumeResize]) * time.Second).
+					WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())
+
+				// Now wait for CSI to complete the resize (capacity catches up to request)
 				waitForPVCCapacityUpdate(namespace, clusterName,
 					time.Duration(testTimeouts[timeouts.AKSVolumeResize])*time.Second)
 			})
