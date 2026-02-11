@@ -257,6 +257,13 @@ func AssertCreateCluster(
 // AssertClusterIsReady checks the cluster has as many pods as in spec, that
 // none of them are going to be deleted, and that the status is Healthy
 func AssertClusterIsReady(namespace string, clusterName string, timeout int, env *environment.TestingEnvironment) {
+	clusterStateReport := func() string {
+		cluster := testsUtils.PrintClusterResources(env.Ctx, env.Client, namespace, clusterName)
+		kubeNodes, _ := nodes.DescribeKubernetesNodes(env.Ctx, env.Client)
+		return fmt.Sprintf("CLUSTER STATE\n%s\n\nK8S NODES\n%s",
+			cluster, kubeNodes)
+	}
+
 	By(fmt.Sprintf("having a Cluster %s with each instance in status ready", clusterName), func() {
 		// Eventually the number of ready instances should be equal to the
 		// amount of instances defined in the cluster and
@@ -270,31 +277,33 @@ func AssertClusterIsReady(namespace string, clusterName string, timeout int, env
 		}).Should(Succeed())
 
 		start := time.Now()
-		Eventually(func() (string, error) {
+		Eventually(func(g Gomega) {
+			var err error
+			cluster, err = clusterutils.Get(env.Ctx, env.Client, namespace, clusterName)
+			g.Expect(err).ToNot(HaveOccurred())
+
 			podList, err := clusterutils.ListPods(env.Ctx, env.Client, namespace, clusterName)
+			g.Expect(err).ToNot(HaveOccurred())
+
+			readyPods := utils.CountReadyPods(podList.Items)
+			g.Expect(readyPods).To(BeEquivalentTo(cluster.Spec.Instances),
+				"Ready pod is not as expected. Spec Instances: %d, ready pods: %d",
+				cluster.Spec.Instances,
+				readyPods)
+
+			for _, pod := range podList.Items {
+				g.Expect(pod.DeletionTimestamp).To(BeNil(),
+					"Pod '%s' is waiting for deletion", pod.Name)
+			}
+		}, timeout, 2).Should(Succeed(), clusterStateReport)
+
+		Eventually(func() (string, error) {
+			cluster, err := clusterutils.Get(env.Ctx, env.Client, namespace, clusterName)
 			if err != nil {
 				return "", err
 			}
-			if cluster.Spec.Instances == utils.CountReadyPods(podList.Items) {
-				for _, pod := range podList.Items {
-					if pod.DeletionTimestamp != nil {
-						return fmt.Sprintf("Pod '%s' is waiting for deletion", pod.Name), nil
-					}
-				}
-				cluster, err = clusterutils.Get(env.Ctx, env.Client, namespace, clusterName)
-				return cluster.Status.Phase, err
-			}
-			return fmt.Sprintf("Ready pod is not as expected. Spec Instances: %d, ready pods: %d \n",
-				cluster.Spec.Instances,
-				utils.CountReadyPods(podList.Items)), nil
-		}, timeout, 2).Should(BeEquivalentTo(apiv1.PhaseHealthy),
-			func() string {
-				cluster := testsUtils.PrintClusterResources(env.Ctx, env.Client, namespace, clusterName)
-				kubeNodes, _ := nodes.DescribeKubernetesNodes(env.Ctx, env.Client)
-				return fmt.Sprintf("CLUSTER STATE\n%s\n\nK8S NODES\n%s",
-					cluster, kubeNodes)
-			},
-		)
+			return cluster.Status.Phase, nil
+		}, timeout, 2).Should(BeEquivalentTo(apiv1.PhaseHealthy), clusterStateReport)
 
 		if cluster.Spec.Instances != 1 {
 			Eventually(func(g Gomega) {
@@ -637,6 +646,28 @@ func foreignServerExistsQuery(serverName string) string {
 	return fmt.Sprintf("SELECT EXISTS(SELECT FROM pg_catalog.pg_foreign_server WHERE srvname='%v')", serverName)
 }
 
+func isTransientForwardingError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	message := strings.ToLower(err.Error())
+	transientSignals := []string{
+		"connection refused",
+		"tls error: eof",
+		"lost connection to pod",
+		"error forwarding port",
+		"use of closed network connection",
+	}
+
+	for _, signal := range transientSignals {
+		if strings.Contains(message, signal) {
+			return true
+		}
+	}
+	return false
+}
+
 // AssertDataExpectedCount verifies that an expected amount of rows exists on the table
 func AssertDataExpectedCount(
 	env *environment.TestingEnvironment,
@@ -645,23 +676,42 @@ func AssertDataExpectedCount(
 ) {
 	By(fmt.Sprintf("verifying test data in table %v (cluster %v, database %v, tablespace %v)",
 		tl.TableName, tl.ClusterName, tl.DatabaseName, tl.Tablespace), func() {
-		row, err := postgres.RunQueryRowOverForward(
-			env.Ctx,
-			env.Client,
-			env.Interface,
-			env.RestClientConfig,
-			tl.Namespace,
-			tl.ClusterName,
-			tl.DatabaseName,
-			apiv1.ApplicationUserSecretSuffix,
-			fmt.Sprintf("SELECT COUNT(*) FROM %s", tl.TableName),
-		)
-		Expect(err).ToNot(HaveOccurred())
+		Eventually(func() error {
+			row, err := postgres.RunQueryRowOverForward(
+				env.Ctx,
+				env.Client,
+				env.Interface,
+				env.RestClientConfig,
+				tl.Namespace,
+				tl.ClusterName,
+				tl.DatabaseName,
+				apiv1.ApplicationUserSecretSuffix,
+				fmt.Sprintf("SELECT COUNT(*) FROM %s", tl.TableName),
+			)
+			if err != nil {
+				if isTransientForwardingError(err) {
+					GinkgoWriter.Printf("Transient query transport error while checking %s: %v\n", tl.TableName, err)
+					return err
+				}
+				return fmt.Errorf("query failed while counting rows in %s: %w", tl.TableName, err)
+			}
 
-		var nRows int
-		err = row.Scan(&nRows)
-		Expect(err).ToNot(HaveOccurred())
-		Expect(nRows).Should(BeEquivalentTo(expectedValue))
+			var nRows int
+			err = row.Scan(&nRows)
+			if err != nil {
+				if isTransientForwardingError(err) {
+					GinkgoWriter.Printf("Transient scan transport error while checking %s: %v\n", tl.TableName, err)
+					return err
+				}
+				return fmt.Errorf("failed to scan row count for %s: %w", tl.TableName, err)
+			}
+
+			if nRows != expectedValue {
+				return fmt.Errorf("unexpected row count in %s: expected %d, got %d",
+					tl.TableName, expectedValue, nRows)
+			}
+			return nil
+		}, testTimeouts[timeouts.AKSVolumeAttach], 2).Should(Succeed())
 	})
 }
 
