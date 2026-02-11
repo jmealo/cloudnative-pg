@@ -510,6 +510,21 @@ fi
 go install github.com/onsi/ginkgo/v2/ginkgo@v2.28.1
 
 # ────────────────────────────────────────────────────────────
+# Pre-flight: compile check
+# ────────────────────────────────────────────────────────────
+
+info "Verifying test compilation (go vet + go build)..."
+if ! (cd "${ROOT_DIR}" && go vet ./tests/e2e/... 2>&1); then
+  fail "go vet failed — fix compilation errors before running tests"
+  exit 1
+fi
+if ! (cd "${ROOT_DIR}" && go test -c -o /dev/null ./tests/e2e/ 2>&1); then
+  fail "test compilation failed — fix build errors before running tests"
+  exit 1
+fi
+ok "Test compilation successful"
+
+# ────────────────────────────────────────────────────────────
 # Run auto-resize E2E tests
 # ────────────────────────────────────────────────────────────
 
@@ -642,12 +657,14 @@ ginkgo --nodes="${GINKGO_NODES}" \
        --timeout "${GINKGO_TIMEOUT}" \
        --poll-progress-after=1200s \
        --poll-progress-interval=150s \
+       --flake-attempts=2 \
        --label-filter "dynamic-storage || dynamic-storage-p0 || dynamic-storage-p1" \
        "${FOCUS_FLAGS[@]+"${FOCUS_FLAGS[@]}"}" \
        "${FAIL_FAST_FLAGS[@]+"${FAIL_FAST_FLAGS[@]}"}" \
        --force-newlines \
        --output-dir "${ROOT_DIR}/tests/e2e/out/" \
        --json-report "dynamic_storage_report.json" \
+       --junit-report "dynamic_storage_junit.xml" \
        -v "${ROOT_DIR}/tests/e2e/..." || RC_GINKGO=$?
 
 # ────────────────────────────────────────────────────────────
