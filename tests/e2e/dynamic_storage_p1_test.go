@@ -173,7 +173,8 @@ var _ = Describe("Dynamic storage management extended scenarios",
 
 				By("verifying eventual convergence", func() {
 					verifyGrowthCompletion(namespace, clusterName)
-					AssertClusterIsReady(namespace, clusterName, testTimeouts[timeouts.ClusterIsReady], env)
+				// Use ClusterIsReadySlow because node drain + concurrent backup + volume operations can take 20+ minutes
+					AssertClusterIsReady(namespace, clusterName, testTimeouts[timeouts.ClusterIsReadySlow], env)
 					AssertDataExpectedCount(env, tableLocator, 2)
 				})
 			})

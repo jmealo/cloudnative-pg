@@ -430,7 +430,8 @@ func triggerSwitchoverAndWait(namespace, clusterName string) (oldPrimary, newPri
 	}).WithTimeout(time.Duration(testTimeouts[timeouts.AKSVolumeResize]) * time.Second).
 		WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())
 
-	AssertClusterIsReady(namespace, clusterName, testTimeouts[timeouts.ClusterIsReady], env)
+	// Use ClusterIsReadySlow because switchover + volume operations on AKS can take 15-20 minutes
+	AssertClusterIsReady(namespace, clusterName, testTimeouts[timeouts.ClusterIsReadySlow], env)
 	return oldPrimary, newPrimary
 }
 
@@ -1196,7 +1197,8 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 				})
 
 				By("verifying cluster returns to Ready state", func() {
-					AssertClusterIsReady(namespace, clusterName, testTimeouts[timeouts.ClusterIsReady], env)
+				// Use ClusterIsReadySlow because pod restart + volume reattach on AKS can take 15-20 minutes
+					AssertClusterIsReady(namespace, clusterName, testTimeouts[timeouts.ClusterIsReadySlow], env)
 				})
 
 				By("verifying data integrity after primary restart", func() {
@@ -1512,8 +1514,9 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 					// Uncordon nodes to allow pods to be rescheduled
 					err := nodes.UncordonAll(env.Ctx, env.Client)
 					Expect(err).ToNot(HaveOccurred())
+				// Use ClusterIsReadySlow because node drain + pod reschedule + volume reattach on AKS can take 20+ minutes
 
-					AssertClusterIsReady(namespace, clusterName, testTimeouts[timeouts.ClusterIsReady], env)
+					AssertClusterIsReady(namespace, clusterName, testTimeouts[timeouts.ClusterIsReadySlow], env)
 				})
 
 				By("verifying storage sizing continues after drain", func() {
