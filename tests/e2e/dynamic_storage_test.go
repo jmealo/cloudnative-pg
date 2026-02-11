@@ -835,6 +835,14 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 					Duration: "1h",
 					Timezone: "UTC",
 				},
+				// Set high emergency thresholds so disk fill to 85-90% triggers
+				// planned growth (via maintenance window) instead of emergency growth.
+				// On a 5Gi disk at 90% usage, only 512MB is free. Without these
+				// settings, the default 1Gi CriticalMinimumFree would trigger emergency.
+				EmergencyGrow: &apiv1.EmergencyGrowConfig{
+					CriticalThreshold:   99,
+					CriticalMinimumFree: "100Mi",
+				},
 			}
 
 			By("creating cluster", func() {
@@ -1083,6 +1091,11 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 				By("restarting operator pod during growth operation", func() {
 					err := operator.ReloadDeployment(env.Ctx, env.Client, 120)
 					Expect(err).ToNot(HaveOccurred())
+
+					// Update expectedOperatorPodName so that AfterEach doesn't fail
+					operatorPod, err := operator.GetPod(env.Ctx, env.Client)
+					Expect(err).ToNot(HaveOccurred())
+					expectedOperatorPodName = operatorPod.GetName()
 				})
 
 				By("verifying operator recovered and cluster converges", func() {
@@ -1197,7 +1210,7 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 				})
 
 				By("verifying cluster returns to Ready state", func() {
-				// Use ClusterIsReadySlow because pod restart + volume reattach on AKS can take 15-20 minutes
+					// Use ClusterIsReadySlow because pod restart + volume reattach on AKS can take 15-20 minutes
 					AssertClusterIsReady(namespace, clusterName, testTimeouts[timeouts.ClusterIsReadySlow], env)
 				})
 
@@ -1514,7 +1527,7 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 					// Uncordon nodes to allow pods to be rescheduled
 					err := nodes.UncordonAll(env.Ctx, env.Client)
 					Expect(err).ToNot(HaveOccurred())
-				// Use ClusterIsReadySlow because node drain + pod reschedule + volume reattach on AKS can take 20+ minutes
+					// Use ClusterIsReadySlow because node drain + pod reschedule + volume reattach on AKS can take 20+ minutes
 
 					AssertClusterIsReady(namespace, clusterName, testTimeouts[timeouts.ClusterIsReadySlow], env)
 				})
