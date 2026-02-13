@@ -37,7 +37,8 @@ import (
 )
 
 type diskCollector struct {
-	instance   *postgres.Instance
+	getStatus  func() (*postgresstatus.PostgresqlStatus, error)
+	getPodName func() string
 	getCluster func() (*apiv1.Cluster, error)
 
 	// Disk usage metrics
@@ -63,7 +64,8 @@ func newDiskCollector(instance *postgres.Instance) *diskCollector {
 	clusterGetter := local.NewClient().Cache().GetCluster
 
 	return &diskCollector{
-		instance:   instance,
+		getStatus:  instance.GetStatus,
+		getPodName: instance.GetPodName,
 		getCluster: clusterGetter,
 
 		totalBytes: prometheus.NewGaugeVec(prometheus.GaugeOpts{
@@ -177,12 +179,12 @@ func (d *diskCollector) Collect(ch chan<- prometheus.Metric) {
 }
 
 func (d *diskCollector) collectDiskUsage(ch chan<- prometheus.Metric) {
-	status, err := d.instance.GetStatus()
+	status, err := d.getStatus()
 	if err != nil {
 		return
 	}
 
-	podName := d.instance.GetPodName()
+	podName := d.getPodName()
 
 	// Data volume
 	if status.DiskStatus != nil {
@@ -198,6 +200,11 @@ func (d *diskCollector) collectDiskUsage(ch chan<- prometheus.Metric) {
 	for tsName, tsStatus := range status.TablespaceDiskStatus {
 		d.recordDiskStatus(ch, "tablespace:"+tsName, podName, tsStatus)
 	}
+
+	d.totalBytes.Collect(ch)
+	d.usedBytes.Collect(ch)
+	d.availableBytes.Collect(ch)
+	d.percentUsed.Collect(ch)
 }
 
 func (d *diskCollector) recordDiskStatus(
@@ -209,11 +216,6 @@ func (d *diskCollector) recordDiskStatus(
 	d.usedBytes.WithLabelValues(volumeType, instance).Set(float64(s.UsedBytes))
 	d.availableBytes.WithLabelValues(volumeType, instance).Set(float64(s.AvailableBytes))
 	d.percentUsed.WithLabelValues(volumeType, instance).Set(s.PercentUsed)
-
-	d.totalBytes.Collect(ch)
-	d.usedBytes.Collect(ch)
-	d.availableBytes.Collect(ch)
-	d.percentUsed.Collect(ch)
 }
 
 func (d *diskCollector) collectDynamicStorage(ch chan<- prometheus.Metric) {
@@ -243,6 +245,15 @@ func (d *diskCollector) collectDynamicStorage(ch chan<- prometheus.Metric) {
 	for tsName, tsStatus := range cluster.Status.StorageSizing.Tablespaces {
 		d.recordVolumeSizing(ch, "tablespace", tsName, tsStatus)
 	}
+
+	d.targetSizeBytes.Collect(ch)
+	d.effectiveSizeBytes.Collect(ch)
+	d.actualSizeBytes.Collect(ch)
+	d.state.Collect(ch)
+	d.budgetTotal.Collect(ch)
+	d.budgetUsed.Collect(ch)
+	d.budgetEmergencyReserved.Collect(ch)
+	d.nextWindowSeconds.Collect(ch)
 }
 
 func (d *diskCollector) recordVolumeSizing(
@@ -300,15 +311,6 @@ func (d *diskCollector) recordVolumeSizing(
 	} else {
 		d.nextWindowSeconds.WithLabelValues(volumeType).Set(0)
 	}
-
-	d.targetSizeBytes.Collect(ch)
-	d.effectiveSizeBytes.Collect(ch)
-	d.actualSizeBytes.Collect(ch)
-	d.state.Collect(ch)
-	d.budgetTotal.Collect(ch)
-	d.budgetUsed.Collect(ch)
-	d.budgetEmergencyReserved.Collect(ch)
-	d.nextWindowSeconds.Collect(ch)
 }
 
 func (d *diskCollector) parseQuantity(q string) (float64, error) {
