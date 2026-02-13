@@ -763,6 +763,9 @@ func (instance *Instance) fillDiskStatus(result *postgres.PostgresqlStatus) {
 // probeTablespaceDiskStatus probes disk status for all tablespace volumes.
 func probeTablespaceDiskStatus() map[string]*postgres.DiskStatus {
 	if _, err := os.Stat(specs.PgTablespaceVolumePath); err != nil {
+		log.Debug("Tablespace volume path does not exist",
+			"path", specs.PgTablespaceVolumePath,
+			"error", err)
 		return nil
 	}
 
@@ -772,9 +775,15 @@ func probeTablespaceDiskStatus() map[string]*postgres.DiskStatus {
 		return nil
 	}
 
+	log.Debug("Found tablespace volume entries",
+		"path", specs.PgTablespaceVolumePath,
+		"entryCount", len(entries))
+
 	statusMap := make(map[string]*postgres.DiskStatus)
 	for _, entry := range entries {
 		if !entry.IsDir() {
+			log.Debug("Skipping non-directory tablespace entry",
+				"name", entry.Name())
 			continue
 		}
 		tsPath := specs.MountForTablespace(entry.Name())
@@ -792,6 +801,12 @@ func probeTablespaceDiskStatus() map[string]*postgres.DiskStatus {
 			AvailableBytes: tsStatus.AvailableBytes,
 			PercentUsed:    tsStatus.PercentUsed,
 		}
+		log.Info("Tablespace disk status collected successfully",
+			"tablespace", entry.Name(),
+			"path", tsPath,
+			"totalBytes", tsStatus.TotalBytes,
+			"usedBytes", tsStatus.UsedBytes,
+			"percentUsed", tsStatus.PercentUsed)
 	}
 	return statusMap
 }

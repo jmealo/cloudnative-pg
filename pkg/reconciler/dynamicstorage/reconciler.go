@@ -22,6 +22,7 @@ package dynamicstorage
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/cloudnative-pg/machinery/pkg/log"
 	corev1 "k8s.io/api/core/v1"
@@ -179,9 +180,8 @@ func Reconcile(
 			contextLogger.Info("No disk status available yet, status updated to reflect waiting state",
 				"instanceCount", len(instanceStatuses.Items))
 
-			// Return empty result. The cluster controller will requeue periodically
-			// when dynamic storage is enabled, so we'll retry collecting disk status.
-			return ctrl.Result{}, nil
+			// Requeue to check again soon
+			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 		}
 		// No instances at all, nothing to do yet. Return empty result to allow
 		// the cluster controller to continue with instance creation.
@@ -229,14 +229,12 @@ func Reconcile(
 	}
 
 	// Reconcile tablespaces
-	if err := reconcileTablespaces(ctx, c, cluster, instanceStatuses, pvcs); err != nil {
-		return ctrl.Result{}, err
+	res, err := reconcileTablespaces(ctx, c, cluster, instanceStatuses, pvcs)
+	if err != nil || !res.IsZero() {
+		return res, err
 	}
 
 	// Return empty result to allow the cluster controller to continue its reconciliation.
-	// The cluster controller handles requeueing on its own schedule. We don't request
-	// requeue here because returning a non-zero result would short-circuit the cluster
-	// controller and prevent it from completing instance status updates.
 	return ctrl.Result{}, nil
 }
 
@@ -247,7 +245,7 @@ func reconcileTablespaces(
 	cluster *apiv1.Cluster,
 	instanceStatuses *postgres.PostgresqlStatusList,
 	pvcs []corev1.PersistentVolumeClaim,
-) error {
+) (ctrl.Result, error) {
 	contextLogger := log.FromContext(ctx)
 
 	for i := range cluster.Spec.Tablespaces {
@@ -272,6 +270,7 @@ func reconcileTablespaces(
 				contextLogger.Info("No disk status available for tablespace yet, will retry on next reconciliation",
 					"tablespace", tbs.Name,
 					"instanceCount", len(instanceStatuses.Items))
+				return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 			}
 			continue
 		}
@@ -294,7 +293,7 @@ func reconcileTablespaces(
 
 		if result.Action != ActionNoOp && result.Action != ActionPendingGrowth {
 			if err := executeAction(ctx, c, cluster, pvcs, result); err != nil {
-				return fmt.Errorf("while executing tablespace %s dynamic storage action: %w", tbs.Name, err)
+				return ctrl.Result{}, fmt.Errorf("while executing tablespace %s dynamic storage action: %w", tbs.Name, err)
 			}
 
 			contextLogger.Info("Tablespace dynamic storage action executed",
@@ -307,12 +306,12 @@ func reconcileTablespaces(
 		// Always persist status updates when the action indicates a state change
 		if result.Action != ActionNoOp {
 			if err := c.Status().Update(ctx, cluster); err != nil {
-				return fmt.Errorf("while updating cluster status after tablespace %s dynamic storage action: %w", tbs.Name, err)
+				return ctrl.Result{}, fmt.Errorf("while updating cluster status after tablespace %s dynamic storage action: %w", tbs.Name, err)
 			}
 		}
 	}
 
-	return nil
+	return ctrl.Result{}, nil
 }
 
 // collectDiskStatusForVolume collects disk status for a specific volume type from all instance statuses.
