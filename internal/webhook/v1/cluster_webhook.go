@@ -1825,11 +1825,113 @@ func validateCronSchedule(schedule string) error {
 
 // Validate a change in the storage
 func (v *ClusterCustomValidator) validateStorageChange(r, old *apiv1.Cluster) field.ErrorList {
+	// Handle static → dynamic migration with status data when available
+	if isStaticToDynamicMigration(old.Spec.StorageConfiguration, r.Spec.StorageConfiguration) {
+		var volumeStatus *apiv1.VolumeSizingStatus
+		if old.Status.StorageSizing != nil {
+			volumeStatus = old.Status.StorageSizing.Data
+		}
+		return validateStaticToDynamicMigration(
+			field.NewPath("spec", "storage"),
+			old.Spec.StorageConfiguration,
+			r.Spec.StorageConfiguration,
+			volumeStatus,
+		)
+	}
 	return validateStorageConfigurationChange(
 		field.NewPath("spec", "storage"),
 		old.Spec.StorageConfiguration,
 		r.Spec.StorageConfiguration,
 	)
+}
+
+// isStaticToDynamicMigration returns true if the storage configuration is changing
+// from static sizing (size field) to dynamic sizing (request/limit fields)
+func isStaticToDynamicMigration(oldStorage, newStorage apiv1.StorageConfiguration) bool {
+	oldIsDynamic := oldStorage.Request != "" && oldStorage.Limit != ""
+	newIsDynamic := newStorage.Request != "" && newStorage.Limit != ""
+	return !oldIsDynamic && newIsDynamic
+}
+
+// validateStaticToDynamicMigration validates a migration from static to dynamic sizing
+// using actual PVC sizes from status when available, falling back to spec size
+func validateStaticToDynamicMigration(
+	structPath *field.Path,
+	oldStorage apiv1.StorageConfiguration,
+	newStorage apiv1.StorageConfiguration,
+	volumeStatus *apiv1.VolumeSizingStatus,
+) field.ErrorList {
+	var result field.ErrorList
+
+	// Determine the minimum actual PVC size to validate against
+	var minActualSize *resource.Quantity
+
+	// Prefer actual sizes from status if available
+	if volumeStatus != nil && len(volumeStatus.ActualSizes) > 0 {
+		minActualSize = getMinActualSize(volumeStatus.ActualSizes)
+	}
+
+	// Fall back to spec size if status not available
+	if minActualSize == nil {
+		minActualSize = oldStorage.GetSizeOrNil()
+	}
+
+	// If we still don't have a size, we can't validate - allow the change
+	// and let the controller handle it on first reconcile
+	if minActualSize == nil {
+		return result
+	}
+
+	newRequest, errReq := resource.ParseQuantity(newStorage.Request)
+	newLimit, errLimit := resource.ParseQuantity(newStorage.Limit)
+
+	if errReq != nil || errLimit != nil {
+		// Parse errors will be caught by other validation
+		return result
+	}
+
+	// Request must be <= minimum actual PVC size (no shrink implied for the floor)
+	if newRequest.Cmp(*minActualSize) > 0 {
+		result = append(result, field.Invalid(
+			structPath.Child("request"),
+			newStorage.Request,
+			fmt.Sprintf("request cannot exceed minimum actual PVC size (%s) when migrating to dynamic sizing",
+				minActualSize.String())))
+	}
+
+	// Limit must be >= minimum actual PVC size (current size must be within bounds)
+	if newLimit.Cmp(*minActualSize) < 0 {
+		result = append(result, field.Invalid(
+			structPath.Child("limit"),
+			newStorage.Limit,
+			fmt.Sprintf("limit cannot be less than minimum actual PVC size (%s) when migrating to dynamic sizing",
+				minActualSize.String())))
+	}
+
+	return result
+}
+
+// getMinActualSize returns the minimum size from a map of instance names to PVC sizes
+func getMinActualSize(actualSizes map[string]string) *resource.Quantity {
+	var minSize *resource.Quantity
+	for _, sizeStr := range actualSizes {
+		size, err := resource.ParseQuantity(sizeStr)
+		if err != nil {
+			continue
+		}
+		if minSize == nil || size.Cmp(*minSize) < 0 {
+			minSize = &size
+		}
+	}
+	return minSize
+}
+
+// getTablespaceVolumeSizingStatus returns the VolumeSizingStatus for a named tablespace, or nil
+func getTablespaceVolumeSizingStatus(sizing *apiv1.StorageSizingStatus, name string) *apiv1.VolumeSizingStatus {
+	if sizing == nil || sizing.Tablespaces == nil {
+		return nil
+	}
+	return sizing.Tablespaces[name]
 }
 
 func (v *ClusterCustomValidator) validateWalStorageChange(r, old *apiv1.Cluster) field.ErrorList {
@@ -1844,6 +1946,20 @@ func (v *ClusterCustomValidator) validateWalStorageChange(r, old *apiv1.Cluster)
 				r.Spec.WalStorage,
 				"walStorage cannot be disabled once configured"),
 		}
+	}
+
+	// Handle static → dynamic migration with status data when available
+	if isStaticToDynamicMigration(*old.Spec.WalStorage, *r.Spec.WalStorage) {
+		var volumeStatus *apiv1.VolumeSizingStatus
+		if old.Status.StorageSizing != nil {
+			volumeStatus = old.Status.StorageSizing.WAL
+		}
+		return validateStaticToDynamicMigration(
+			field.NewPath("spec", "walStorage"),
+			*old.Spec.WalStorage,
+			*r.Spec.WalStorage,
+			volumeStatus,
+		)
 	}
 
 	return validateStorageConfigurationChange(
@@ -1872,24 +1988,37 @@ func (v *ClusterCustomValidator) validateTablespacesChange(r, old *apiv1.Cluster
 	var errs field.ErrorList
 	for idx, oldConf := range old.Spec.Tablespaces {
 		name := oldConf.Name
-		if newConf := r.GetTablespaceConfiguration(name); newConf != nil {
-			errs = append(errs, validateStorageConfigurationChange(
-				field.NewPath("spec", "tablespaces").Index(idx),
-				oldConf.Storage,
-				newConf.Storage,
-			)...)
-		} else {
+		newConf := r.GetTablespaceConfiguration(name)
+		if newConf == nil {
 			errs = append(errs,
 				field.Invalid(
 					field.NewPath("spec", "tablespaces").Index(idx),
 					r.Spec.Tablespaces,
 					"no tablespace can be deleted once created"))
+			continue
 		}
+
+		fieldPath := field.NewPath("spec", "tablespaces").Index(idx)
+
+		// Handle static → dynamic migration with status data when available
+		if isStaticToDynamicMigration(oldConf.Storage, newConf.Storage) {
+			volumeStatus := getTablespaceVolumeSizingStatus(old.Status.StorageSizing, name)
+			errs = append(errs, validateStaticToDynamicMigration(
+				fieldPath, oldConf.Storage, newConf.Storage, volumeStatus,
+			)...)
+			continue
+		}
+
+		errs = append(errs, validateStorageConfigurationChange(
+			fieldPath, oldConf.Storage, newConf.Storage,
+		)...)
 	}
 	return errs
 }
 
-// validateStorageConfigurationChange generates an error list by comparing two StorageConfiguration
+// validateStorageConfigurationChange generates an error list by comparing two StorageConfiguration.
+// Note: Static → dynamic migration is handled separately in validateStaticToDynamicMigration
+// which has access to actual PVC sizes from status.
 func validateStorageConfigurationChange(
 	structPath *field.Path,
 	oldStorage apiv1.StorageConfiguration,
@@ -1901,12 +2030,11 @@ func validateStorageConfigurationChange(
 	oldIsDynamic := oldStorage.Request != "" && oldStorage.Limit != ""
 	newIsDynamic := newStorage.Request != "" && newStorage.Limit != ""
 
-	// Prevent switching from static to dynamic mode (would require data migration)
+	// Static → dynamic migration should be handled by caller with status access
+	// If we reach here for such a case, allow it (caller didn't intercept, likely walStorage/tablespaces)
 	if !oldIsDynamic && newIsDynamic {
-		result = append(result, field.Invalid(
-			structPath,
-			newStorage,
-			"cannot switch from static sizing (size) to dynamic sizing (request/limit) on an existing cluster"))
+		// Fall back to spec-based validation for callers without status access
+		return validateStaticToDynamicMigration(structPath, oldStorage, newStorage, nil)
 	}
 
 	// Prevent switching from dynamic to static mode
@@ -1915,6 +2043,7 @@ func validateStorageConfigurationChange(
 			structPath,
 			newStorage,
 			"cannot switch from dynamic sizing (request/limit) to static sizing (size) on an existing cluster"))
+		return result
 	}
 
 	// For dynamic mode, validate that request is not increased (would be like shrinking)

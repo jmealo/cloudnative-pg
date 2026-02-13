@@ -242,9 +242,179 @@ var _ = Describe("dynamic storage validation", func() {
 		})
 	})
 
+	Describe("validateStaticToDynamicMigration", func() {
+		Context("with status data (actual PVC sizes)", func() {
+			It("allow migration when request equals minimum actual PVC size", func() {
+				oldStorage := apiv1.StorageConfiguration{
+					Size: "10Gi",
+				}
+				newStorage := apiv1.StorageConfiguration{
+					Request: "50Gi",
+					Limit:   "100Gi",
+				}
+				volumeStatus := &apiv1.VolumeSizingStatus{
+					ActualSizes: map[string]string{
+						"instance-1": "50Gi",
+						"instance-2": "60Gi",
+					},
+				}
+				result := validateStaticToDynamicMigration(
+					field.NewPath("spec", "storage"),
+					oldStorage,
+					newStorage,
+					volumeStatus,
+				)
+				Expect(result).To(BeEmpty())
+			})
+
+			It("allow migration when request is less than minimum actual PVC size", func() {
+				oldStorage := apiv1.StorageConfiguration{
+					Size: "10Gi",
+				}
+				newStorage := apiv1.StorageConfiguration{
+					Request: "20Gi",
+					Limit:   "100Gi",
+				}
+				volumeStatus := &apiv1.VolumeSizingStatus{
+					ActualSizes: map[string]string{
+						"instance-1": "50Gi",
+						"instance-2": "60Gi",
+					},
+				}
+				result := validateStaticToDynamicMigration(
+					field.NewPath("spec", "storage"),
+					oldStorage,
+					newStorage,
+					volumeStatus,
+				)
+				Expect(result).To(BeEmpty())
+			})
+
+			It("reject migration when request exceeds minimum actual PVC size", func() {
+				oldStorage := apiv1.StorageConfiguration{
+					Size: "10Gi",
+				}
+				newStorage := apiv1.StorageConfiguration{
+					Request: "55Gi",
+					Limit:   "100Gi",
+				}
+				volumeStatus := &apiv1.VolumeSizingStatus{
+					ActualSizes: map[string]string{
+						"instance-1": "50Gi",
+						"instance-2": "60Gi",
+					},
+				}
+				result := validateStaticToDynamicMigration(
+					field.NewPath("spec", "storage"),
+					oldStorage,
+					newStorage,
+					volumeStatus,
+				)
+				Expect(result).To(HaveLen(1))
+				Expect(result[0].Error()).To(ContainSubstring("request cannot exceed minimum actual PVC size (50Gi)"))
+			})
+
+			It("reject migration when limit is less than minimum actual PVC size", func() {
+				oldStorage := apiv1.StorageConfiguration{
+					Size: "10Gi",
+				}
+				newStorage := apiv1.StorageConfiguration{
+					Request: "10Gi",
+					Limit:   "40Gi",
+				}
+				volumeStatus := &apiv1.VolumeSizingStatus{
+					ActualSizes: map[string]string{
+						"instance-1": "50Gi",
+						"instance-2": "60Gi",
+					},
+				}
+				result := validateStaticToDynamicMigration(
+					field.NewPath("spec", "storage"),
+					oldStorage,
+					newStorage,
+					volumeStatus,
+				)
+				Expect(result).To(HaveLen(1))
+				Expect(result[0].Error()).To(ContainSubstring("limit cannot be less than minimum actual PVC size (50Gi)"))
+			})
+		})
+
+		Context("without status data (fallback to spec)", func() {
+			It("allow migration when request equals spec size", func() {
+				oldStorage := apiv1.StorageConfiguration{
+					Size: "10Gi",
+				}
+				newStorage := apiv1.StorageConfiguration{
+					Request: "10Gi",
+					Limit:   "100Gi",
+				}
+				result := validateStaticToDynamicMigration(
+					field.NewPath("spec", "storage"),
+					oldStorage,
+					newStorage,
+					nil,
+				)
+				Expect(result).To(BeEmpty())
+			})
+
+			It("allow migration when request is less than spec size", func() {
+				oldStorage := apiv1.StorageConfiguration{
+					Size: "50Gi",
+				}
+				newStorage := apiv1.StorageConfiguration{
+					Request: "10Gi",
+					Limit:   "100Gi",
+				}
+				result := validateStaticToDynamicMigration(
+					field.NewPath("spec", "storage"),
+					oldStorage,
+					newStorage,
+					nil,
+				)
+				Expect(result).To(BeEmpty())
+			})
+
+			It("reject migration when request exceeds spec size", func() {
+				oldStorage := apiv1.StorageConfiguration{
+					Size: "10Gi",
+				}
+				newStorage := apiv1.StorageConfiguration{
+					Request: "20Gi",
+					Limit:   "100Gi",
+				}
+				result := validateStaticToDynamicMigration(
+					field.NewPath("spec", "storage"),
+					oldStorage,
+					newStorage,
+					nil,
+				)
+				Expect(result).To(HaveLen(1))
+				Expect(result[0].Error()).To(ContainSubstring("request cannot exceed minimum actual PVC size (10Gi)"))
+			})
+
+			It("reject migration when limit is less than spec size", func() {
+				oldStorage := apiv1.StorageConfiguration{
+					Size: "50Gi",
+				}
+				newStorage := apiv1.StorageConfiguration{
+					Request: "10Gi",
+					Limit:   "40Gi",
+				}
+				result := validateStaticToDynamicMigration(
+					field.NewPath("spec", "storage"),
+					oldStorage,
+					newStorage,
+					nil,
+				)
+				Expect(result).To(HaveLen(1))
+				Expect(result[0].Error()).To(ContainSubstring("limit cannot be less than minimum actual PVC size (50Gi)"))
+			})
+		})
+	})
+
 	Describe("validateStorageConfigurationChange", func() {
 		Context("mode switching", func() {
-			It("reject switching from static to dynamic mode", func() {
+			It("delegate static to dynamic migration to validateStaticToDynamicMigration", func() {
 				oldStorage := apiv1.StorageConfiguration{
 					Size: "10Gi",
 				}
@@ -257,8 +427,7 @@ var _ = Describe("dynamic storage validation", func() {
 					oldStorage,
 					newStorage,
 				)
-				Expect(result).To(HaveLen(1))
-				Expect(result[0].Error()).To(ContainSubstring("cannot switch from static sizing"))
+				Expect(result).To(BeEmpty())
 			})
 
 			It("reject switching from dynamic to static mode", func() {
