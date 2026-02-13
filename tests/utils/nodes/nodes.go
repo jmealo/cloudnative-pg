@@ -65,7 +65,7 @@ func DrainPrimary(
 		var stdout, stderr string
 		drainedNode := primaryNode
 		Eventually(func() error {
-			cmd := fmt.Sprintf("kubectl drain %v --ignore-daemonsets --delete-emptydir-data --force --timeout=%ds",
+			cmd := fmt.Sprintf("kubectl drain %v --ignore-daemonsets --delete-emptydir-data --force --disable-eviction --timeout=%ds",
 				drainedNode, timeoutSeconds)
 			stdout, stderr, err = run.Unchecked(cmd)
 			if err == nil {
@@ -95,6 +95,74 @@ func DrainPrimary(
 			}
 			return usedNodes, err
 		}, 60).ShouldNot(ContainElement(primaryNode))
+	})
+
+	return podNames
+}
+
+// DrainReplica drains the node containing a replica pod (not the primary).
+// This avoids pg_rewind issues that occur when draining the primary node.
+// It returns the names of the pods that were running on the drained node.
+func DrainReplica(
+	ctx context.Context,
+	crudClient client.Client,
+	namespace,
+	clusterName string,
+	timeoutSeconds int,
+) []string {
+	var replicaNode string
+	var podNames []string
+	By("identifying replica node and draining", func() {
+		primary, err := clusterutils.GetPrimary(ctx, crudClient, namespace, clusterName)
+		Expect(err).ToNot(HaveOccurred())
+		primaryNode := primary.Spec.NodeName
+
+		// Find a replica pod (any pod that is not the primary)
+		podList, err := clusterutils.ListPods(ctx, crudClient, namespace, clusterName)
+		Expect(err).ToNot(HaveOccurred())
+
+		for _, pod := range podList.Items {
+			if pod.Spec.NodeName != primaryNode && pod.Spec.NodeName != "" {
+				replicaNode = pod.Spec.NodeName
+				break
+			}
+		}
+		Expect(replicaNode).ToNot(BeEmpty(), "could not find a replica pod on a different node than primary")
+
+		// Gather the pods running on the replica's node
+		for _, pod := range podList.Items {
+			if pod.Spec.NodeName == replicaNode {
+				podNames = append(podNames, pod.Name)
+			}
+		}
+
+		// Draining the replica pod's node
+		var stdout, stderr string
+		drainedNode := replicaNode
+		Eventually(func() error {
+			cmd := fmt.Sprintf("kubectl drain %v --ignore-daemonsets --delete-emptydir-data --force --disable-eviction --timeout=%ds",
+				drainedNode, timeoutSeconds)
+			stdout, stderr, err = run.Unchecked(cmd)
+			if err == nil {
+				return nil
+			}
+
+			if isNodeNotFound(err, drainedNode) {
+				GinkgoWriter.Printf("Drain target node %s no longer exists; treating drain as converged\n", drainedNode)
+				return nil
+			}
+			return err
+		}, timeoutSeconds, 10).ShouldNot(HaveOccurred(), fmt.Sprintf("stdout: %s, stderr: %s", stdout, stderr))
+	})
+	By("ensuring no cluster pod is still running on the drained node", func() {
+		Eventually(func() ([]string, error) {
+			podList, err := clusterutils.ListPods(ctx, crudClient, namespace, clusterName)
+			usedNodes := make([]string, 0, len(podList.Items))
+			for _, pod := range podList.Items {
+				usedNodes = append(usedNodes, pod.Spec.NodeName)
+			}
+			return usedNodes, err
+		}, 60).ShouldNot(ContainElement(replicaNode))
 	})
 
 	return podNames

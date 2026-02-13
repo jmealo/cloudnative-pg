@@ -101,7 +101,8 @@ export TEST_CLOUD_VENDOR=${TEST_CLOUD_VENDOR:-aks}
 export TEST_SKIP_OPERATOR_POD_STABILITY_CHECK=${TEST_SKIP_OPERATOR_POD_STABILITY_CHECK:-true}
 
 # Namespace configuration (exported for ginkgo tests)
-export OPERATOR_NAMESPACE=${OPERATOR_NAMESPACE:-cnpg-system}
+# Default to cnpg-system-gemini to match the gemini fork deployment
+export OPERATOR_NAMESPACE=${OPERATOR_NAMESPACE:-cnpg-system-gemini}
 export MINIO_NAMESPACE=${MINIO_NAMESPACE:-minio}
 export TEST_NAMESPACE_PREFIX=${TEST_NAMESPACE_PREFIX:-dynamic-storage}
 
@@ -187,6 +188,26 @@ diagnose_volume_attachments() {
   kubectl get storageclass -o custom-columns=\
 'NAME:.metadata.name,PROVISIONER:.provisioner,RECLAIM:.reclaimPolicy,BINDING:.volumeBindingMode,EXPANSION:.allowVolumeExpansion' \
     2>/dev/null || true
+
+  # Attempt to get Azure-level activity if az cli is available and logged in
+  if command -v az &>/dev/null && az account show &>/dev/null; then
+    info "Checking Azure Activity Log for recent Compute/Disk operations (last 30m)..."
+    # Extract the infrastructure resource group (MC_*) from the first node's providerID
+    MC_RG=$(kubectl get nodes -o jsonpath='{.items[0].spec.providerID}' | sed -n 's/.*\/resourceGroups\/\([^\/]*\)\/.*/\1/p')
+    if [ -n "$MC_RG" ]; then
+      # Handle date portable-ish (works on Darwin/Linux)
+      if [[ "$OSTYPE" == "darwin"* ]]; then
+        START_TIME=$(date -u -v-30M +%Y-%m-%dT%H:%M:%SZ)
+      else
+        START_TIME=$(date -u -d '30 minutes ago' +%Y-%m-%dT%H:%M:%SZ)
+      fi
+
+      az monitor activity-log --resource-group "$MC_RG" \
+        --start-time "$START_TIME" \
+        --query "[?contains(operationName.value, 'Microsoft.Compute/virtualMachines/write') || contains(operationName.value, 'Microsoft.Compute/disks/write')].{Time:eventTimestamp, Operation:operationName.localizedValue, Status:status.localizedValue}" \
+        -o table 2>/dev/null || warn "Failed to fetch Azure activity logs (check permissions)"
+    fi
+  fi
 
   info "=== End Volume Attachment Diagnostics ==="
 }
@@ -612,12 +633,12 @@ export AZURE_STORAGE_ACCOUNT=${AZURE_STORAGE_ACCOUNT:-''}
 #   - WAL tests create 2 PVCs × 3 instances = 6 disks
 #   - With attach contention, cluster creation can take 10-15 min
 # Default ClusterIsReady is 600s (10 min) — bump to 900s (15 min)
-# Default ClusterIsReadySlow is 800s (~13 min) — bump to 1800s (30 min)
-# Default DrainNode is 1200s — bump to 1800s (30 min) for AKS volume operations
+# Default ClusterIsReadySlow is 800s (~13 min) — bump to 2700s (45 min)
+# Default DrainNode is 1200s — bump to 2700s (45 min) for AKS volume operations
 # Default BackupIsReady is 180s — bump to 600s (10 min) for AKS backup during resize
 if [ -z "${TEST_TIMEOUTS:-}" ]; then
-  export TEST_TIMEOUTS='{"clusterIsReady":900,"clusterIsReadySlow":1800,"drainNode":1800,"aksBackupIsReady":600}'
-  info "Using AKS-tuned timeouts: ClusterIsReady=900s, ClusterIsReadySlow=1800s, DrainNode=1800s"
+  export TEST_TIMEOUTS='{"clusterIsReady":900,"clusterIsReadySlow":2700,"drainNode":2700,"aksBackupIsReady":600}'
+  info "Using AKS-tuned timeouts: ClusterIsReady=900s, ClusterIsReadySlow=2700s, DrainNode=2700s"
 else
   info "Using user-provided TEST_TIMEOUTS: ${TEST_TIMEOUTS}"
 fi
