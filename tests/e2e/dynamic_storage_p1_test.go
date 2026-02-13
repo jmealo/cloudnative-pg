@@ -323,6 +323,9 @@ var _ = Describe("Dynamic storage management extended scenarios",
 					Skip("This test requires at least one VolumeSnapshotClass to be configured")
 				}
 
+				// Use the first available VolumeSnapshotClass
+				snapshotClassName := snapshotClassList.Items[0].Name
+
 				clusterName := "ds-013"
 				cluster := &apiv1.Cluster{
 					ObjectMeta: metav1.ObjectMeta{
@@ -335,6 +338,12 @@ var _ = Describe("Dynamic storage management extended scenarios",
 							Request:      "5Gi",
 							Limit:        "20Gi",
 							TargetBuffer: ptr.To(20),
+						},
+						Backup: &apiv1.BackupConfiguration{
+							VolumeSnapshot: &apiv1.VolumeSnapshotConfiguration{
+								ClassName:              snapshotClassName,
+								SnapshotOwnerReference: apiv1.SnapshotOwnerReferenceCluster,
+							},
 						},
 					},
 				}
@@ -356,11 +365,12 @@ var _ = Describe("Dynamic storage management extended scenarios",
 
 				By("verifying snapshots can be taken of the resized volume", func() {
 					backupName := clusterName + "-snapshot"
+					// Use BackupTargetPrimary since this is a single-instance cluster
 					err := backups.CreateOnDemandBackupViaKubectlPlugin(
 						namespace,
 						clusterName,
 						backupName,
-						apiv1.BackupTargetStandby,
+						apiv1.BackupTargetPrimary,
 						apiv1.BackupMethodVolumeSnapshot,
 					)
 					Expect(err).ToNot(HaveOccurred())
