@@ -21,6 +21,7 @@ package dynamicstorage
 
 import (
 	"context"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -86,9 +87,9 @@ var _ = Describe("reconciler", func() {
 			c := fake.NewClientBuilder().WithScheme(scheme.BuildWithAllKnownScheme()).Build()
 			res, err := Reconcile(ctx, c, cluster, nil, status, nil)
 			Expect(err).ToNot(HaveOccurred())
-			// Should return empty result to allow cluster controller to continue.
-			// The cluster controller will requeue periodically when dynamic storage is enabled.
-			Expect(res.IsZero()).To(BeTrue())
+			// Should requeue to check again soon when instances exist but don't have disk status yet.
+			// This allows the reconciler to retry once disk status becomes available.
+			Expect(res.RequeueAfter).To(Equal(30 * time.Second))
 		})
 
 		It("trigger emergency grow when disk is full", func() {
