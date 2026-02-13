@@ -300,8 +300,9 @@ if ! [[ "${GINKGO_MAX_NODES}" =~ ^[0-9]+$ ]] || [[ "${GINKGO_MAX_NODES}" -lt 1 ]
 fi
 
 if [ -z "${GINKGO_NODES}" ]; then
-  # Default to sequential execution to reduce AKS disk attach/detach contention.
-  GINKGO_NODES=1
+  # Default to 2 parallel workers. With 6 nodes and 3-instance clusters,
+  # this uses 1 pod per node, maximizing CSI throughput while avoiding contention.
+  GINKGO_NODES=2
 fi
 
 if ! [[ "${GINKGO_NODES}" =~ ^[0-9]+$ ]] || [[ "${GINKGO_NODES}" -lt 1 ]]; then
