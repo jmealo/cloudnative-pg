@@ -1352,6 +1352,22 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 				namespace, err = env.CreateUniqueTestNamespace(env.Ctx, env.Client, namespacePrefix)
 				Expect(err).ToNot(HaveOccurred())
 
+				// Select a node upfront for all pods. On AKS, PVs are bound to specific nodes
+				// due to availability zone constraints. If we create pods without nodeSelector,
+				// they spread across nodes and their PVs get bound there. When we later try to
+				// apply nodeSelector to pin all pods to one node, the other pods can't move
+				// because their PVs are stuck on different nodes.
+				// By setting nodeSelector from the start, all pods get created on the same node.
+				var targetNode string
+				By("selecting a target node for all cluster pods", func() {
+					nodeList, nodeErr := nodes.List(env.Ctx, env.Client)
+					Expect(nodeErr).ToNot(HaveOccurred())
+					Expect(nodeList.Items).ToNot(BeEmpty(), "No schedulable nodes found")
+					// Use the first available node
+					targetNode = nodeList.Items[0].Name
+					GinkgoWriter.Printf("Selected target node for pod restart test: %s\n", targetNode)
+				})
+
 				clusterName := "dynamic-pod-restart"
 				cluster := &apiv1.Cluster{}
 				cluster.Name = clusterName
@@ -1368,7 +1384,15 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 						CriticalMinimumFree: "100Mi",
 					},
 				}
-				stiffenSpecForReliability(cluster)
+				// Pin all pods to one node from the start to avoid cross-node PV binding.
+				// On AKS, PVs have node affinity and can't be moved between nodes.
+				// Disable pod anti-affinity since all pods must be on the same node.
+				cluster.Spec.Affinity = apiv1.AffinityConfiguration{
+					EnablePodAntiAffinity: ptr.To(false),
+					NodeSelector: map[string]string{
+						"kubernetes.io/hostname": targetNode,
+					},
+				}
 				// Configure wal_keep_size to retain WAL segments for pg_rewind.
 				// When the primary is deleted and a failover occurs, the old primary
 				// needs pg_rewind to find the divergence point in WAL.
@@ -1432,19 +1456,9 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 				})
 
 				By("deleting primary pod to trigger restart", func() {
-					// Pin the cluster instances to the current primary's node to avoid cross-node
-					// volume attach flakiness on AKS. This ensures the pod restarts on the same
-					// node, making the test more stable while still verifying operator state recovery.
-					Eventually(func(g Gomega) {
-						cluster, err := clusterutils.Get(env.Ctx, env.Client, namespace, clusterName)
-						g.Expect(err).ToNot(HaveOccurred())
-						cluster.Spec.Affinity.NodeSelector = map[string]string{
-							"kubernetes.io/hostname": primaryPod.Spec.NodeName,
-						}
-						err = env.Client.Update(env.Ctx, cluster)
-						g.Expect(err).ToNot(HaveOccurred())
-					}).Should(Succeed())
-
+					// NodeSelector was set at cluster creation time to ensure all pods
+					// start on the same node with PVs bound there. This avoids cross-node
+					// volume attach issues on AKS where PVs have node affinity.
 					quickDelete := &ctrlclient.DeleteOptions{
 						GracePeriodSeconds: &quickDeletionPeriod,
 					}
@@ -1488,6 +1502,19 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 				Request:      "5Gi",
 				Limit:        "20Gi",
 				TargetBuffer: ptr.To(20),
+				// Set high emergency thresholds to ensure scheduled growth
+				// instead of emergency growth which can interfere with switchover.
+				EmergencyGrow: &apiv1.EmergencyGrowConfig{
+					CriticalThreshold:   99,
+					CriticalMinimumFree: "100Mi",
+				},
+			}
+			// Configure wal_keep_size to retain WAL segments for pg_rewind.
+			// When switchover occurs, the old primary needs pg_rewind to find
+			// the divergence point in WAL. Use larger value to ensure enough
+			// WAL is retained even after disk operations.
+			cluster.Spec.PostgresConfiguration.Parameters = map[string]string{
+				"wal_keep_size": "2GB",
 			}
 			stiffenSpecForReliability(cluster)
 
@@ -1518,16 +1545,16 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 				Expect(err).ToNot(HaveOccurred())
 				originalPrimary = primaryPod.Name
 
-				// Use lower disk fill (80-83%) for tests with switchover operations
-				// to ensure WAL files are retained for pg_rewind after the switchover.
-				// Higher fill levels (85%+) cause aggressive WAL recycling which breaks pg_rewind.
-				finalUsage, fillErr := fillDiskIncrementally(primaryPod, 80, 83, 500000)
+				// Use fillDiskFast (dd/fallocate) instead of fillDiskIncrementally to avoid
+				// generating WAL. SQL-based disk fill creates WAL that may be recycled before
+				// pg_rewind can use it after switchover. Use 70-75% to leave headroom for WAL.
+				finalUsage, fillErr := fillDiskFast(primaryPod, 70, 75)
 				if fillErr != nil {
 					GinkgoWriter.Printf("Disk fill ended with error (may be expected): %v\n", fillErr)
 				}
 				GinkgoWriter.Printf("Final disk usage after fill: %d%%\n", finalUsage)
-				Expect(finalUsage).To(BeNumerically(">=", 75),
-					"Disk fill should reach at least 75%% to trigger growth")
+				Expect(finalUsage).To(BeNumerically(">=", 65),
+					"Disk fill should reach at least 65%% to trigger growth")
 			})
 
 			By("waiting for storage sizing to be active", func() {
