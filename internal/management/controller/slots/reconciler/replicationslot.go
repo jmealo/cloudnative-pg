@@ -185,6 +185,20 @@ func dropReplicationSlots(
 	return reconcile.Result{}, nil
 }
 
+// isSynchronizeLogicalDecodingEnabled checks if logical slot synchronization is enabled
+func isSynchronizeLogicalDecodingEnabled(cluster *apiv1.Cluster) bool {
+	if cluster.Spec.ReplicationSlots == nil {
+		return false
+	}
+	if cluster.Spec.ReplicationSlots.HighAvailability == nil {
+		return false
+	}
+	if !cluster.Spec.ReplicationSlots.HighAvailability.GetEnabled() {
+		return false
+	}
+	return cluster.Spec.ReplicationSlots.HighAvailability.SynchronizeLogicalDecoding
+}
+
 // cleanupOrphanedLogicalSlots removes logical replication slots with synced=false.
 // On PostgreSQL 17+, slots with synced=false were created locally and cannot be
 // updated by the slot sync worker. After a switchover, these orphaned slots must
