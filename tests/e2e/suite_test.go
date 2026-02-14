@@ -22,6 +22,9 @@ package e2e
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -56,6 +59,20 @@ const (
 	PollingTime  = objects.PollingTime
 )
 
+// getMinioEnv returns MinIO environment configuration from env vars or defaults
+func getMinioEnv() *minio.Env {
+	minioNamespace := os.Getenv("MINIO_NAMESPACE")
+	if minioNamespace == "" {
+		minioNamespace = "minio"
+	}
+	return &minio.Env{
+		Namespace:    minioNamespace,
+		ServiceName:  fmt.Sprintf("minio-service.%s", minioNamespace),
+		CaSecretName: "minio-server-ca-secret",
+		TLSSecret:    "minio-server-tls-secret",
+	}
+}
+
 var (
 	env                     *environment.TestingEnvironment
 	testLevelEnv            *tests.TestEnvLevel
@@ -65,18 +82,30 @@ var (
 	operatorWasRestarted    bool
 	quickDeletionPeriod     = int64(1)
 	testTimeouts            map[timeouts.Timeout]int
-	minioEnv                = &minio.Env{
-		Namespace:    "minio",
-		ServiceName:  "minio-service.minio",
-		CaSecretName: "minio-server-ca-secret",
-		TLSSecret:    "minio-server-tls-secret",
-	}
+	minioEnv                = getMinioEnv()
 )
+
+func shouldSkipOperatorPodStabilityCheck() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("TEST_SKIP_OPERATOR_POD_STABILITY_CHECK"))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
 
 var _ = SynchronizedBeforeSuite(func() []byte {
 	var err error
 	env, err = environment.NewTestingEnvironment()
 	Expect(err).ShouldNot(HaveOccurred())
+
+	// Detect cluster capabilities (VolumeSnapshot, etc.)
+	err = cnpgUtils.DetectVolumeSnapshotExist(env.Interface.Discovery())
+	if err != nil {
+		GinkgoWriter.Printf("Warning: Failed to detect VolumeSnapshot support: %v\n", err)
+	} else {
+		GinkgoWriter.Printf("VolumeSnapshot support detected: %v\n", cnpgUtils.HaveVolumeSnapshot())
+	}
 
 	// Start stern to write the logs of every pod we are interested in. Since we don't have a way to have a selector
 	// matching both the operator's and the clusters' pods, we need to start stern twice.
@@ -160,6 +189,9 @@ var _ = BeforeEach(func() {
 	if len(breakingLabelsInCurrentTest.([]string)) != 0 {
 		return
 	}
+	if shouldSkipOperatorPodStabilityCheck() {
+		return
+	}
 
 	operatorPod, err := operator.GetPod(env.Ctx, env.Client)
 	Expect(err).ToNot(HaveOccurred())
@@ -186,6 +218,9 @@ func TestE2ESuite(t *testing.T) {
 // tests will be SKIPPED, as they would always fail in this node.
 var _ = AfterEach(func() {
 	if CurrentSpecReport().State.Is(types.SpecStateSkipped) {
+		return
+	}
+	if shouldSkipOperatorPodStabilityCheck() {
 		return
 	}
 	labelsForTestsBreakingTheOperator := []string{"upgrade", "disruptive"}

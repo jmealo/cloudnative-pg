@@ -26,6 +26,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	barmanWebhooks "github.com/cloudnative-pg/barman-cloud/pkg/api/webhooks"
 	"github.com/cloudnative-pg/machinery/pkg/image/reference"
@@ -35,6 +36,7 @@ import (
 	"github.com/cloudnative-pg/machinery/pkg/types"
 	jsonpatch "github.com/evanphx/json-patch/v5"
 	volumesnapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
+	"github.com/robfig/cron"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -1612,6 +1614,26 @@ func validateStorageConfigurationSize(
 ) field.ErrorList {
 	var result field.ErrorList
 
+	// Check for dynamic sizing mode (request + limit)
+	hasRequest := storageConfiguration.Request != ""
+	hasLimit := storageConfiguration.Limit != ""
+	hasSize := storageConfiguration.Size != ""
+
+	// Validate mutual exclusivity between static (size) and dynamic (request/limit) modes
+	if hasSize && (hasRequest || hasLimit) {
+		result = append(result, field.Invalid(
+			&structPath,
+			storageConfiguration.Size,
+			"size and request/limit are mutually exclusive; use static sizing (size) or dynamic (request + limit)"))
+		return result
+	}
+
+	// If dynamic sizing mode, validate request and limit
+	if hasRequest || hasLimit {
+		return validateDynamicStorageConfiguration(structPath, storageConfiguration)
+	}
+
+	// Static sizing mode validation
 	if storageConfiguration.Size != "" {
 		if _, err := resource.ParseQuantity(storageConfiguration.Size); err != nil {
 			result = append(result, field.Invalid(
@@ -1627,19 +1649,289 @@ func validateStorageConfigurationSize(
 		result = append(result, field.Invalid(
 			structPath.Child("size"),
 			storageConfiguration.Size,
-			"Size not configured. Please add it, or a storage request in the pvcTemplate."))
+			"Size not configured. Add it, or use pvcTemplate storage request, or use dynamic sizing."))
 	}
 
 	return result
 }
 
+// validateDynamicStorageConfiguration validates the dynamic storage configuration fields
+func validateDynamicStorageConfiguration(
+	structPath field.Path,
+	storageConfiguration apiv1.StorageConfiguration,
+) field.ErrorList {
+	var result field.ErrorList
+
+	// Both request and limit must be set for dynamic mode
+	if storageConfiguration.Request == "" {
+		result = append(result, field.Required(
+			structPath.Child("request"),
+			"request is required when limit is set for dynamic sizing"))
+	}
+	if storageConfiguration.Limit == "" {
+		result = append(result, field.Required(
+			structPath.Child("limit"),
+			"limit is required when request is set for dynamic sizing"))
+	}
+
+	// Parse and validate request
+	var requestQty resource.Quantity
+	if storageConfiguration.Request != "" {
+		var err error
+		requestQty, err = resource.ParseQuantity(storageConfiguration.Request)
+		if err != nil {
+			result = append(result, field.Invalid(
+				structPath.Child("request"),
+				storageConfiguration.Request,
+				"request value isn't valid"))
+		}
+	}
+
+	// Parse and validate limit
+	var limitQty resource.Quantity
+	if storageConfiguration.Limit != "" {
+		var err error
+		limitQty, err = resource.ParseQuantity(storageConfiguration.Limit)
+		if err != nil {
+			result = append(result, field.Invalid(
+				structPath.Child("limit"),
+				storageConfiguration.Limit,
+				"limit value isn't valid"))
+		}
+	}
+
+	// Ensure request <= limit
+	if storageConfiguration.Request != "" && storageConfiguration.Limit != "" {
+		if requestQty.Cmp(limitQty) > 0 {
+			result = append(result, field.Invalid(
+				structPath.Child("request"),
+				storageConfiguration.Request,
+				fmt.Sprintf("request (%s) cannot exceed limit (%s)", storageConfiguration.Request, storageConfiguration.Limit)))
+		}
+	}
+
+	// Validate maintenance window if set
+	if storageConfiguration.MaintenanceWindow != nil {
+		mwPath := structPath.Child("maintenanceWindow")
+		result = append(result, validateMaintenanceWindow(*mwPath, storageConfiguration.MaintenanceWindow)...)
+	}
+
+	// Validate emergency grow config if set
+	if storageConfiguration.EmergencyGrow != nil {
+		emergencyPath := structPath.Child("emergencyGrow")
+		result = append(result, validateEmergencyGrowConfig(*emergencyPath, storageConfiguration.EmergencyGrow)...)
+	}
+
+	return result
+}
+
+// validateMaintenanceWindow validates the maintenance window configuration
+func validateMaintenanceWindow(
+	structPath field.Path,
+	mw *apiv1.MaintenanceWindowConfig,
+) field.ErrorList {
+	var result field.ErrorList
+
+	// Validate cron schedule if set
+	if mw.Schedule != "" {
+		if err := validateCronSchedule(mw.Schedule); err != nil {
+			result = append(result, field.Invalid(
+				structPath.Child("schedule"),
+				mw.Schedule,
+				fmt.Sprintf("invalid cron schedule: %v", err)))
+		}
+	}
+
+	// Validate duration if set (simple check for Go duration format)
+	if mw.Duration != "" {
+		if _, err := time.ParseDuration(mw.Duration); err != nil {
+			result = append(result, field.Invalid(
+				structPath.Child("duration"),
+				mw.Duration,
+				fmt.Sprintf("invalid duration: %v", err)))
+		}
+	}
+
+	return result
+}
+
+// validateEmergencyGrowConfig validates the emergency grow configuration
+func validateEmergencyGrowConfig(
+	structPath field.Path,
+	eg *apiv1.EmergencyGrowConfig,
+) field.ErrorList {
+	var result field.ErrorList
+
+	// Validate criticalMinimumFree if set
+	if eg.CriticalMinimumFree != "" {
+		if _, err := resource.ParseQuantity(eg.CriticalMinimumFree); err != nil {
+			result = append(result, field.Invalid(
+				structPath.Child("criticalMinimumFree"),
+				eg.CriticalMinimumFree,
+				fmt.Sprintf("invalid quantity: %v", err)))
+		}
+	}
+
+	// Validate criticalThreshold range (handled by kubebuilder validation, but double-check)
+	if eg.CriticalThreshold > 0 && (eg.CriticalThreshold < 80 || eg.CriticalThreshold > 99) {
+		result = append(result, field.Invalid(
+			structPath.Child("criticalThreshold"),
+			eg.CriticalThreshold,
+			"criticalThreshold must be between 80 and 99"))
+	}
+
+	// Validate maxActionsPerDay
+	if eg.MaxActionsPerDay != nil && *eg.MaxActionsPerDay < 0 {
+		result = append(result, field.Invalid(
+			structPath.Child("maxActionsPerDay"),
+			*eg.MaxActionsPerDay,
+			"maxActionsPerDay cannot be negative"))
+	}
+
+	// Validate reservedActionsForEmergency
+	if eg.ReservedActionsForEmergency != nil && *eg.ReservedActionsForEmergency < 0 {
+		result = append(result, field.Invalid(
+			structPath.Child("reservedActionsForEmergency"),
+			*eg.ReservedActionsForEmergency,
+			"reservedActionsForEmergency cannot be negative"))
+	}
+
+	// Validate that reserved actions don't exceed max actions
+	if eg.MaxActionsPerDay != nil && eg.ReservedActionsForEmergency != nil {
+		if *eg.ReservedActionsForEmergency > *eg.MaxActionsPerDay {
+			result = append(result, field.Invalid(
+				structPath.Child("reservedActionsForEmergency"),
+				*eg.ReservedActionsForEmergency,
+				fmt.Sprintf("reservedActionsForEmergency (%d) cannot exceed maxActionsPerDay (%d)",
+					*eg.ReservedActionsForEmergency, *eg.MaxActionsPerDay)))
+		}
+	}
+
+	return result
+}
+
+// validateCronSchedule validates a cron schedule string (5-field standard cron)
+// validateCronSchedule validates a cron schedule
+func validateCronSchedule(schedule string) error {
+	if _, err := cron.Parse(schedule); err != nil {
+		return err
+	}
+	fields := strings.Fields(schedule)
+	if len(fields) != 6 {
+		return fmt.Errorf("expected 6 fields, got %d", len(fields))
+	}
+	return nil
+}
+
 // Validate a change in the storage
 func (v *ClusterCustomValidator) validateStorageChange(r, old *apiv1.Cluster) field.ErrorList {
+	// Handle static → dynamic migration with status data when available
+	if isStaticToDynamicMigration(old.Spec.StorageConfiguration, r.Spec.StorageConfiguration) {
+		var volumeStatus *apiv1.VolumeSizingStatus
+		if old.Status.StorageSizing != nil {
+			volumeStatus = old.Status.StorageSizing.Data
+		}
+		return validateStaticToDynamicMigration(
+			field.NewPath("spec", "storage"),
+			old.Spec.StorageConfiguration,
+			r.Spec.StorageConfiguration,
+			volumeStatus,
+		)
+	}
 	return validateStorageConfigurationChange(
 		field.NewPath("spec", "storage"),
 		old.Spec.StorageConfiguration,
 		r.Spec.StorageConfiguration,
 	)
+}
+
+// isStaticToDynamicMigration returns true if the storage configuration is changing
+// from static sizing (size field) to dynamic sizing (request/limit fields)
+func isStaticToDynamicMigration(oldStorage, newStorage apiv1.StorageConfiguration) bool {
+	oldIsDynamic := oldStorage.Request != "" && oldStorage.Limit != ""
+	newIsDynamic := newStorage.Request != "" && newStorage.Limit != ""
+	return !oldIsDynamic && newIsDynamic
+}
+
+// validateStaticToDynamicMigration validates a migration from static to dynamic sizing
+// using actual PVC sizes from status when available, falling back to spec size
+func validateStaticToDynamicMigration(
+	structPath *field.Path,
+	oldStorage apiv1.StorageConfiguration,
+	newStorage apiv1.StorageConfiguration,
+	volumeStatus *apiv1.VolumeSizingStatus,
+) field.ErrorList {
+	var result field.ErrorList
+
+	// Determine the minimum actual PVC size to validate against
+	var minActualSize *resource.Quantity
+
+	// Prefer actual sizes from status if available
+	if volumeStatus != nil && len(volumeStatus.ActualSizes) > 0 {
+		minActualSize = getMinActualSize(volumeStatus.ActualSizes)
+	}
+
+	// Fall back to spec size if status not available
+	if minActualSize == nil {
+		minActualSize = oldStorage.GetSizeOrNil()
+	}
+
+	// If we still don't have a size, we can't validate - allow the change
+	// and let the controller handle it on first reconcile
+	if minActualSize == nil {
+		return result
+	}
+
+	newRequest, errReq := resource.ParseQuantity(newStorage.Request)
+	newLimit, errLimit := resource.ParseQuantity(newStorage.Limit)
+
+	if errReq != nil || errLimit != nil {
+		// Parse errors will be caught by other validation
+		return result
+	}
+
+	// Request must be <= minimum actual PVC size (no shrink implied for the floor)
+	if newRequest.Cmp(*minActualSize) > 0 {
+		result = append(result, field.Invalid(
+			structPath.Child("request"),
+			newStorage.Request,
+			fmt.Sprintf("request cannot exceed minimum actual PVC size (%s) when migrating to dynamic sizing",
+				minActualSize.String())))
+	}
+
+	// Limit must be >= minimum actual PVC size (current size must be within bounds)
+	if newLimit.Cmp(*minActualSize) < 0 {
+		result = append(result, field.Invalid(
+			structPath.Child("limit"),
+			newStorage.Limit,
+			fmt.Sprintf("limit cannot be less than minimum actual PVC size (%s) when migrating to dynamic sizing",
+				minActualSize.String())))
+	}
+
+	return result
+}
+
+// getMinActualSize returns the minimum size from a map of instance names to PVC sizes
+func getMinActualSize(actualSizes map[string]string) *resource.Quantity {
+	var minSize *resource.Quantity
+	for _, sizeStr := range actualSizes {
+		size, err := resource.ParseQuantity(sizeStr)
+		if err != nil {
+			continue
+		}
+		if minSize == nil || size.Cmp(*minSize) < 0 {
+			minSize = &size
+		}
+	}
+	return minSize
+}
+
+// getTablespaceVolumeSizingStatus returns the VolumeSizingStatus for a named tablespace, or nil
+func getTablespaceVolumeSizingStatus(sizing *apiv1.StorageSizingStatus, name string) *apiv1.VolumeSizingStatus {
+	if sizing == nil || sizing.Tablespaces == nil {
+		return nil
+	}
+	return sizing.Tablespaces[name]
 }
 
 func (v *ClusterCustomValidator) validateWalStorageChange(r, old *apiv1.Cluster) field.ErrorList {
@@ -1654,6 +1946,20 @@ func (v *ClusterCustomValidator) validateWalStorageChange(r, old *apiv1.Cluster)
 				r.Spec.WalStorage,
 				"walStorage cannot be disabled once configured"),
 		}
+	}
+
+	// Handle static → dynamic migration with status data when available
+	if isStaticToDynamicMigration(*old.Spec.WalStorage, *r.Spec.WalStorage) {
+		var volumeStatus *apiv1.VolumeSizingStatus
+		if old.Status.StorageSizing != nil {
+			volumeStatus = old.Status.StorageSizing.WAL
+		}
+		return validateStaticToDynamicMigration(
+			field.NewPath("spec", "walStorage"),
+			*old.Spec.WalStorage,
+			*r.Spec.WalStorage,
+			volumeStatus,
+		)
 	}
 
 	return validateStorageConfigurationChange(
@@ -1682,52 +1988,126 @@ func (v *ClusterCustomValidator) validateTablespacesChange(r, old *apiv1.Cluster
 	var errs field.ErrorList
 	for idx, oldConf := range old.Spec.Tablespaces {
 		name := oldConf.Name
-		if newConf := r.GetTablespaceConfiguration(name); newConf != nil {
-			errs = append(errs, validateStorageConfigurationChange(
-				field.NewPath("spec", "tablespaces").Index(idx),
-				oldConf.Storage,
-				newConf.Storage,
-			)...)
-		} else {
+		newConf := r.GetTablespaceConfiguration(name)
+		if newConf == nil {
 			errs = append(errs,
 				field.Invalid(
 					field.NewPath("spec", "tablespaces").Index(idx),
 					r.Spec.Tablespaces,
 					"no tablespace can be deleted once created"))
+			continue
 		}
+
+		fieldPath := field.NewPath("spec", "tablespaces").Index(idx)
+
+		// Handle static → dynamic migration with status data when available
+		if isStaticToDynamicMigration(oldConf.Storage, newConf.Storage) {
+			volumeStatus := getTablespaceVolumeSizingStatus(old.Status.StorageSizing, name)
+			errs = append(errs, validateStaticToDynamicMigration(
+				fieldPath, oldConf.Storage, newConf.Storage, volumeStatus,
+			)...)
+			continue
+		}
+
+		errs = append(errs, validateStorageConfigurationChange(
+			fieldPath, oldConf.Storage, newConf.Storage,
+		)...)
 	}
 	return errs
 }
 
-// validateStorageConfigurationChange generates an error list by comparing two StorageConfiguration
+// validateStorageConfigurationChange generates an error list by comparing two StorageConfiguration.
+// Note: Static → dynamic migration is handled separately in validateStaticToDynamicMigration
+// which has access to actual PVC sizes from status.
 func validateStorageConfigurationChange(
 	structPath *field.Path,
 	oldStorage apiv1.StorageConfiguration,
 	newStorage apiv1.StorageConfiguration,
 ) field.ErrorList {
+	var result field.ErrorList
+
+	// Check for mode changes (static <-> dynamic)
+	oldIsDynamic := oldStorage.Request != "" && oldStorage.Limit != ""
+	newIsDynamic := newStorage.Request != "" && newStorage.Limit != ""
+
+	// Static → dynamic migration should be handled by caller with status access
+	// If we reach here for such a case, allow it (caller didn't intercept, likely walStorage/tablespaces)
+	if !oldIsDynamic && newIsDynamic {
+		// Fall back to spec-based validation for callers without status access
+		return validateStaticToDynamicMigration(structPath, oldStorage, newStorage, nil)
+	}
+
+	// Prevent switching from dynamic to static mode
+	if oldIsDynamic && !newIsDynamic {
+		result = append(result, field.Invalid(
+			structPath,
+			newStorage,
+			"cannot switch from dynamic sizing (request/limit) to static sizing (size) on an existing cluster"))
+		return result
+	}
+
+	// For dynamic mode, validate that request is not increased (would be like shrinking)
+	// and limit changes are valid
+	if oldIsDynamic && newIsDynamic {
+		result = append(result, validateDynamicStorageChange(structPath, oldStorage, newStorage)...)
+		return result
+	}
+
+	// Static mode: original validation
 	oldSize := oldStorage.GetSizeOrNil()
 	if oldSize == nil {
 		// Can't read the old size, so can't tell if the new size is greater
 		// or less
-		return nil
+		return result
 	}
 
 	newSize := newStorage.GetSizeOrNil()
 	if newSize == nil {
 		// Can't read the new size, so can't tell if it is increasing
-		return nil
+		return result
 	}
 
 	if oldSize.AsDec().Cmp(newSize.AsDec()) < 1 {
-		return nil
+		return result
 	}
 
-	return field.ErrorList{
-		field.Invalid(
-			structPath,
-			newSize,
-			fmt.Sprintf("can't shrink existing storage from %v to %v", oldSize, newSize)),
+	result = append(result, field.Invalid(
+		structPath,
+		newSize,
+		fmt.Sprintf("can't shrink existing storage from %v to %v", oldSize, newSize)))
+
+	return result
+}
+
+// validateDynamicStorageChange validates changes to dynamic storage configuration
+func validateDynamicStorageChange(
+	structPath *field.Path,
+	oldStorage apiv1.StorageConfiguration,
+	newStorage apiv1.StorageConfiguration,
+) field.ErrorList {
+	var result field.ErrorList
+
+	// Parse old and new request/limit values
+	newRequest, _ := resource.ParseQuantity(newStorage.Request)
+	oldLimit, _ := resource.ParseQuantity(oldStorage.Limit)
+	newLimit, _ := resource.ParseQuantity(newStorage.Limit)
+
+	// Request can change freely - it's just a floor for the controller
+	// No validation needed for request changes
+
+	// Limit can be increased (allows growing ceiling)
+	// Decreasing limit is allowed but will prevent further growth
+	_ = oldLimit // Acknowledge that we intentionally don't restrict limit decreases
+
+	// Ensure new request <= new limit
+	if newRequest.Cmp(newLimit) > 0 {
+		result = append(result, field.Invalid(
+			structPath.Child("request"),
+			newStorage.Request,
+			fmt.Sprintf("request (%s) cannot exceed limit (%s)", newStorage.Request, newStorage.Limit)))
 	}
+
+	return result
 }
 
 // Validate the cluster name. This is important to avoid issues
