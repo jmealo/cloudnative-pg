@@ -448,8 +448,8 @@ if [[ "${SKIP_DEPLOY}" != "true" ]]; then
   info "=== Deploying Operator ==="
 
   # Recreate the namespace to get a clean state
-  kubectl delete namespace ${OPERATOR_NAMESPACE} --ignore-not-found=true --wait=true 2>/dev/null || true
-  kubectl create namespace ${OPERATOR_NAMESPACE}
+  kubectl delete namespace "${OPERATOR_NAMESPACE}" --ignore-not-found=true --wait=true 2>/dev/null || true
+  kubectl create namespace "${OPERATOR_NAMESPACE}"
 
   # Generate manifests with custom namespace
   # We need to override the hardcoded namespace in kustomization.yaml
@@ -480,17 +480,17 @@ if [[ "${SKIP_DEPLOY}" != "true" ]]; then
     kubectl delete clusterrolebinding cnpg-manager-rolebinding --ignore-not-found=true
     kubectl create clusterrolebinding cnpg-manager-rolebinding \
       --clusterrole=cnpg-manager \
-      --serviceaccount=${OPERATOR_NAMESPACE}:cnpg-manager
+      --serviceaccount="${OPERATOR_NAMESPACE}":cnpg-manager
     ok "ClusterRoleBinding updated for ${OPERATOR_NAMESPACE}"
   fi
 
   # Wait for the operator to be ready
   info "Waiting for operator deployment..."
   if ! kubectl wait --for=condition=Available --timeout=3m \
-    -n ${OPERATOR_NAMESPACE} deployments cnpg-controller-manager; then
+    -n "${OPERATOR_NAMESPACE}" deployments cnpg-controller-manager; then
     fail "Operator deployment not ready after 3 minutes"
-    kubectl get pods -n ${OPERATOR_NAMESPACE}
-    kubectl describe deployment -n ${OPERATOR_NAMESPACE} cnpg-controller-manager
+    kubectl get pods -n "${OPERATOR_NAMESPACE}"
+    kubectl describe deployment -n "${OPERATOR_NAMESPACE}" cnpg-controller-manager
     exit 1
   fi
   ok "Operator deployed and ready"
@@ -498,7 +498,7 @@ if [[ "${SKIP_DEPLOY}" != "true" ]]; then
 else
   info "Skipping deploy (--skip-deploy)"
   # Verify operator is running
-  if ! kubectl get deployment -n ${OPERATOR_NAMESPACE} cnpg-controller-manager >/dev/null 2>&1; then
+  if ! kubectl get deployment -n "${OPERATOR_NAMESPACE}" cnpg-controller-manager >/dev/null 2>&1; then
     fail "Operator not found in ${OPERATOR_NAMESPACE} namespace. Run without --skip-deploy."
     exit 1
   fi

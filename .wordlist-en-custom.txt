@@ -1,3 +1,5 @@
+ActionsLast
+ActualSizes
 AES
 API's
 Cooldowns
@@ -19,8 +21,11 @@ AppArmorProfile
 ArgoCD
 Armando
 AuthQuery
+AtLimit
 Autoresize
 autoresize
+AvailableForEmergency
+AvailableForPlanned
 AuthQuerySecret
 Autoscaler
 AvailableArchitecture
@@ -29,6 +34,8 @@ AzureCredentials
 AzurePVCUpdateEnabled
 Azurite
 BDR
+BudgetResetsAt
+BudgetStatus
 BUSL
 BackupCapabilities
 BackupConfiguration
@@ -81,8 +88,11 @@ Ceph
 CertificatesConfiguration
 CertificatesStatus
 Certmanager
+CamelCase
 CiliumNetworkPolicy
 ClassName
+CriticalMinimumFree
+CriticalThreshold
 ClientCASecret
 ClientTLSSecret
 CloudNativePG
@@ -161,6 +171,7 @@ Endevir
 EndpointCA
 EnsureOption
 EnterpriseDB
+ExceedLimitOnEmergency
 Enum
 EnvFrom
 EnvFromSource
@@ -245,6 +256,8 @@ Krew
 KubeCon
 Kubegres
 KubernetesClusterDomain
+LabelDynamicStorage
+LastAction
 LDAP
 LDAPBindAsAuth
 LDAPBindSearchAuth
@@ -303,6 +316,7 @@ NeedsGrow
 Nenciarini
 NetworkPolicies
 NetworkPolicy
+NextMaintenanceWindow
 NodeAffinity
 NodeMaintenanceWindow
 NodeSelector
@@ -340,6 +354,7 @@ PPROF
 PV
 PVCs
 PascalBourdier
+PascalCase
 PasswordState
 PendingGrowth
 PasswordStatus
@@ -392,6 +407,7 @@ PrimaryUpdateStrategySupervised
 PrimaryUpdateStrategyUnsupervised
 PriorityClass
 PriorityClassName
+PRs
 Probe
 ProbeStrategyPgIsReady
 ProbeStrategyQuery
@@ -416,7 +432,9 @@ PullPolicy
 PushSecret
 QoS
 QuickStart
+ralph
 RBAC
+refactorability
 README
 RHSA
 RLS
@@ -431,6 +449,7 @@ ReplicaSet
 ReplicationSlotsConfiguration
 ReplicationSlotsHAConfiguration
 ReplicationTLSSecret
+ReservedActionsForEmergency
 ResizingPVC
 ResourceRequirements
 ResourceVersion
@@ -481,6 +500,7 @@ SecretKeySelector
 SecretRefs
 SecretStore
 SecretVersion
+SizingAction
 SecretsResourceVersion
 SecurityContextConstraints
 Seealso
@@ -515,6 +535,8 @@ StartupProbe
 StatefulSets
 StorageClass
 StorageConfiguration
+StorageSizing
+StorageSizingStatus
 Storages
 Strawman
 SubscriptionReclaimDelete
@@ -546,6 +568,7 @@ TablespaceStatus
 TablespaceStatusPendingReconciliation
 TablespaceStatusReconciled
 Tablespaces
+TargetSize
 TemporaryData
 TimelineId
 TopologyKey
@@ -572,7 +595,9 @@ VolumeSnapshot
 VolumeSnapshotClass
 VolumeSnapshotConfiguration
 VolumeSnapshots
+VolumeSizingStatus
 WAL
+WaitingForDiskStatus
 WALArchiver
 WALBackupConfiguration
 WALCapabilities
@@ -698,7 +723,9 @@ bootstrappgbasebackup
 bootstraprecovery
 br
 bs
+budgetstatus
 builtinLocale
+bkp
 bw
 byStatus
 bypassrls
@@ -849,6 +876,7 @@ dn
 dns
 dockle
 dod
+ds
 downtimes
 dvcmQ
 dwm
@@ -858,6 +886,7 @@ ecdsa
 edb
 eks
 embeddedobjectmetadata
+emergencygrowconfig
 enableAlterSystem
 enableInstancePprof
 enablePDB
@@ -940,6 +969,7 @@ govulncheck
 grafana
 gzip
 hanshal
+hardcode
 hardcoded
 hashicorp
 hba
@@ -1081,6 +1111,7 @@ mTLS
 macOS
 majorVersion
 majorVersionUpgradeFromImage
+maintenancewindowconfig
 malcolm
 mallocs
 managedRoleSecretVersion
@@ -1364,6 +1395,7 @@ reusePVC
 ro
 robfig
 roleRef
+rst
 roleconfiguration
 rolestatus
 rollout
@@ -1431,6 +1463,7 @@ shusaan
 sig
 sigs
 sizeRange
+sizingaction
 sigstore
 singlenamespace
 slotPrefix
@@ -1478,6 +1511,7 @@ storageSasToken
 storageclass
 storageclasses
 storageconfiguration
+storagesizingstatus
 strflocaltime
 subcommand
 subcommands
@@ -1598,6 +1632,7 @@ volumeSnapshot
 volumeSnapshots
 volumesnapshot
 volumesnapshotconfiguration
+volumesizingstatus
 waitForArchive
 wal
 walCapabilities
@@ -1620,5 +1655,6 @@ xlog
 xml
 xz
 yaml
+yf
 yml
 zstd

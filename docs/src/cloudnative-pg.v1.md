@@ -429,6 +429,26 @@ _Appears in:_
 | `secret` _[LocalObjectReference](https://pkg.go.dev/github.com/cloudnative-pg/machinery/pkg/api#LocalObjectReference)_ | Name of the secret containing the initial credentials for the<br />owner of the user database. If empty a new secret will be<br />created from scratch |  |  |  |
 
 
+#### BudgetStatus
+
+
+
+BudgetStatus tracks daily resize operation budget.
+
+
+
+_Appears in:_
+
+- [VolumeSizingStatus](#volumesizingstatus)
+
+| Field | Description | Required | Default | Validation |
+| --- | --- | --- | --- | --- |
+| `actionsLast24h` _integer_ | ActionsLast24h is the count of resize operations in the last 24 hours. |  |  |  |
+| `availableForPlanned` _integer_ | AvailableForPlanned is the number of actions remaining for scheduled operations. |  |  |  |
+| `availableForEmergency` _integer_ | AvailableForEmergency is the number of actions remaining for emergency operations. |  |  |  |
+| `budgetResetsAt` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.34/#time-v1-meta)_ | BudgetResetsAt is the time when the rolling 24h window resets. |  |  |  |
+
+
 #### CatalogImage
 
 
@@ -680,6 +700,7 @@ _Appears in:_
 | `switchReplicaClusterStatus` _[SwitchReplicaClusterStatus](#switchreplicaclusterstatus)_ | SwitchReplicaClusterStatus is the status of the switch to replica cluster |  |  |  |
 | `demotionToken` _string_ | DemotionToken is a JSON token containing the information<br />from pg_controldata such as Database system identifier, Latest checkpoint's<br />TimeLineID, Latest checkpoint's REDO location, Latest checkpoint's REDO<br />WAL file, and Time of latest checkpoint |  |  |  |
 | `systemID` _string_ | SystemID is the latest detected PostgreSQL SystemID |  |  |  |
+| `storageSizing` _[StorageSizingStatus](#storagesizingstatus)_ | StorageSizing tracks dynamic sizing state per logical volume. |  |  |  |
 
 
 
@@ -922,6 +943,28 @@ _Appears in:_
 | --- | --- | --- | --- | --- |
 | `labels` _object (keys:string, values:string)_ |  |  |  |  |
 | `annotations` _object (keys:string, values:string)_ |  |  |  |  |
+
+
+#### EmergencyGrowConfig
+
+
+
+EmergencyGrowConfig controls emergency growth outside maintenance windows.
+
+
+
+_Appears in:_
+
+- [StorageConfiguration](#storageconfiguration)
+
+| Field | Description | Required | Default | Validation |
+| --- | --- | --- | --- | --- |
+| `enabled` _boolean_ | Enabled allows emergency growth outside maintenance windows. | True | true |  |
+| `criticalThreshold` _integer_ | CriticalThreshold is the usage percentage that triggers emergency growth. | True | 95 | Maximum: 99 <br />Minimum: 80 <br /> |
+| `criticalMinimumFree` _string_ | CriticalMinimumFree triggers emergency growth when free space drops below this value. | True | 1Gi |  |
+| `exceedLimitOnEmergency` _boolean_ | ExceedLimitOnEmergency allows growth beyond Limit as a last resort.<br />Use with caution - this can lead to unexpected costs. | True | false |  |
+| `maxActionsPerDay` _integer_ | MaxActionsPerDay limits total resize operations per 24-hour window.<br />Cloud providers often limit volume modifications (e.g., AWS EBS ~4/day). | True | 4 |  |
+| `reservedActionsForEmergency` _integer_ | ReservedActionsForEmergency from the daily budget. | True | 1 |  |
 
 
 #### EnsureOption
@@ -1387,6 +1430,25 @@ _Appears in:_
 | `isolationCheck` _[IsolationCheckConfiguration](#isolationcheckconfiguration)_ | Configure the feature that extends the liveness probe for a primary<br />instance. In addition to the basic checks, this verifies whether the<br />primary is isolated from the Kubernetes API server and from its<br />replicas, ensuring that it can be safely shut down if network<br />partition or API unavailability is detected. Enabled by default. |  |  |  |
 
 
+
+
+#### MaintenanceWindowConfig
+
+
+
+MaintenanceWindowConfig defines when non-urgent sizing operations can occur.
+
+
+
+_Appears in:_
+
+- [StorageConfiguration](#storageconfiguration)
+
+| Field | Description | Required | Default | Validation |
+| --- | --- | --- | --- | --- |
+| `schedule` _string_ | Schedule in cron syntax: "minute hour day-of-month month day-of-week"<br />Examples: "0 3 * * *" (daily at 3 AM), "0 3 * * 0" (Sundays at 3 AM) | True | 0 3 * * * |  |
+| `duration` _string_ | Duration of the maintenance window. | True | 2h |  |
+| `timezone` _string_ | Timezone for interpreting the schedule. | True | UTC |  |
 
 
 #### ManagedConfiguration
@@ -2616,6 +2678,28 @@ _Appears in:_
 
 
 
+#### SizingAction
+
+
+
+SizingAction records a sizing operation.
+
+
+
+_Appears in:_
+
+- [VolumeSizingStatus](#volumesizingstatus)
+
+| Field | Description | Required | Default | Validation |
+| --- | --- | --- | --- | --- |
+| `kind` _string_ | Kind is the type of action: EmergencyGrow, ScheduledGrow. |  |  |  |
+| `from` _string_ | From is the size before the action. |  |  |  |
+| `to` _string_ | To is the size after the action. |  |  |  |
+| `timestamp` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.34/#time-v1-meta)_ | Timestamp is the time when the action occurred. |  |  |  |
+| `instance` _string_ | Instance is the name of the instance affected by the action. |  |  |  |
+| `result` _string_ | Result is the outcome: Success, Failed, Pending. |  |  |  |
+
+
 #### SnapshotOwnerReference
 
 _Underlying type:_ _string_
@@ -2671,9 +2755,33 @@ _Appears in:_
 | Field | Description | Required | Default | Validation |
 | --- | --- | --- | --- | --- |
 | `storageClass` _string_ | StorageClass to use for PVCs. Applied after<br />evaluating the PVC template, if available.<br />If not specified, the generated PVCs will use the<br />default storage class |  |  |  |
-| `size` _string_ | Size of the storage. Required if not already specified in the PVC template.<br />Changes to this field are automatically reapplied to the created PVCs.<br />Size cannot be decreased. |  |  |  |
+| `size` _string_ | Size of the storage. Required if not already specified in the PVC template.<br />Changes to this field are automatically reapplied to the created PVCs.<br />Size cannot be decreased.<br />Mutually exclusive with Request/Limit dynamic sizing fields. |  |  |  |
+| `request` _string_ | Request is the minimum provisioned storage size (floor).<br />When set with Limit, enables dynamic sizing mode.<br />The operator will never shrink below this value.<br />Mutually exclusive with Size. |  |  |  |
+| `limit` _string_ | Limit is the maximum provisioned storage size (ceiling).<br />When set with Request, enables dynamic sizing mode.<br />The operator will never grow beyond this value.<br />Mutually exclusive with Size. |  |  |  |
+| `targetBuffer` _integer_ | TargetBuffer is the desired free space percentage (5-50%).<br />Only applies when Request and Limit are set (dynamic sizing mode).<br />The operator grows storage when free space drops below this percentage. |  | 20 | Maximum: 50 <br />Minimum: 5 <br /> |
+| `maintenanceWindow` _[MaintenanceWindowConfig](#maintenancewindowconfig)_ | MaintenanceWindow defines when non-urgent sizing operations occur.<br />Only applies when Request and Limit are set (dynamic sizing mode). |  |  |  |
+| `emergencyGrow` _[EmergencyGrowConfig](#emergencygrowconfig)_ | EmergencyGrow controls growth outside the maintenance window.<br />Only applies when Request and Limit are set (dynamic sizing mode). |  |  |  |
 | `resizeInUseVolumes` _boolean_ | Resize existent PVCs, defaults to true |  | true |  |
 | `pvcTemplate` _[PersistentVolumeClaimSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.34/#persistentvolumeclaimspec-v1-core)_ | Template to be used to generate the Persistent Volume Claim |  |  |  |
+
+
+#### StorageSizingStatus
+
+
+
+StorageSizingStatus tracks dynamic sizing state per logical volume.
+
+
+
+_Appears in:_
+
+- [ClusterStatus](#clusterstatus)
+
+| Field | Description | Required | Default | Validation |
+| --- | --- | --- | --- | --- |
+| `data` _[VolumeSizingStatus](#volumesizingstatus)_ | Data volume sizing status. |  |  |  |
+| `wal` _[VolumeSizingStatus](#volumesizingstatus)_ | WAL volume sizing status (Phase 2). |  |  |  |
+| `tablespaces` _object (keys:string, values:[VolumeSizingStatus](#volumesizingstatus))_ | Tablespaces sizing status. |  |  |  |
 
 
 #### Subscription
@@ -2970,6 +3078,29 @@ _Appears in:_
 | --- | --- |
 | `grant` | GrantUsageSpecType indicates a grant usage permission.<br />The default usage permission is grant.<br /> |
 | `revoke` | RevokeUsageSpecType indicates a revoke usage permission.<br /> |
+
+
+#### VolumeSizingStatus
+
+
+
+VolumeSizingStatus tracks the sizing state of a logical volume.
+
+
+
+_Appears in:_
+
+- [StorageSizingStatus](#storagesizingstatus)
+
+| Field | Description | Required | Default | Validation |
+| --- | --- | --- | --- | --- |
+| `effectiveSize` _string_ | EffectiveSize is the current target size for new PVCs. |  |  |  |
+| `targetSize` _string_ | TargetSize is the calculated ideal size based on usage + buffer. |  |  |  |
+| `actualSizes` _object (keys:string, values:string)_ | ActualSizes maps instance names to their current PVC sizes. |  |  |  |
+| `state` _string_ | State is the current status of the logical volume: Balanced, NeedsGrow, Emergency,<br />PendingGrowth, Resizing, AtLimit, WaitingForDiskStatus. |  |  | Enum: [Balanced NeedsGrow Emergency PendingGrowth Resizing AtLimit WaitingForDiskStatus] <br /> |
+| `lastAction` _[SizingAction](#sizingaction)_ | LastAction records the most recent sizing operation. |  |  |  |
+| `budget` _[BudgetStatus](#budgetstatus)_ | Budget tracks daily operation limits. |  |  |  |
+| `nextMaintenanceWindow` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.34/#time-v1-meta)_ | NextMaintenanceWindow is the timestamp when pending operations can execute. |  |  |  |
 
 
 #### VolumeSnapshotConfiguration
