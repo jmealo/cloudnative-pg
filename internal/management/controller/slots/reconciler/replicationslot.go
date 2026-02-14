@@ -55,6 +55,19 @@ func ReconcileReplicationSlots(
 		return dropReplicationSlots(ctx, db, cluster, isPrimary)
 	}
 
+	// Clean up orphaned logical slots on replicas when synchronizeLogicalDecoding is enabled.
+	// This handles the case where a former primary (with synced=false logical slots) becomes
+	// a replica after switchover - these slots must be dropped so PostgreSQL's native
+	// slot sync worker can recreate them with synced=true.
+	if !isPrimary && isSynchronizeLogicalDecodingEnabled(cluster) {
+		pgMajor, err := cluster.GetPostgresqlMajorVersion()
+		if err == nil && pgMajor >= 17 {
+			if err := cleanupOrphanedLogicalSlots(ctx, db); err != nil {
+				return reconcile.Result{}, fmt.Errorf("cleaning up orphaned logical slots: %w", err)
+			}
+		}
+	}
+
 	if isPrimary {
 		return reconcilePrimaryHAReplicationSlots(ctx, db, cluster)
 	}
@@ -183,4 +196,49 @@ func dropReplicationSlots(
 	}
 
 	return reconcile.Result{}, nil
+}
+
+// isSynchronizeLogicalDecodingEnabled checks if logical slot synchronization is enabled
+func isSynchronizeLogicalDecodingEnabled(cluster *apiv1.Cluster) bool {
+	if cluster.Spec.ReplicationSlots == nil {
+		return false
+	}
+	if cluster.Spec.ReplicationSlots.HighAvailability == nil {
+		return false
+	}
+	if !cluster.Spec.ReplicationSlots.HighAvailability.GetEnabled() {
+		return false
+	}
+	return cluster.Spec.ReplicationSlots.HighAvailability.SynchronizeLogicalDecoding
+}
+
+// cleanupOrphanedLogicalSlots removes logical replication slots with synced=false.
+// On PostgreSQL 17+, slots with synced=false were created locally and cannot be
+// updated by the slot sync worker. After a switchover, these orphaned slots must
+// be dropped so the sync worker can recreate them with synced=true.
+func cleanupOrphanedLogicalSlots(ctx context.Context, db *sql.DB) error {
+	contextLog := log.FromContext(ctx).WithName("cleanupOrphanedLogicalSlots")
+
+	slots, err := infrastructure.ListLogicalSlotsWithSyncStatus(ctx, db)
+	if err != nil {
+		return fmt.Errorf("listing logical slots: %w", err)
+	}
+
+	for _, slot := range slots {
+		// Only drop slots that are:
+		// 1. synced=false (locally created, orphaned after switchover)
+		// 2. Not active (active slots cannot be dropped)
+		if !slot.Synced && !slot.Active {
+			contextLog.Info("Dropping orphaned logical slot",
+				"slotName", slot.SlotName,
+				"synced", slot.Synced,
+				"active", slot.Active)
+
+			if err := infrastructure.DeleteLogicalSlot(ctx, db, slot.SlotName); err != nil {
+				return fmt.Errorf("deleting orphaned logical slot %q: %w", slot.SlotName, err)
+			}
+		}
+	}
+
+	return nil
 }

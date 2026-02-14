@@ -111,3 +111,56 @@ func Delete(ctx context.Context, db *sql.DB, slot ReplicationSlot) error {
 	_, err := db.ExecContext(ctx, "SELECT pg_catalog.pg_drop_replication_slot($1)", slot.SlotName)
 	return err
 }
+
+// ListLogicalSlotsWithSyncStatus lists logical replication slots with their synced status.
+// The synced column is only available in PostgreSQL 17+.
+// Slots with synced=false were created locally; slots with synced=true were synchronized from the primary.
+func ListLogicalSlotsWithSyncStatus(ctx context.Context, db *sql.DB) ([]LogicalReplicationSlot, error) {
+	contextLog := log.FromContext(ctx).WithName("listLogicalSlotsWithSyncStatus")
+
+	rows, err := db.QueryContext(
+		ctx,
+		`SELECT slot_name, plugin, active, coalesce(restart_lsn::TEXT, '') AS restart_lsn, synced
+		FROM pg_catalog.pg_replication_slots
+		WHERE slot_type = 'logical'`,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		_ = rows.Close()
+	}()
+
+	var slots []LogicalReplicationSlot
+	for rows.Next() {
+		var slot LogicalReplicationSlot
+		err := rows.Scan(
+			&slot.SlotName,
+			&slot.Plugin,
+			&slot.Active,
+			&slot.RestartLSN,
+			&slot.Synced,
+		)
+		if err != nil {
+			return nil, err
+		}
+		slots = append(slots, slot)
+	}
+
+	if rows.Err() != nil {
+		return nil, rows.Err()
+	}
+
+	contextLog.Trace("Listed logical slots with sync status", "count", len(slots))
+	return slots, nil
+}
+
+// DeleteLogicalSlot drops a logical replication slot by name.
+// Note: Active slots cannot be dropped - this will return an error from PostgreSQL.
+func DeleteLogicalSlot(ctx context.Context, db *sql.DB, slotName string) error {
+	contextLog := log.FromContext(ctx).WithName("deleteLogicalSlot")
+	contextLog.Info("Dropping logical replication slot", "slotName", slotName)
+
+	_, err := db.ExecContext(ctx, "SELECT pg_catalog.pg_drop_replication_slot($1)", slotName)
+	return err
+}

@@ -54,3 +54,12 @@ func (sl ReplicationSlotList) Get(name string) *ReplicationSlot {
 func (sl ReplicationSlotList) Has(name string) bool {
 	return sl.Get(name) != nil
 }
+
+// LogicalReplicationSlot represents a logical replication slot
+type LogicalReplicationSlot struct {
+	SlotName   string `json:"slotName,omitempty"`
+	Plugin     string `json:"plugin,omitempty"`
+	Active     bool   `json:"active"`
+	RestartLSN string `json:"restartLSN,omitempty"`
+	Synced     bool   `json:"synced"` // PG17+: false if locally created, true if synced from primary
+}
