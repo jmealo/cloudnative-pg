@@ -94,7 +94,8 @@ func IsEmergencyGrowEnabled(cfg *apiv1.StorageConfiguration) bool {
 // CalculateTargetSize calculates the ideal storage size based on used bytes and target buffer.
 // Formula: targetSize = usedBytes / (1 - targetBuffer%)
 func CalculateTargetSize(usedBytes uint64, targetBuffer int) resource.Quantity {
-	if targetBuffer <= 0 || targetBuffer >= 100 {
+	// Align with API validation bounds (5-50%)
+	if targetBuffer < 5 || targetBuffer > 50 {
 		targetBuffer = DefaultTargetBuffer
 	}
 

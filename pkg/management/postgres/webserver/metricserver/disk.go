@@ -291,6 +291,7 @@ func (d *diskCollector) recordVolumeSizing(
 
 	// State (1 for current state, 0 for others)
 	states := []apiv1.VolumeSizingState{
+		apiv1.VolumeSizingStateWaitingForDiskStatus,
 		apiv1.VolumeSizingStateBalanced,
 		apiv1.VolumeSizingStateNeedsGrow,
 		apiv1.VolumeSizingStateEmergency,

@@ -639,6 +639,10 @@ func collectActualSizes(
 		// Get instance name from PVC labels
 		instanceName := pvc.Labels[utils.InstanceNameLabelName]
 		if instanceName == "" {
+			log.Debug("Skipping PVC without instance name label",
+				"pvc", pvc.Name,
+				"namespace", pvc.Namespace,
+				"volumeType", volumeType)
 			continue
 		}
 

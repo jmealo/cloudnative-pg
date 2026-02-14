@@ -52,7 +52,10 @@ func newStatusCmd() *cobra.Command {
 			ctx := cmd.Context()
 			clusterName := args[0]
 
-			output, _ := cmd.Flags().GetString("output")
+			output, err := cmd.Flags().GetString("output")
+			if err != nil {
+				return err
+			}
 
 			return Status(ctx, clusterName, plugin.OutputFormat(output))
 		},

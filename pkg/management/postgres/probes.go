@@ -725,8 +725,9 @@ func (instance *Instance) fillDiskStatus(result *postgres.PostgresqlStatus) {
 		time.Sleep(100 * time.Millisecond)
 	}
 	if err != nil {
-		// Log error but don't fail - disk status is not critical for instance health
-		log.Info("Failed to probe data volume disk status after retries", "path", pgData, "error", err)
+		// Log warning - disk status is needed for dynamic storage sizing
+		log.Warning("Failed to probe data volume disk status after retries - dynamic storage sizing will be impaired",
+			"path", pgData, "error", err)
 	} else {
 		result.DiskStatus = &postgres.DiskStatus{
 			TotalBytes:     dataStatus.TotalBytes,
@@ -745,7 +746,7 @@ func (instance *Instance) fillDiskStatus(result *postgres.PostgresqlStatus) {
 	if _, err := os.Stat(specs.PgWalVolumePath); err == nil {
 		walStatus, err := disk.Probe(specs.PgWalVolumePath)
 		if err != nil {
-			log.Info("Failed to probe WAL volume disk status", "path", specs.PgWalVolumePath, "error", err)
+			log.Warning("Failed to probe WAL volume disk status", "path", specs.PgWalVolumePath, "error", err)
 		} else {
 			result.WALDiskStatus = &postgres.DiskStatus{
 				TotalBytes:     walStatus.TotalBytes,

@@ -59,14 +59,14 @@ storage:
   request: "10Gi"
   limit: "100Gi"
   maintenanceWindow:
-    schedule: "0 3 * * *"   # Cron syntax: 3 AM daily
-    duration: "2h"          # 2-hour window
-    timezone: "UTC"         # Timezone for schedule
+    schedule: "0 0 3 * * *"   # 6-field cron: second minute hour day month weekday
+    duration: "2h"            # 2-hour window
+    timezone: "UTC"           # Timezone for schedule
 ```
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `schedule` | string | "0 3 * * *" | Cron syntax schedule |
+| `schedule` | string | "0 0 3 * * *" | 6-field cron syntax (second minute hour day month weekday) |
 | `duration` | string | "2h" | Window duration |
 | `timezone` | string | "UTC" | Timezone for the schedule |
 
@@ -114,16 +114,23 @@ The target is then clamped to the request/limit bounds.
 
 ### Growth Behavior
 
-1. **Balanced State**: Free space is at or above target buffer. No action needed.
+1. **WaitingForDiskStatus State**: The operator is waiting for disk usage
+   metrics to be reported from instances. This is normal during initial
+   startup or if instances are temporarily unavailable.
 
-2. **NeedsGrow State**: Free space is below target buffer but not critical.
+2. **Balanced State**: Free space is at or above target buffer. No action needed.
+
+3. **NeedsGrow State**: Free space is below target buffer but not critical.
    Growth is scheduled for the next maintenance window.
 
-3. **Emergency State**: Usage exceeds critical threshold or free space drops
+4. **Emergency State**: Usage exceeds critical threshold or free space drops
    below critical minimum. Growth happens immediately regardless of
    maintenance window.
 
-4. **PendingGrowth State**: Growth is needed but waiting for maintenance window.
+5. **PendingGrowth State**: Growth is needed but waiting for maintenance window.
+
+6. **AtLimit State**: Volume has reached the configured limit and cannot grow
+   further. Consider increasing the limit if more space is needed.
 
 ### Rate Limiting
 
@@ -171,7 +178,7 @@ spec:
     targetBuffer: 20
     storageClass: premium-ssd
     maintenanceWindow:
-      schedule: "0 3 * * 0"  # Sunday at 3 AM
+      schedule: "0 0 3 * * 0"  # 6-field cron: Sunday at 3 AM
       duration: "4h"
       timezone: "America/New_York"
     emergencyGrow:
@@ -246,14 +253,27 @@ my-cluster-3            PGData      25Gi    Bound
 
 Dynamic storage exposes the following metrics:
 
-| Metric | Description |
-|--------|-------------|
-| `cnpg_disk_total_bytes` | Total filesystem size |
-| `cnpg_disk_used_bytes` | Used bytes on filesystem |
-| `cnpg_disk_available_bytes` | Available bytes |
-| `cnpg_disk_percent_used` | Percentage used |
-| `cnpg_dynamic_storage_effective_size_bytes` | Current effective size |
-| `cnpg_dynamic_storage_budget_remaining` | Remaining daily budget |
+**Disk Usage Metrics:**
+
+| Metric | Labels | Description |
+|--------|--------|-------------|
+| `cnpg_disk_total_bytes` | `volume_type`, `instance` | Total filesystem size |
+| `cnpg_disk_used_bytes` | `volume_type`, `instance` | Used bytes on filesystem |
+| `cnpg_disk_available_bytes` | `volume_type`, `instance` | Available bytes |
+| `cnpg_disk_percent_used` | `volume_type`, `instance` | Percentage used |
+
+**Dynamic Storage Metrics:**
+
+| Metric | Labels | Description |
+|--------|--------|-------------|
+| `cnpg_dynamic_storage_target_size_bytes` | `volume_type`, `tablespace` | Target size from dynamic config |
+| `cnpg_dynamic_storage_actual_size_bytes` | `volume_type`, `tablespace`, `instance` | Actual PVC size per instance |
+| `cnpg_dynamic_storage_effective_size_bytes` | `volume_type`, `tablespace` | Current effective size for new replicas |
+| `cnpg_dynamic_storage_state` | `volume_type`, `tablespace`, `state` | 1 for current state, 0 for others |
+| `cnpg_dynamic_storage_budget_total` | `volume_type` | Total daily operations budget |
+| `cnpg_dynamic_storage_budget_used` | `volume_type` | Operations used in last 24h |
+| `cnpg_dynamic_storage_budget_emergency_reserved` | `volume_type` | Emergency reserve remaining |
+| `cnpg_dynamic_storage_next_window_seconds` | `volume_type` | Seconds until next maintenance window |
 
 ### Cluster Status
 
