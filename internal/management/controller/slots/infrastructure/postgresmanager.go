@@ -154,3 +154,13 @@ func ListLogicalSlotsWithSyncStatus(ctx context.Context, db *sql.DB) ([]LogicalR
 	contextLog.Trace("Listed logical slots with sync status", "count", len(slots))
 	return slots, nil
 }
+
+// DeleteLogicalSlot drops a logical replication slot by name.
+// Note: Active slots cannot be dropped - this will return an error from PostgreSQL.
+func DeleteLogicalSlot(ctx context.Context, db *sql.DB, slotName string) error {
+	contextLog := log.FromContext(ctx).WithName("deleteLogicalSlot")
+	contextLog.Info("Dropping logical replication slot", "slotName", slotName)
+
+	_, err := db.ExecContext(ctx, "SELECT pg_catalog.pg_drop_replication_slot($1)", slotName)
+	return err
+}

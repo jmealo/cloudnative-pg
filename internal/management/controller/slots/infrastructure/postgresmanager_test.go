@@ -227,4 +227,24 @@ var _ = Describe("PostgresManager", func() {
 			Expect(result).To(BeEmpty())
 		})
 	})
+
+	Context("DeleteLogicalSlot", func() {
+		const expectedSQL = "SELECT pg_catalog.pg_drop_replication_slot"
+
+		It("should successfully delete a logical replication slot", func(ctx SpecContext) {
+			mock.ExpectExec(expectedSQL).WithArgs("sub_slot1").
+				WillReturnResult(sqlmock.NewResult(1, 1))
+
+			err := DeleteLogicalSlot(ctx, db, "sub_slot1")
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("should return error when the database execution fails", func(ctx SpecContext) {
+			mock.ExpectExec(expectedSQL).WithArgs("sub_slot1").
+				WillReturnError(errors.New("mock error"))
+
+			err := DeleteLogicalSlot(ctx, db, "sub_slot1")
+			Expect(err).To(HaveOccurred())
+		})
+	})
 })
