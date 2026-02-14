@@ -479,6 +479,306 @@ var _ = Describe("reconciler", func() {
 		})
 	})
 
+	Describe("patchPVCsForVolume", func() {
+		It("return error when PVC patch fails", func() {
+			pvc := corev1.PersistentVolumeClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-cluster-1",
+					Namespace: "default",
+					Labels: map[string]string{
+						utils.PvcRoleLabelName:      string(utils.PVCRolePgData),
+						utils.InstanceNameLabelName: "test-cluster-1",
+					},
+				},
+				Spec: corev1.PersistentVolumeClaimSpec{
+					Resources: corev1.VolumeResourceRequirements{
+						Requests: corev1.ResourceList{
+							corev1.ResourceStorage: resource.MustParse("5Gi"),
+						},
+					},
+				},
+			}
+
+			// Create a client without the PVC object to simulate patch failure
+			c := fake.NewClientBuilder().
+				WithScheme(scheme.BuildWithAllKnownScheme()).
+				Build()
+
+			result := &ReconcileResult{
+				Action:      ActionEmergencyGrow,
+				VolumeType:  VolumeTypeData,
+				CurrentSize: resource.MustParse("5Gi"),
+				TargetSize:  resource.MustParse("10Gi"),
+			}
+
+			patchedCount, err := patchPVCsForVolume(ctx, c, []corev1.PersistentVolumeClaim{pvc}, result)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("error patching PVC"))
+			Expect(patchedCount).To(Equal(0))
+		})
+
+		It("skip PVCs already at target size", func() {
+			pvc := corev1.PersistentVolumeClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-cluster-1",
+					Namespace: "default",
+					Labels: map[string]string{
+						utils.PvcRoleLabelName:      string(utils.PVCRolePgData),
+						utils.InstanceNameLabelName: "test-cluster-1",
+					},
+				},
+				Spec: corev1.PersistentVolumeClaimSpec{
+					Resources: corev1.VolumeResourceRequirements{
+						Requests: corev1.ResourceList{
+							corev1.ResourceStorage: resource.MustParse("10Gi"), // Already at target
+						},
+					},
+				},
+			}
+
+			c := fake.NewClientBuilder().
+				WithScheme(scheme.BuildWithAllKnownScheme()).
+				WithObjects(&pvc).
+				Build()
+
+			result := &ReconcileResult{
+				Action:      ActionScheduledGrow,
+				VolumeType:  VolumeTypeData,
+				CurrentSize: resource.MustParse("5Gi"),
+				TargetSize:  resource.MustParse("10Gi"),
+			}
+
+			patchedCount, err := patchPVCsForVolume(ctx, c, []corev1.PersistentVolumeClaim{pvc}, result)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(patchedCount).To(Equal(0)) // No PVCs needed patching
+		})
+
+		//nolint:dupl // test fixtures are similar but testing different scenarios
+		It("patch multiple PVCs successfully", func() {
+			pvc1 := corev1.PersistentVolumeClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-cluster-1",
+					Namespace: "default",
+					Labels: map[string]string{
+						utils.PvcRoleLabelName:      string(utils.PVCRolePgData),
+						utils.InstanceNameLabelName: "test-cluster-1",
+					},
+				},
+				Spec: corev1.PersistentVolumeClaimSpec{
+					Resources: corev1.VolumeResourceRequirements{
+						Requests: corev1.ResourceList{
+							corev1.ResourceStorage: resource.MustParse("5Gi"),
+						},
+					},
+				},
+			}
+			pvc2 := corev1.PersistentVolumeClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-cluster-2",
+					Namespace: "default",
+					Labels: map[string]string{
+						utils.PvcRoleLabelName:      string(utils.PVCRolePgData),
+						utils.InstanceNameLabelName: "test-cluster-2",
+					},
+				},
+				Spec: corev1.PersistentVolumeClaimSpec{
+					Resources: corev1.VolumeResourceRequirements{
+						Requests: corev1.ResourceList{
+							corev1.ResourceStorage: resource.MustParse("5Gi"),
+						},
+					},
+				},
+			}
+
+			c := fake.NewClientBuilder().
+				WithScheme(scheme.BuildWithAllKnownScheme()).
+				WithObjects(&pvc1, &pvc2).
+				Build()
+
+			result := &ReconcileResult{
+				Action:      ActionEmergencyGrow,
+				VolumeType:  VolumeTypeData,
+				CurrentSize: resource.MustParse("5Gi"),
+				TargetSize:  resource.MustParse("10Gi"),
+			}
+
+			patchedCount, err := patchPVCsForVolume(ctx, c, []corev1.PersistentVolumeClaim{pvc1, pvc2}, result)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(patchedCount).To(Equal(2))
+
+			// Verify both PVCs were patched
+			var updatedPVC1 corev1.PersistentVolumeClaim
+			err = c.Get(ctx, types.NamespacedName{Name: "test-cluster-1", Namespace: "default"}, &updatedPVC1)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(updatedPVC1.Spec.Resources.Requests[corev1.ResourceStorage]).To(Equal(resource.MustParse("10Gi")))
+
+			var updatedPVC2 corev1.PersistentVolumeClaim
+			err = c.Get(ctx, types.NamespacedName{Name: "test-cluster-2", Namespace: "default"}, &updatedPVC2)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(updatedPVC2.Spec.Resources.Requests[corev1.ResourceStorage]).To(Equal(resource.MustParse("10Gi")))
+		})
+
+		//nolint:dupl // test fixtures are similar but testing different scenarios
+		It("only patch PVCs matching the volume type", func() {
+			dataPVC := corev1.PersistentVolumeClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-cluster-1",
+					Namespace: "default",
+					Labels: map[string]string{
+						utils.PvcRoleLabelName:      string(utils.PVCRolePgData),
+						utils.InstanceNameLabelName: "test-cluster-1",
+					},
+				},
+				Spec: corev1.PersistentVolumeClaimSpec{
+					Resources: corev1.VolumeResourceRequirements{
+						Requests: corev1.ResourceList{
+							corev1.ResourceStorage: resource.MustParse("5Gi"),
+						},
+					},
+				},
+			}
+			walPVC := corev1.PersistentVolumeClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-cluster-1-wal",
+					Namespace: "default",
+					Labels: map[string]string{
+						utils.PvcRoleLabelName:      string(utils.PVCRolePgWal),
+						utils.InstanceNameLabelName: "test-cluster-1",
+					},
+				},
+				Spec: corev1.PersistentVolumeClaimSpec{
+					Resources: corev1.VolumeResourceRequirements{
+						Requests: corev1.ResourceList{
+							corev1.ResourceStorage: resource.MustParse("2Gi"),
+						},
+					},
+				},
+			}
+
+			c := fake.NewClientBuilder().
+				WithScheme(scheme.BuildWithAllKnownScheme()).
+				WithObjects(&dataPVC, &walPVC).
+				Build()
+
+			result := &ReconcileResult{
+				Action:      ActionEmergencyGrow,
+				VolumeType:  VolumeTypeData, // Only data PVCs
+				CurrentSize: resource.MustParse("5Gi"),
+				TargetSize:  resource.MustParse("10Gi"),
+			}
+
+			patchedCount, err := patchPVCsForVolume(ctx, c, []corev1.PersistentVolumeClaim{dataPVC, walPVC}, result)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(patchedCount).To(Equal(1)) // Only data PVC
+
+			// Verify data PVC was patched
+			var updatedDataPVC corev1.PersistentVolumeClaim
+			err = c.Get(ctx, types.NamespacedName{Name: "test-cluster-1", Namespace: "default"}, &updatedDataPVC)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(updatedDataPVC.Spec.Resources.Requests[corev1.ResourceStorage]).To(Equal(resource.MustParse("10Gi")))
+
+			// Verify WAL PVC was NOT patched
+			var updatedWalPVC corev1.PersistentVolumeClaim
+			err = c.Get(ctx, types.NamespacedName{Name: "test-cluster-1-wal", Namespace: "default"}, &updatedWalPVC)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(updatedWalPVC.Spec.Resources.Requests[corev1.ResourceStorage]).To(Equal(resource.MustParse("2Gi")))
+		})
+	})
+
+	Describe("executeAction", func() {
+		It("update status after successful action", func() {
+			cluster.Status.StorageSizing = &apiv1.StorageSizingStatus{
+				Data: &apiv1.VolumeSizingStatus{},
+			}
+
+			pvc := corev1.PersistentVolumeClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-cluster-1",
+					Namespace: "default",
+					Labels: map[string]string{
+						utils.PvcRoleLabelName:      string(utils.PVCRolePgData),
+						utils.InstanceNameLabelName: "test-cluster-1",
+					},
+				},
+				Spec: corev1.PersistentVolumeClaimSpec{
+					Resources: corev1.VolumeResourceRequirements{
+						Requests: corev1.ResourceList{
+							corev1.ResourceStorage: resource.MustParse("5Gi"),
+						},
+					},
+				},
+			}
+
+			c := fake.NewClientBuilder().
+				WithScheme(scheme.BuildWithAllKnownScheme()).
+				WithObjects(cluster, &pvc).
+				WithStatusSubresource(cluster).
+				Build()
+
+			result := &ReconcileResult{
+				Action:       ActionEmergencyGrow,
+				VolumeType:   VolumeTypeData,
+				CurrentSize:  resource.MustParse("5Gi"),
+				TargetSize:   resource.MustParse("10Gi"),
+				InstanceName: "test-cluster-1",
+			}
+
+			err := executeAction(ctx, c, cluster, []corev1.PersistentVolumeClaim{pvc}, result)
+			Expect(err).ToNot(HaveOccurred())
+
+			// Verify LastAction was set
+			Expect(cluster.Status.StorageSizing.Data.LastAction).ToNot(BeNil())
+			Expect(cluster.Status.StorageSizing.Data.LastAction.Kind).To(Equal("EmergencyGrow"))
+			Expect(cluster.Status.StorageSizing.Data.LastAction.From).To(Equal("5Gi"))
+			Expect(cluster.Status.StorageSizing.Data.LastAction.To).To(Equal("10Gi"))
+			Expect(cluster.Status.StorageSizing.Data.LastAction.Result).To(Equal("Success"))
+			Expect(cluster.Status.StorageSizing.Data.EffectiveSize).To(Equal("10Gi"))
+		})
+
+		It("not update status when no PVCs needed patching", func() {
+			cluster.Status.StorageSizing = &apiv1.StorageSizingStatus{
+				Data: &apiv1.VolumeSizingStatus{},
+			}
+
+			pvc := corev1.PersistentVolumeClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-cluster-1",
+					Namespace: "default",
+					Labels: map[string]string{
+						utils.PvcRoleLabelName:      string(utils.PVCRolePgData),
+						utils.InstanceNameLabelName: "test-cluster-1",
+					},
+				},
+				Spec: corev1.PersistentVolumeClaimSpec{
+					Resources: corev1.VolumeResourceRequirements{
+						Requests: corev1.ResourceList{
+							corev1.ResourceStorage: resource.MustParse("10Gi"), // Already at target
+						},
+					},
+				},
+			}
+
+			c := fake.NewClientBuilder().
+				WithScheme(scheme.BuildWithAllKnownScheme()).
+				WithObjects(cluster, &pvc).
+				WithStatusSubresource(cluster).
+				Build()
+
+			result := &ReconcileResult{
+				Action:      ActionScheduledGrow,
+				VolumeType:  VolumeTypeData,
+				CurrentSize: resource.MustParse("5Gi"),
+				TargetSize:  resource.MustParse("10Gi"),
+			}
+
+			err := executeAction(ctx, c, cluster, []corev1.PersistentVolumeClaim{pvc}, result)
+			Expect(err).ToNot(HaveOccurred())
+
+			// LastAction should NOT be set since no actual patching happened
+			Expect(cluster.Status.StorageSizing.Data.LastAction).To(BeNil())
+		})
+	})
+
 	Describe("evaluateSizing with filesystem overhead", func() {
 		It("use PVC capacity as currentSize rather than filesystem TotalBytes", func() {
 			// 5Gi PVC, filesystem reports ~4.84Gi TotalBytes due to metadata overhead

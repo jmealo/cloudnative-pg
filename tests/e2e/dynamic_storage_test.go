@@ -525,7 +525,7 @@ func verifyGrowthCompletion(namespace, clusterName string) {
 			g.Expect(cluster.Status.StorageSizing).ToNot(BeNil())
 			g.Expect(cluster.Status.StorageSizing.Data).ToNot(BeNil())
 			state := cluster.Status.StorageSizing.Data.State
-			g.Expect(state).To(Or(Equal("Balanced"), Equal("AtLimit")),
+			g.Expect(state).To(Or(Equal(apiv1.VolumeSizingStateBalanced), Equal(apiv1.VolumeSizingStateAtLimit)),
 				"Waiting for growth to complete, current state: %s", state)
 		}).WithTimeout(time.Duration(testTimeouts[timeouts.AKSVolumeResize]) * time.Second).
 			WithPolling(time.Duration(testTimeouts[timeouts.StorageSizingPolling]) * time.Second).Should(Succeed())
@@ -987,12 +987,12 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 					tbsStatus := cluster.Status.StorageSizing.Tablespaces[tbsName]
 					g.Expect(tbsStatus).ToNot(BeNil(), "tablespace status should exist for %s", tbsName)
 					g.Expect(tbsStatus.State).To(Or(
-						Equal("NeedsGrow"),
-						Equal("PendingGrowth"),
-						Equal("Resizing"),
-						Equal("Balanced"),
-						Equal("AtLimit"),
-						Equal("Emergency"),
+						Equal(apiv1.VolumeSizingStateNeedsGrow),
+						Equal(apiv1.VolumeSizingStatePendingGrowth),
+						Equal(apiv1.VolumeSizingStateResizing),
+						Equal(apiv1.VolumeSizingStateBalanced),
+						Equal(apiv1.VolumeSizingStateAtLimit),
+						Equal(apiv1.VolumeSizingStateEmergency),
 					), "tablespace state should reflect active sizing lifecycle")
 					g.Expect(tbsStatus.TargetSize).ToNot(BeEmpty(),
 						"tablespace target size should be computed after threshold crossing")
@@ -1013,7 +1013,7 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 					g.Expect(cluster.Status.StorageSizing.Tablespaces).ToNot(BeNil())
 					tbsStatus := cluster.Status.StorageSizing.Tablespaces[tbsName]
 					g.Expect(tbsStatus).ToNot(BeNil())
-					g.Expect(tbsStatus.State).ToNot(Equal("WaitingForDiskStatus"),
+					g.Expect(tbsStatus.State).ToNot(Equal(apiv1.VolumeSizingStateWaitingForDiskStatus),
 						"tablespace sizing should not be blocked on missing disk status")
 
 					var pvcList corev1.PersistentVolumeClaimList
@@ -1092,7 +1092,7 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 					g.Expect(err).ToNot(HaveOccurred())
 					g.Expect(cluster.Status.StorageSizing).ToNot(BeNil())
 					g.Expect(cluster.Status.StorageSizing.Data).ToNot(BeNil())
-					g.Expect(cluster.Status.StorageSizing.Data.State).To(Equal("PendingGrowth"))
+					g.Expect(cluster.Status.StorageSizing.Data.State).To(Equal(apiv1.VolumeSizingStatePendingGrowth))
 					g.Expect(cluster.Status.StorageSizing.Data.NextMaintenanceWindow).ToNot(BeNil())
 
 					var pvcList corev1.PersistentVolumeClaimList
@@ -2507,7 +2507,7 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 					// State should be one of the stable states (Balanced, PendingGrowth, etc.)
 					// not actively Resizing
 					state := cluster.Status.StorageSizing.Data.State
-					g.Expect(state).ToNot(Equal("Resizing"),
+					g.Expect(state).ToNot(Equal(apiv1.VolumeSizingStateResizing),
 						"Waiting for storage sizing to complete resizing")
 				}).WithTimeout(time.Duration(testTimeouts[timeouts.AKSVolumeResize]) * time.Second).
 					WithPolling(time.Duration(testTimeouts[timeouts.AKSPollingInterval]) * time.Second).Should(Succeed())

@@ -7594,7 +7594,9 @@ spec:
                     description: Tablespaces sizing status.
                     type: object
                   wal:
-                    description: WAL volume sizing status (Phase 2).
+                    description: |-
+                      WAL volume sizing status. Reserved for future use when WAL volume
+                      dynamic sizing is implemented.
                     properties:
                       actualSizes:
                         additionalProperties:

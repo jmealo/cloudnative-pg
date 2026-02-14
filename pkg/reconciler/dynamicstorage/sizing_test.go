@@ -65,6 +65,56 @@ var _ = Describe("sizing", func() {
 		})
 	})
 
+	Describe("GetCriticalThreshold", func() {
+		It("return default when config is nil", func() {
+			Expect(GetCriticalThreshold(nil)).To(Equal(DefaultCriticalThreshold))
+		})
+
+		It("return default when EmergencyGrow is nil", func() {
+			cfg := &apiv1.StorageConfiguration{}
+			Expect(GetCriticalThreshold(cfg)).To(Equal(DefaultCriticalThreshold))
+		})
+
+		It("return default when CriticalThreshold is zero (Go zero value)", func() {
+			// This is the critical bug fix - when user sets emergencyGrow: {} without
+			// specifying criticalThreshold, the int field defaults to 0, which would
+			// trigger emergency growth at ANY disk usage level.
+			cfg := &apiv1.StorageConfiguration{
+				EmergencyGrow: &apiv1.EmergencyGrowConfig{
+					// CriticalThreshold not set, defaults to 0
+				},
+			}
+			Expect(GetCriticalThreshold(cfg)).To(Equal(DefaultCriticalThreshold))
+		})
+
+		It("return configured value when explicitly set", func() {
+			cfg := &apiv1.StorageConfiguration{
+				EmergencyGrow: &apiv1.EmergencyGrowConfig{
+					CriticalThreshold: 90,
+				},
+			}
+			Expect(GetCriticalThreshold(cfg)).To(Equal(90))
+		})
+
+		It("return configured value when set to minimum valid value (80)", func() {
+			cfg := &apiv1.StorageConfiguration{
+				EmergencyGrow: &apiv1.EmergencyGrowConfig{
+					CriticalThreshold: 80,
+				},
+			}
+			Expect(GetCriticalThreshold(cfg)).To(Equal(80))
+		})
+
+		It("return configured value when set to maximum valid value (99)", func() {
+			cfg := &apiv1.StorageConfiguration{
+				EmergencyGrow: &apiv1.EmergencyGrowConfig{
+					CriticalThreshold: 99,
+				},
+			}
+			Expect(GetCriticalThreshold(cfg)).To(Equal(99))
+		})
+	})
+
 	Describe("GetTargetBuffer", func() {
 		It("return default when config is nil", func() {
 			Expect(GetTargetBuffer(nil)).To(Equal(DefaultTargetBuffer))

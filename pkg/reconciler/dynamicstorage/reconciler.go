@@ -438,6 +438,11 @@ func evaluateSizing(
 		// Fallback to filesystem TotalBytes if no PVC sizes available.
 		// This is only safe for emergency conditions where we must act regardless.
 		// For scheduled growth, we need accurate PVC sizes to avoid false growth.
+		log.Warning("PVC size data unavailable, falling back to filesystem TotalBytes",
+			"volumeType", volumeType,
+			"tablespaceName", tbsName,
+			"filesystemTotalBytes", maxTotal,
+			"pvcSizesProvided", len(pvcSizes))
 		currentSize = *resource.NewQuantity(int64(maxTotal), resource.BinarySI) //nolint:gosec
 	}
 
@@ -502,11 +507,14 @@ func findMaxUsage(diskStatusMap map[string]*DiskInfo) (uint64, uint64, uint64, s
 
 // maxPVCSize returns the largest PVC capacity from the provided map.
 // This gives the authoritative current volume size, unaffected by filesystem overhead.
+// Returns a zero quantity if all PVCs fail to parse or if the map is empty.
 func maxPVCSize(pvcSizes map[string]string) resource.Quantity {
 	var maxSize resource.Quantity
+	parseErrors := 0
 	for instanceName, sizeStr := range pvcSizes {
 		qty, err := resource.ParseQuantity(sizeStr)
 		if err != nil {
+			parseErrors++
 			log.Warning("Failed to parse PVC size quantity, skipping",
 				"instance", instanceName,
 				"size", sizeStr,
@@ -516,6 +524,12 @@ func maxPVCSize(pvcSizes map[string]string) resource.Quantity {
 		if qty.Cmp(maxSize) > 0 {
 			maxSize = qty
 		}
+	}
+	// Log an error if all PVCs failed to parse - this indicates a serious problem
+	if len(pvcSizes) > 0 && parseErrors == len(pvcSizes) {
+		log.Error(nil, "All PVC size quantities failed to parse - PVC size data unavailable",
+			"totalPVCs", len(pvcSizes),
+			"parseErrors", parseErrors)
 	}
 	return maxSize
 }

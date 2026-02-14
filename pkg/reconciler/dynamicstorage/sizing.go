@@ -57,8 +57,15 @@ func GetTargetBuffer(cfg *apiv1.StorageConfiguration) int {
 }
 
 // GetCriticalThreshold returns the critical threshold percentage from config or default.
+// Returns DefaultCriticalThreshold (95) when not configured or when set to 0 (Go zero value).
 func GetCriticalThreshold(cfg *apiv1.StorageConfiguration) int {
 	if cfg == nil || cfg.EmergencyGrow == nil {
+		return DefaultCriticalThreshold
+	}
+	// CriticalThreshold is an int, so 0 is the zero value when field is not set.
+	// We must return the default in this case to avoid triggering emergency growth
+	// at any disk usage level.
+	if cfg.EmergencyGrow.CriticalThreshold == 0 {
 		return DefaultCriticalThreshold
 	}
 	return cfg.EmergencyGrow.CriticalThreshold

@@ -1042,7 +1042,8 @@ type StorageSizingStatus struct {
 	// +optional
 	Data *VolumeSizingStatus `json:"data,omitempty"`
 
-	// WAL volume sizing status (Phase 2).
+	// WAL volume sizing status. Reserved for future use when WAL volume
+	// dynamic sizing is implemented.
 	// +optional
 	WAL *VolumeSizingStatus `json:"wal,omitempty"`
 
