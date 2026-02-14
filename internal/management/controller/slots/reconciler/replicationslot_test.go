@@ -210,3 +210,73 @@ var _ = Describe("dropReplicationSlots", func() {
 		Expect(res.RequeueAfter).To(Equal(time.Duration(0)))
 	})
 })
+
+var _ = Describe("cleanupOrphanedLogicalSlots", func() {
+	var (
+		mock sqlmock.Sqlmock
+		db   *sql.DB
+	)
+
+	BeforeEach(func() {
+		var err error
+		db, mock, err = sqlmock.New()
+		Expect(err).NotTo(HaveOccurred())
+	})
+
+	AfterEach(func() {
+		Expect(mock.ExpectationsWereMet()).To(Succeed())
+	})
+
+	It("should drop logical slots with synced=false that are not active", func(ctx SpecContext) {
+		rows := sqlmock.NewRows([]string{"slot_name", "plugin", "active", "restart_lsn", "synced"}).
+			AddRow("synced_slot", "pgoutput", false, "0/1234", true).   // synced=true, skip
+			AddRow("orphan_slot", "pgoutput", false, "0/5678", false).  // synced=false, drop
+			AddRow("active_orphan", "pgoutput", true, "0/9ABC", false)  // active, skip
+
+		mock.ExpectQuery("SELECT .+ FROM pg_catalog.pg_replication_slots WHERE slot_type = 'logical'").
+			WillReturnRows(rows)
+
+		// Only orphan_slot should be dropped
+		mock.ExpectExec("SELECT pg_catalog.pg_drop_replication_slot").
+			WithArgs("orphan_slot").
+			WillReturnResult(sqlmock.NewResult(1, 1))
+
+		err := cleanupOrphanedLogicalSlots(ctx, db)
+		Expect(err).NotTo(HaveOccurred())
+	})
+
+	It("should do nothing when no orphaned slots exist", func(ctx SpecContext) {
+		rows := sqlmock.NewRows([]string{"slot_name", "plugin", "active", "restart_lsn", "synced"}).
+			AddRow("synced_slot", "pgoutput", false, "0/1234", true)
+
+		mock.ExpectQuery("SELECT .+ FROM pg_catalog.pg_replication_slots WHERE slot_type = 'logical'").
+			WillReturnRows(rows)
+
+		err := cleanupOrphanedLogicalSlots(ctx, db)
+		Expect(err).NotTo(HaveOccurred())
+	})
+
+	It("should return error when listing slots fails", func(ctx SpecContext) {
+		mock.ExpectQuery("SELECT .+ FROM pg_catalog.pg_replication_slots WHERE slot_type = 'logical'").
+			WillReturnError(errors.New("mock error"))
+
+		err := cleanupOrphanedLogicalSlots(ctx, db)
+		Expect(err).To(HaveOccurred())
+	})
+
+	It("should return error when deleting a slot fails", func(ctx SpecContext) {
+		rows := sqlmock.NewRows([]string{"slot_name", "plugin", "active", "restart_lsn", "synced"}).
+			AddRow("orphan_slot", "pgoutput", false, "0/5678", false)
+
+		mock.ExpectQuery("SELECT .+ FROM pg_catalog.pg_replication_slots WHERE slot_type = 'logical'").
+			WillReturnRows(rows)
+
+		mock.ExpectExec("SELECT pg_catalog.pg_drop_replication_slot").
+			WithArgs("orphan_slot").
+			WillReturnError(errors.New("delete error"))
+
+		err := cleanupOrphanedLogicalSlots(ctx, db)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("delete error"))
+	})
+})
