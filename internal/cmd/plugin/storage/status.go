@@ -150,13 +150,13 @@ func printDynamicStatus(cluster *apiv1.Cluster) {
 	fmt.Printf("  Target Size:    %s\n", status.TargetSize)
 
 	// Print state with color
-	stateStr := status.State
-	switch stateStr {
-	case "Balanced":
+	stateStr := string(status.State)
+	switch status.State {
+	case apiv1.VolumeSizingStateBalanced:
 		stateStr = aurora.Green(stateStr).String()
-	case "Emergency":
+	case apiv1.VolumeSizingStateEmergency:
 		stateStr = aurora.Red(stateStr).String()
-	case "PendingGrowth", "Resizing":
+	case apiv1.VolumeSizingStatePendingGrowth, apiv1.VolumeSizingStateResizing:
 		stateStr = aurora.Yellow(stateStr).String()
 	}
 	fmt.Printf("  State:          %s\n", stateStr)

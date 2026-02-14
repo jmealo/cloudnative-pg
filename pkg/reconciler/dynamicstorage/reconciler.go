@@ -26,6 +26,7 @@ import (
 
 	"github.com/cloudnative-pg/machinery/pkg/log"
 	corev1 "k8s.io/api/core/v1"
+	apierrs "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -51,29 +52,6 @@ const (
 
 	// ActionPendingGrowth indicates growth is needed but waiting for maintenance window.
 	ActionPendingGrowth ActionType = "PendingGrowth"
-)
-
-// VolumeState represents the state of a volume in StorageSizing status.
-type VolumeState string
-
-const (
-	// VolumeStateBalanced indicates the volume is within target buffer.
-	VolumeStateBalanced VolumeState = "Balanced"
-
-	// VolumeStateNeedsGrow indicates the volume is below target buffer but not emergency.
-	VolumeStateNeedsGrow VolumeState = "NeedsGrow"
-
-	// VolumeStateEmergency indicates the volume is in emergency growth condition.
-	VolumeStateEmergency VolumeState = "Emergency"
-
-	// VolumeStatePendingGrowth indicates growth is queued waiting for window.
-	VolumeStatePendingGrowth VolumeState = "PendingGrowth"
-
-	// VolumeStateResizing indicates the volume is currently being resized by the provider.
-	VolumeStateResizing VolumeState = "Resizing"
-
-	// VolumeStateAtLimit indicates the volume has reached its configured limit.
-	VolumeStateAtLimit VolumeState = "AtLimit"
 )
 
 // VolumeType represents the type of volume being managed.
@@ -111,6 +89,8 @@ type DiskInfo struct {
 
 // Reconcile performs dynamic storage reconciliation for a cluster.
 // It evaluates disk usage across all instances and triggers growth when needed.
+//
+//nolint:gocognit // reconciliation logic requires handling multiple volume types and states
 func Reconcile(
 	ctx context.Context,
 	c client.Client,
@@ -154,11 +134,14 @@ func Reconcile(
 		cluster.Status.StorageSizing.Data = &apiv1.VolumeSizingStatus{}
 	}
 
+	//nolint:nestif // waiting state logic requires checking multiple conditions
 	if len(diskStatusMap) == 0 {
 		// If we have instance statuses but no disk status yet, they might still be initializing.
 		// Set status to indicate we're waiting, then return normally to allow status persistence.
 		if instanceStatuses != nil && len(instanceStatuses.Items) > 0 {
-			// Log which instances don't have disk status
+			// Collect information about instances without disk status
+			var instancesWithoutDiskStatus []string
+			var instanceErrors []string
 			for _, status := range instanceStatuses.Items {
 				podName := "unknown"
 				if status.Pod != nil {
@@ -171,11 +154,39 @@ func Reconcile(
 					"hasDiskStatus", hasDiskStatus,
 					"hasError", hasError,
 					"errorMessage", status.ErrorMessage)
+
+				if !hasDiskStatus {
+					instancesWithoutDiskStatus = append(instancesWithoutDiskStatus, podName)
+				}
+				if hasError && status.ErrorMessage != "" {
+					instanceErrors = append(instanceErrors, fmt.Sprintf("%s: %s", podName, status.ErrorMessage))
+				}
 			}
 
 			// Set status to indicate we're waiting for disk status
 			// This allows users to see what's happening instead of silent failures
-			cluster.Status.StorageSizing.Data.State = "WaitingForDiskStatus"
+			cluster.Status.StorageSizing.Data.State = apiv1.VolumeSizingStateWaitingForDiskStatus
+
+			// Build a message to help users understand why disk status is unavailable
+			if len(instanceErrors) > 0 {
+				cluster.Status.StorageSizing.Data.Message = fmt.Sprintf(
+					"Waiting for disk status from %d instance(s). Errors: %v",
+					len(instancesWithoutDiskStatus), instanceErrors)
+			} else {
+				cluster.Status.StorageSizing.Data.Message = fmt.Sprintf(
+					"Waiting for disk status from %d instance(s): %v",
+					len(instancesWithoutDiskStatus), instancesWithoutDiskStatus)
+			}
+
+			// Persist the status update so users can see the waiting state via kubectl
+			if err := c.Status().Update(ctx, cluster); err != nil {
+				// Optimistic locking conflict is transient - requeue to retry
+				if apierrs.IsConflict(err) {
+					contextLogger.Info("Optimistic locking conflict while updating status, requeueing")
+					return ctrl.Result{RequeueAfter: time.Second}, nil
+				}
+				return ctrl.Result{}, fmt.Errorf("while updating cluster status to WaitingForDiskStatus: %w", err)
+			}
 
 			contextLogger.Info("No disk status available yet, status updated to reflect waiting state",
 				"instanceCount", len(instanceStatuses.Items))
@@ -224,6 +235,12 @@ func Reconcile(
 	// and other actions need their status changes persisted as well.
 	if result.Action != ActionNoOp {
 		if err := c.Status().Update(ctx, cluster); err != nil {
+			// Optimistic locking conflict is transient - requeue to retry
+			if apierrs.IsConflict(err) {
+				contextLogger.Info("Optimistic locking conflict while updating status after action, requeueing",
+					"action", result.Action)
+				return ctrl.Result{RequeueAfter: time.Second}, nil
+			}
 			return ctrl.Result{}, fmt.Errorf("while updating cluster status after dynamic storage action: %w", err)
 		}
 	}
@@ -239,6 +256,8 @@ func Reconcile(
 }
 
 // reconcileTablespaces performs dynamic storage reconciliation for all tablespaces.
+//
+//nolint:gocognit // tablespace reconciliation requires similar complexity to main reconcile
 func reconcileTablespaces(
 	ctx context.Context,
 	c client.Client,
@@ -255,6 +274,7 @@ func reconcileTablespaces(
 		}
 
 		diskStatusMap := collectDiskStatusForVolume(instanceStatuses, VolumeTypeTablespace, tbs.Name)
+		//nolint:nestif // tablespace initialization requires checking multiple conditions
 		if len(diskStatusMap) == 0 {
 			// Initialize status for this tablespace so we can report why we're waiting
 			if cluster.Status.StorageSizing.Tablespaces == nil {
@@ -266,7 +286,20 @@ func reconcileTablespaces(
 
 			// Set state to indicate we're waiting for disk status
 			if instanceStatuses != nil && len(instanceStatuses.Items) > 0 {
-				cluster.Status.StorageSizing.Tablespaces[tbs.Name].State = "WaitingForDiskStatus"
+				cluster.Status.StorageSizing.Tablespaces[tbs.Name].State = apiv1.VolumeSizingStateWaitingForDiskStatus
+
+				// Persist the status update so users can see the waiting state via kubectl
+				if err := c.Status().Update(ctx, cluster); err != nil {
+					// Optimistic locking conflict is transient - requeue to retry
+					if apierrs.IsConflict(err) {
+						contextLogger.Info("Optimistic locking conflict while updating tablespace status, requeueing",
+							"tablespace", tbs.Name)
+						return ctrl.Result{RequeueAfter: time.Second}, nil
+					}
+					return ctrl.Result{}, fmt.Errorf(
+						"updating status to WaitingForDiskStatus for tablespace %s: %w", tbs.Name, err)
+				}
+
 				contextLogger.Info("No disk status available for tablespace yet, will retry on next reconciliation",
 					"tablespace", tbs.Name,
 					"instanceCount", len(instanceStatuses.Items))
@@ -306,7 +339,15 @@ func reconcileTablespaces(
 		// Always persist status updates when the action indicates a state change
 		if result.Action != ActionNoOp {
 			if err := c.Status().Update(ctx, cluster); err != nil {
-				return ctrl.Result{}, fmt.Errorf("while updating cluster status after tablespace %s dynamic storage action: %w", tbs.Name, err)
+				// Optimistic locking conflict is transient - requeue to retry
+				if apierrs.IsConflict(err) {
+					contextLogger.Info("Optimistic locking conflict while updating tablespace status after action, requeueing",
+						"tablespace", tbs.Name,
+						"action", result.Action)
+					return ctrl.Result{RequeueAfter: time.Second}, nil
+				}
+				return ctrl.Result{}, fmt.Errorf(
+					"updating status after tablespace %s dynamic storage action: %w", tbs.Name, err)
 			}
 		}
 	}
@@ -462,17 +503,21 @@ func findMaxUsage(diskStatusMap map[string]*DiskInfo) (uint64, uint64, uint64, s
 // maxPVCSize returns the largest PVC capacity from the provided map.
 // This gives the authoritative current volume size, unaffected by filesystem overhead.
 func maxPVCSize(pvcSizes map[string]string) resource.Quantity {
-	var max resource.Quantity
-	for _, sizeStr := range pvcSizes {
+	var maxSize resource.Quantity
+	for instanceName, sizeStr := range pvcSizes {
 		qty, err := resource.ParseQuantity(sizeStr)
 		if err != nil {
+			log.Warning("Failed to parse PVC size quantity, skipping",
+				"instance", instanceName,
+				"size", sizeStr,
+				"error", err)
 			continue
 		}
-		if qty.Cmp(max) > 0 {
-			max = qty
+		if qty.Cmp(maxSize) > 0 {
+			maxSize = qty
 		}
 	}
-	return max
+	return maxSize
 }
 
 func getVolumeSizingStatus(cluster *apiv1.Cluster, volumeType VolumeType, tbsName string) *apiv1.VolumeSizingStatus {
@@ -620,16 +665,16 @@ func updateVolumeStatus(
 	switch result.Action {
 	case ActionNoOp:
 		if result.Reason == "at limit" {
-			status.State = string(VolumeStateAtLimit)
+			status.State = apiv1.VolumeSizingStateAtLimit
 		} else {
-			status.State = string(VolumeStateBalanced)
+			status.State = apiv1.VolumeSizingStateBalanced
 		}
 	case ActionEmergencyGrow:
-		status.State = string(VolumeStateEmergency)
+		status.State = apiv1.VolumeSizingStateEmergency
 	case ActionScheduledGrow:
-		status.State = string(VolumeStateResizing)
+		status.State = apiv1.VolumeSizingStateResizing
 	case ActionPendingGrowth:
-		status.State = string(VolumeStatePendingGrowth)
+		status.State = apiv1.VolumeSizingStatePendingGrowth
 	}
 
 	// Update target size

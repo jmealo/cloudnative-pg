@@ -33,7 +33,6 @@ import (
 	"github.com/cloudnative-pg/cloudnative-pg/pkg/management/postgres"
 	"github.com/cloudnative-pg/cloudnative-pg/pkg/management/postgres/webserver/client/local"
 	postgresstatus "github.com/cloudnative-pg/cloudnative-pg/pkg/postgres"
-	"github.com/cloudnative-pg/cloudnative-pg/pkg/reconciler/dynamicstorage"
 )
 
 type diskCollector struct {
@@ -181,6 +180,7 @@ func (d *diskCollector) Collect(ch chan<- prometheus.Metric) {
 func (d *diskCollector) collectDiskUsage(ch chan<- prometheus.Metric) {
 	status, err := d.getStatus()
 	if err != nil {
+		log.Warning("failed to get PostgreSQL status for disk metrics collection", "error", err)
 		return
 	}
 
@@ -208,7 +208,7 @@ func (d *diskCollector) collectDiskUsage(ch chan<- prometheus.Metric) {
 }
 
 func (d *diskCollector) recordDiskStatus(
-	ch chan<- prometheus.Metric,
+	_ chan<- prometheus.Metric,
 	volumeType, instance string,
 	s *postgresstatus.DiskStatus,
 ) {
@@ -257,7 +257,7 @@ func (d *diskCollector) collectDynamicStorage(ch chan<- prometheus.Metric) {
 }
 
 func (d *diskCollector) recordVolumeSizing(
-	ch chan<- prometheus.Metric,
+	_ chan<- prometheus.Metric,
 	volumeType, tablespace string,
 	s *apiv1.VolumeSizingStatus,
 ) {
@@ -265,11 +265,17 @@ func (d *diskCollector) recordVolumeSizing(
 	if s.TargetSize != "" {
 		if val, err := d.parseQuantity(s.TargetSize); err == nil {
 			d.targetSizeBytes.WithLabelValues(volumeType, tablespace).Set(val)
+		} else {
+			log.Warning("failed to parse TargetSize for metrics",
+				"error", err, "volumeType", volumeType, "tablespace", tablespace, "value", s.TargetSize)
 		}
 	}
 	if s.EffectiveSize != "" {
 		if val, err := d.parseQuantity(s.EffectiveSize); err == nil {
 			d.effectiveSizeBytes.WithLabelValues(volumeType, tablespace).Set(val)
+		} else {
+			log.Warning("failed to parse EffectiveSize for metrics",
+				"error", err, "volumeType", volumeType, "tablespace", tablespace, "value", s.EffectiveSize)
 		}
 	}
 
@@ -277,21 +283,24 @@ func (d *diskCollector) recordVolumeSizing(
 	for instanceName, sizeStr := range s.ActualSizes {
 		if val, err := d.parseQuantity(sizeStr); err == nil {
 			d.actualSizeBytes.WithLabelValues(volumeType, tablespace, instanceName).Set(val)
+		} else {
+			log.Warning("failed to parse ActualSize for metrics",
+				"error", err, "volumeType", volumeType, "tablespace", tablespace, "instance", instanceName, "value", sizeStr)
 		}
 	}
 
 	// State (1 for current state, 0 for others)
-	states := []dynamicstorage.VolumeState{
-		dynamicstorage.VolumeStateBalanced,
-		dynamicstorage.VolumeStateNeedsGrow,
-		dynamicstorage.VolumeStateEmergency,
-		dynamicstorage.VolumeStatePendingGrowth,
-		dynamicstorage.VolumeStateResizing,
-		dynamicstorage.VolumeStateAtLimit,
+	states := []apiv1.VolumeSizingState{
+		apiv1.VolumeSizingStateBalanced,
+		apiv1.VolumeSizingStateNeedsGrow,
+		apiv1.VolumeSizingStateEmergency,
+		apiv1.VolumeSizingStatePendingGrowth,
+		apiv1.VolumeSizingStateResizing,
+		apiv1.VolumeSizingStateAtLimit,
 	}
 	for _, state := range states {
 		val := 0.0
-		if s.State == string(state) {
+		if s.State == state {
 			val = 1.0
 		}
 		d.state.WithLabelValues(volumeType, tablespace, string(state)).Set(val)

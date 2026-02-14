@@ -22,6 +22,7 @@ package dynamicstorage
 import (
 	"time"
 
+	"github.com/cloudnative-pg/machinery/pkg/log"
 	"github.com/robfig/cron"
 
 	apiv1 "github.com/cloudnative-pg/cloudnative-pg/api/v1"
@@ -30,6 +31,7 @@ import (
 var (
 	// DefaultMaintenanceSchedule is the default cron schedule for maintenance windows.
 	// It uses the 6-field format: "second minute hour day-of-month month day-of-week"
+	// This is consistent with ScheduledBackup cron format in CloudNativePG.
 	DefaultMaintenanceSchedule = "0 0 3 * * *"
 
 	// DefaultMaintenanceDuration is the default duration of maintenance windows.
@@ -40,6 +42,7 @@ var (
 
 	// cronParser is the parser for maintenance window schedules.
 	// It uses the 6-field cron format (second, minute, hour, day of month, month, day of week).
+	// This is consistent with ScheduledBackup cron format in CloudNativePG.
 	cronParser = cron.NewParser(cron.Second | cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
 )
 
@@ -57,6 +60,9 @@ func IsMaintenanceWindowOpen(cfg *apiv1.StorageConfiguration) bool {
 
 	cronSchedule, err := cronParser.Parse(schedule)
 	if err != nil {
+		log.Warning("Failed to parse maintenance window cron schedule, treating window as closed",
+			"schedule", schedule,
+			"error", err)
 		return false
 	}
 
@@ -64,7 +70,11 @@ func IsMaintenanceWindowOpen(cfg *apiv1.StorageConfiguration) bool {
 	loc := time.UTC
 	if cfg.MaintenanceWindow.Timezone != "" {
 		parsedLoc, err := time.LoadLocation(cfg.MaintenanceWindow.Timezone)
-		if err == nil {
+		if err != nil {
+			log.Warning("Failed to parse maintenance window timezone, falling back to UTC",
+				"timezone", cfg.MaintenanceWindow.Timezone,
+				"error", err)
+		} else {
 			loc = parsedLoc
 		}
 	}
@@ -73,7 +83,12 @@ func IsMaintenanceWindowOpen(cfg *apiv1.StorageConfiguration) bool {
 	duration := DefaultMaintenanceDuration
 	if cfg.MaintenanceWindow.Duration != "" {
 		parsedDuration, err := time.ParseDuration(cfg.MaintenanceWindow.Duration)
-		if err == nil {
+		if err != nil {
+			log.Warning("Failed to parse maintenance window duration, falling back to default",
+				"duration", cfg.MaintenanceWindow.Duration,
+				"default", DefaultMaintenanceDuration,
+				"error", err)
+		} else {
 			duration = parsedDuration
 		}
 	}
@@ -104,6 +119,9 @@ func NextMaintenanceWindow(cfg *apiv1.StorageConfiguration) *time.Time {
 
 	cronSchedule, err := cronParser.Parse(schedule)
 	if err != nil {
+		log.Warning("Failed to parse maintenance window cron schedule for next window calculation",
+			"schedule", schedule,
+			"error", err)
 		return nil
 	}
 
@@ -111,7 +129,11 @@ func NextMaintenanceWindow(cfg *apiv1.StorageConfiguration) *time.Time {
 	loc := time.UTC
 	if cfg.MaintenanceWindow.Timezone != "" {
 		parsedLoc, err := time.LoadLocation(cfg.MaintenanceWindow.Timezone)
-		if err == nil {
+		if err != nil {
+			log.Warning("Failed to parse maintenance window timezone, falling back to UTC",
+				"timezone", cfg.MaintenanceWindow.Timezone,
+				"error", err)
+		} else {
 			loc = parsedLoc
 		}
 	}

@@ -352,6 +352,7 @@ func fillDiskFast(
 
 	// Sync to ensure statfs reflects the write
 	syncTimeout := 30 * time.Second
+	//nolint:dogsled // sync command returns stdout, stderr, error - all intentionally ignored
 	_, _, _ = exec.CommandInContainer(
 		env.Ctx, env.Client, env.Interface, env.RestClientConfig,
 		exec.ContainerLocator{
@@ -376,8 +377,7 @@ func fillDiskFast(
 	return finalUsage, nil
 }
 
-// removeFillFile removes the ballast file created by fillDiskFast.
-// Call this in tests that need to free space after growth verification.
+//nolint:unused // utility function for future test scenarios
 func removeFillFile(pod *corev1.Pod) error {
 	timeout := 10 * time.Second
 	fillPath := specs.PgDataPath + "/fill_ballast"
@@ -412,6 +412,8 @@ func removeFillFile(pod *corev1.Pod) error {
 //   - batchRows: number of rows per batch (e.g., 500000)
 //
 // Returns the final disk usage percentage or error.
+//
+//nolint:unparam // int return is useful for debugging but callers don't use it
 func fillDiskIncrementally(
 	pod *corev1.Pod,
 	targetUsagePercent int,
@@ -535,7 +537,7 @@ func verifyGrowthCompletion(namespace, clusterName string) {
 	})
 }
 
-// assertDataConsistency verifies that data is consistent across replicas
+//nolint:unused // utility function for future test scenarios
 func assertDataConsistency(namespace, clusterName string) {
 	cluster, err := clusterutils.Get(env.Ctx, env.Client, namespace, clusterName)
 	Expect(err).ToNot(HaveOccurred())
@@ -1216,6 +1218,7 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 				AssertClusterIsReady(namespace, clusterName, testTimeouts[timeouts.ClusterIsReady], env)
 			})
 
+			//nolint:dupl // similar structure but different expected values than other budget tests
 			By("verifying budget is tracked", func() {
 				Eventually(func(g Gomega) {
 					cluster, err := clusterutils.Get(env.Ctx, env.Client, namespace, clusterName)
@@ -2126,6 +2129,7 @@ var _ = Describe("Dynamic Storage", Label(tests.LabelStorage, tests.LabelDynamic
 				AssertClusterIsReady(namespace, clusterName, testTimeouts[timeouts.ClusterIsReady], env)
 			})
 
+			//nolint:dupl // similar structure but different expected values than other budget tests
 			By("verifying budget is initialized correctly", func() {
 				Eventually(func(g Gomega) {
 					cluster, err := clusterutils.Get(env.Ctx, env.Client, namespace, clusterName)

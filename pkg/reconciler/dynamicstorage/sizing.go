@@ -20,6 +20,7 @@ SPDX-License-Identifier: Apache-2.0
 package dynamicstorage
 
 import (
+	"github.com/cloudnative-pg/machinery/pkg/log"
 	"k8s.io/apimachinery/pkg/api/resource"
 
 	apiv1 "github.com/cloudnative-pg/cloudnative-pg/api/v1"
@@ -70,6 +71,10 @@ func GetCriticalMinimumFree(cfg *apiv1.StorageConfiguration) resource.Quantity {
 	}
 	qty, err := resource.ParseQuantity(cfg.EmergencyGrow.CriticalMinimumFree)
 	if err != nil {
+		log.Warning("Failed to parse criticalMinimumFree quantity, falling back to default",
+			"criticalMinimumFree", cfg.EmergencyGrow.CriticalMinimumFree,
+			"default", DefaultCriticalMinimumFree,
+			"error", err)
 		return resource.MustParse(DefaultCriticalMinimumFree)
 	}
 	return qty

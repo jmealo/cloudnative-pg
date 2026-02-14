@@ -165,7 +165,8 @@ func GetPod(ctx context.Context, crudClient client.Client) (corev1.Pod, error) {
 	}
 	activePods := utils.FilterActivePods(podList.Items)
 	if len(activePods) != 1 {
-		err := fmt.Errorf("number of running operator different than 1: %v pods running in namespace %s", len(activePods), operatorNamespace)
+		err := fmt.Errorf(
+			"expected 1 running operator, found %v pods in namespace %s", len(activePods), operatorNamespace)
 		return corev1.Pod{}, err
 	}
 

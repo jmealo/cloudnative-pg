@@ -365,7 +365,11 @@ func (r *ClusterReconciler) reconcile(ctx context.Context, cluster *apiv1.Cluste
 	// Get the replication status
 	instancesStatus := r.InstanceClient.GetStatusFromInstances(ctx, resources.instances)
 
-	// Dynamic storage sizing reconciliation
+	// Dynamic storage sizing reconciliation.
+	// This runs even during switchover/failover because:
+	// 1. It operates at Kubernetes PVC level, not PostgreSQL level
+	// 2. Emergency disk growth should proceed regardless of cluster state
+	// 3. Running out of disk is critical and shouldn't wait for switchover
 	if res, err := dynamicstorage.Reconcile(
 		ctx,
 		r.Client,
@@ -375,6 +379,19 @@ func (r *ClusterReconciler) reconcile(ctx context.Context, cluster *apiv1.Cluste
 		resources.pvcs.Items,
 	); err != nil || !res.IsZero() {
 		return res, err
+	}
+
+	// Pause reconciliation during switchover/failover.
+	// Dynamic storage runs above, but the rest of reconciliation should wait
+	// to avoid conflicts with the switchover/failover process.
+	if cluster.Status.CurrentPrimary != "" &&
+		cluster.Status.CurrentPrimary != cluster.Status.TargetPrimary {
+		contextLogger.Info("There is a switchover or a failover "+
+			"in progress, waiting for the operation to complete",
+			"currentPrimary", cluster.Status.CurrentPrimary,
+			"targetPrimary", cluster.Status.TargetPrimary)
+
+		return ctrl.Result{RequeueAfter: 1 * time.Second}, nil
 	}
 
 	// we update all the cluster status fields that require the instances status

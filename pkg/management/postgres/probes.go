@@ -734,7 +734,7 @@ func (instance *Instance) fillDiskStatus(result *postgres.PostgresqlStatus) {
 			AvailableBytes: dataStatus.AvailableBytes,
 			PercentUsed:    dataStatus.PercentUsed,
 		}
-		log.Info("Disk status collected successfully",
+		log.Debug("Disk status collected successfully",
 			"path", pgData,
 			"totalBytes", dataStatus.TotalBytes,
 			"usedBytes", dataStatus.UsedBytes,
@@ -801,7 +801,7 @@ func probeTablespaceDiskStatus() map[string]*postgres.DiskStatus {
 			AvailableBytes: tsStatus.AvailableBytes,
 			PercentUsed:    tsStatus.PercentUsed,
 		}
-		log.Info("Tablespace disk status collected successfully",
+		log.Debug("Tablespace disk status collected successfully",
 			"tablespace", entry.Name(),
 			"path", tsPath,
 			"totalBytes", tsStatus.TotalBytes,

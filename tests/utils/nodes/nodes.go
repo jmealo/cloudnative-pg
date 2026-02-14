@@ -65,7 +65,8 @@ func DrainPrimary(
 		var stdout, stderr string
 		drainedNode := primaryNode
 		Eventually(func() error {
-			cmd := fmt.Sprintf("kubectl drain %v --ignore-daemonsets --delete-emptydir-data --force --disable-eviction --timeout=%ds",
+			cmd := fmt.Sprintf(
+				"kubectl drain %v --ignore-daemonsets --delete-emptydir-data --force --disable-eviction --timeout=%ds",
 				drainedNode, timeoutSeconds)
 			stdout, stderr, err = run.Unchecked(cmd)
 			if err == nil {
@@ -140,7 +141,8 @@ func DrainReplica(
 		var stdout, stderr string
 		drainedNode := replicaNode
 		Eventually(func() error {
-			cmd := fmt.Sprintf("kubectl drain %v --ignore-daemonsets --delete-emptydir-data --force --disable-eviction --timeout=%ds",
+			cmd := fmt.Sprintf(
+				"kubectl drain %v --ignore-daemonsets --delete-emptydir-data --force --disable-eviction --timeout=%ds",
 				drainedNode, timeoutSeconds)
 			stdout, stderr, err = run.Unchecked(cmd)
 			if err == nil {

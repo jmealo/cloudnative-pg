@@ -1051,6 +1051,32 @@ type StorageSizingStatus struct {
 	Tablespaces map[string]*VolumeSizingStatus `json:"tablespaces,omitempty"`
 }
 
+// VolumeSizingState represents the state of a volume in dynamic sizing.
+type VolumeSizingState string
+
+const (
+	// VolumeSizingStateBalanced indicates the volume is within target buffer.
+	VolumeSizingStateBalanced VolumeSizingState = "Balanced"
+
+	// VolumeSizingStateNeedsGrow indicates the volume is below target buffer but not emergency.
+	VolumeSizingStateNeedsGrow VolumeSizingState = "NeedsGrow"
+
+	// VolumeSizingStateEmergency indicates the volume is in emergency growth condition.
+	VolumeSizingStateEmergency VolumeSizingState = "Emergency"
+
+	// VolumeSizingStatePendingGrowth indicates growth is queued waiting for window.
+	VolumeSizingStatePendingGrowth VolumeSizingState = "PendingGrowth"
+
+	// VolumeSizingStateResizing indicates the volume is currently being resized by the provider.
+	VolumeSizingStateResizing VolumeSizingState = "Resizing"
+
+	// VolumeSizingStateAtLimit indicates the volume has reached its configured limit.
+	VolumeSizingStateAtLimit VolumeSizingState = "AtLimit"
+
+	// VolumeSizingStateWaitingForDiskStatus indicates we're waiting for disk status from instances.
+	VolumeSizingStateWaitingForDiskStatus VolumeSizingState = "WaitingForDiskStatus"
+)
+
 // VolumeSizingStatus tracks the sizing state of a logical volume.
 type VolumeSizingStatus struct {
 	// EffectiveSize is the current target size for new PVCs.
@@ -1069,7 +1095,7 @@ type VolumeSizingStatus struct {
 	// PendingGrowth, Resizing, AtLimit, WaitingForDiskStatus.
 	// +kubebuilder:validation:Enum=Balanced;NeedsGrow;Emergency;PendingGrowth;Resizing;AtLimit;WaitingForDiskStatus
 	// +optional
-	State string `json:"state,omitempty"`
+	State VolumeSizingState `json:"state,omitempty"`
 
 	// LastAction records the most recent sizing operation.
 	// +optional
@@ -1082,11 +1108,18 @@ type VolumeSizingStatus struct {
 	// NextMaintenanceWindow is the timestamp when pending operations can execute.
 	// +optional
 	NextMaintenanceWindow *metav1.Time `json:"nextMaintenanceWindow,omitempty"`
+
+	// Message provides additional context about the current state.
+	// For example, when State is "WaitingForDiskStatus", this field
+	// explains why disk status is unavailable.
+	// +optional
+	Message string `json:"message,omitempty"`
 }
 
 // SizingAction records a sizing operation.
 type SizingAction struct {
 	// Kind is the type of action: EmergencyGrow, ScheduledGrow.
+	// +kubebuilder:validation:Enum=EmergencyGrow;ScheduledGrow
 	// +optional
 	Kind string `json:"kind,omitempty"`
 
@@ -1107,6 +1140,7 @@ type SizingAction struct {
 	Instance string `json:"instance,omitempty"`
 
 	// Result is the outcome: Success, Failed, Pending.
+	// +kubebuilder:validation:Enum=Success;Failed;Pending
 	// +optional
 	Result string `json:"result,omitempty"`
 }
@@ -2196,9 +2230,10 @@ type StorageConfiguration struct {
 
 // MaintenanceWindowConfig defines when non-urgent sizing operations can occur.
 type MaintenanceWindowConfig struct {
-	// Schedule in cron syntax: "minute hour day-of-month month day-of-week"
-	// Examples: "0 3 * * *" (daily at 3 AM), "0 3 * * 0" (Sundays at 3 AM)
-	// +kubebuilder:default:="0 3 * * *"
+	// Schedule in cron syntax: "second minute hour day-of-month month day-of-week"
+	// This uses the same 6-field format as ScheduledBackup.
+	// Examples: "0 0 3 * * *" (daily at 3 AM), "0 0 3 * * 0" (Sundays at 3 AM)
+	// +kubebuilder:default:="0 0 3 * * *"
 	Schedule string `json:"schedule,omitempty"`
 
 	// Duration of the maintenance window.

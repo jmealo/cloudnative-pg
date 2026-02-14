@@ -50,7 +50,7 @@ var _ = Describe("diskCollector", func() {
 
 		instance := postgres.NewInstance()
 		collector := newDiskCollector(instance)
-		
+
 		// Override getStatus and getPodName for testing
 		collector.getStatus = func() (*postgresstatus.PostgresqlStatus, error) {
 			return status, nil
@@ -74,7 +74,8 @@ var _ = Describe("diskCollector", func() {
 		} {
 			mf := getMetricFamily(metricFamilies, mfName)
 			Expect(mf).ToNot(BeNil(), "Metric family %s not found", mfName)
-			Expect(mf.GetMetric()).To(HaveLen(expectedCount), "Metric family %s should have exactly %d metrics", mfName, expectedCount)
+			Expect(mf.GetMetric()).To(HaveLen(expectedCount),
+				"Metric family %s should have exactly %d metrics", mfName, expectedCount)
 
 			// Check for duplicates by ensuring label combinations are unique
 			labelsSeen := make(map[string]struct{})

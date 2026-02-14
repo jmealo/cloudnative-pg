@@ -42,7 +42,7 @@ var _ = Describe("maintenance", func() {
 
 	Describe("findMostRecentWindowStart", func() {
 		It("find yesterday's window if today's hasn't started", func() {
-			// Daily at 3 AM (using 6 fields: sec min hour dom month dow)
+			// Daily at 3 AM (6-field: sec min hour dom month dow)
 			schedule := "0 0 3 * * *"
 			cronSchedule, _ := cronParser.Parse(schedule)
 

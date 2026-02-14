@@ -84,12 +84,20 @@ var _ = Describe("reconciler", func() {
 					},
 				},
 			}
-			c := fake.NewClientBuilder().WithScheme(scheme.BuildWithAllKnownScheme()).Build()
+			c := fake.NewClientBuilder().WithScheme(scheme.BuildWithAllKnownScheme()).
+				WithObjects(cluster).
+				WithStatusSubresource(cluster).
+				Build()
 			res, err := Reconcile(ctx, c, cluster, nil, status, nil)
 			Expect(err).ToNot(HaveOccurred())
 			// Should requeue to check again soon when instances exist but don't have disk status yet.
 			// This allows the reconciler to retry once disk status becomes available.
 			Expect(res.RequeueAfter).To(Equal(30 * time.Second))
+
+			// Verify status was persisted with waiting state
+			Expect(cluster.Status.StorageSizing).ToNot(BeNil())
+			Expect(cluster.Status.StorageSizing.Data).ToNot(BeNil())
+			Expect(cluster.Status.StorageSizing.Data.State).To(Equal(apiv1.VolumeSizingStateWaitingForDiskStatus))
 		})
 
 		It("trigger emergency grow when disk is full", func() {
@@ -218,7 +226,7 @@ var _ = Describe("reconciler", func() {
 			// The status should show "Balanced" not "Resizing"
 			Expect(cluster.Status.StorageSizing).ToNot(BeNil())
 			Expect(cluster.Status.StorageSizing.Data).ToNot(BeNil())
-			Expect(cluster.Status.StorageSizing.Data.State).To(Equal(string(VolumeStateBalanced)))
+			Expect(cluster.Status.StorageSizing.Data.State).To(Equal(apiv1.VolumeSizingStateBalanced))
 		})
 
 		It("use PVC capacity (not filesystem TotalBytes) as currentSize in growth decision", func() {
@@ -289,7 +297,7 @@ var _ = Describe("reconciler", func() {
 			// Growth should NOT be triggered since target (5Gi) <= currentSize (5Gi).
 			Expect(cluster.Status.StorageSizing).ToNot(BeNil())
 			Expect(cluster.Status.StorageSizing.Data).ToNot(BeNil())
-			Expect(cluster.Status.StorageSizing.Data.State).To(Equal(string(VolumeStateBalanced)))
+			Expect(cluster.Status.StorageSizing.Data.State).To(Equal(apiv1.VolumeSizingStateBalanced))
 
 			// PVC should NOT have been patched
 			var updatedPVC corev1.PersistentVolumeClaim
@@ -427,7 +435,7 @@ var _ = Describe("reconciler", func() {
 			Expect(err).ToNot(HaveOccurred())
 			Expect(res.IsZero()).To(BeTrue())
 
-			Expect(cluster.Status.StorageSizing.Data.State).To(Equal("PendingGrowth"))
+			Expect(cluster.Status.StorageSizing.Data.State).To(Equal(apiv1.VolumeSizingStatePendingGrowth))
 		})
 	})
 
@@ -511,7 +519,8 @@ var _ = Describe("reconciler", func() {
 			}
 
 			// No PVC sizes available (empty map)
-			result := evaluateSizing(cluster, &cluster.Spec.StorageConfiguration, VolumeTypeData, "", diskStatus, map[string]string{})
+			result := evaluateSizing(
+				cluster, &cluster.Spec.StorageConfiguration, VolumeTypeData, "", diskStatus, map[string]string{})
 
 			// Should fall back to filesystem TotalBytes
 			expectedCurrent := resource.MustParse("5Gi")

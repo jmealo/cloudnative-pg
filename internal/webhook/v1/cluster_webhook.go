@@ -1752,6 +1752,16 @@ func validateMaintenanceWindow(
 		}
 	}
 
+	// Validate timezone if set
+	if mw.Timezone != "" {
+		if _, err := time.LoadLocation(mw.Timezone); err != nil {
+			result = append(result, field.Invalid(
+				structPath.Child("timezone"),
+				mw.Timezone,
+				fmt.Sprintf("invalid timezone: %v", err)))
+		}
+	}
+
 	return result
 }
 
@@ -1810,15 +1820,17 @@ func validateEmergencyGrowConfig(
 	return result
 }
 
-// validateCronSchedule validates a cron schedule string (5-field standard cron)
-// validateCronSchedule validates a cron schedule
+// maintenanceCronParser is the parser for maintenance window schedules.
+// It uses the 6-field cron format (second, minute, hour, day of month, month, day of week).
+// This is consistent with ScheduledBackup cron format in CloudNativePG.
+var maintenanceCronParser = cron.NewParser(cron.Second | cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
+
+// validateCronSchedule validates a cron schedule string using 6-field cron format:
+// "second minute hour day-of-month month day-of-week"
+// This is consistent with ScheduledBackup cron format in CloudNativePG.
 func validateCronSchedule(schedule string) error {
-	if _, err := cron.Parse(schedule); err != nil {
-		return err
-	}
-	fields := strings.Fields(schedule)
-	if len(fields) != 6 {
-		return fmt.Errorf("expected 6 fields, got %d", len(fields))
+	if _, err := maintenanceCronParser.Parse(schedule); err != nil {
+		return fmt.Errorf("invalid cron schedule (expected 6-field format: sec min hour dom month dow): %w", err)
 	}
 	return nil
 }

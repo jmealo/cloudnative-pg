@@ -5826,10 +5826,11 @@ spec:
                         description: Duration of the maintenance window.
                         type: string
                       schedule:
-                        default: 0 3 * * *
+                        default: 0 0 3 * * *
                         description: |-
-                          Schedule in cron syntax: "minute hour day-of-month month day-of-week"
-                          Examples: "0 3 * * *" (daily at 3 AM), "0 3 * * 0" (Sundays at 3 AM)
+                          Schedule in cron syntax: "second minute hour day-of-month month day-of-week"
+                          This uses the same 6-field format as ScheduledBackup.
+                          Examples: "0 0 3 * * *" (daily at 3 AM), "0 0 3 * * 0" (Sundays at 3 AM)
                         type: string
                       timezone:
                         default: UTC
@@ -6162,10 +6163,11 @@ spec:
                               description: Duration of the maintenance window.
                               type: string
                             schedule:
-                              default: 0 3 * * *
+                              default: 0 0 3 * * *
                               description: |-
-                                Schedule in cron syntax: "minute hour day-of-month month day-of-week"
-                                Examples: "0 3 * * *" (daily at 3 AM), "0 3 * * 0" (Sundays at 3 AM)
+                                Schedule in cron syntax: "second minute hour day-of-month month day-of-week"
+                                This uses the same 6-field format as ScheduledBackup.
+                                Examples: "0 0 3 * * *" (daily at 3 AM), "0 0 3 * * 0" (Sundays at 3 AM)
                               type: string
                             timezone:
                               default: UTC
@@ -6657,10 +6659,11 @@ spec:
                         description: Duration of the maintenance window.
                         type: string
                       schedule:
-                        default: 0 3 * * *
+                        default: 0 0 3 * * *
                         description: |-
-                          Schedule in cron syntax: "minute hour day-of-month month day-of-week"
-                          Examples: "0 3 * * *" (daily at 3 AM), "0 3 * * 0" (Sundays at 3 AM)
+                          Schedule in cron syntax: "second minute hour day-of-month month day-of-week"
+                          This uses the same 6-field format as ScheduledBackup.
+                          Examples: "0 0 3 * * *" (daily at 3 AM), "0 0 3 * * 0" (Sundays at 3 AM)
                         type: string
                       timezone:
                         default: UTC
@@ -7441,10 +7444,17 @@ spec:
                           kind:
                             description: 'Kind is the type of action: EmergencyGrow,
                               ScheduledGrow.'
+                            enum:
+                            - EmergencyGrow
+                            - ScheduledGrow
                             type: string
                           result:
                             description: 'Result is the outcome: Success, Failed,
                               Pending.'
+                            enum:
+                            - Success
+                            - Failed
+                            - Pending
                             type: string
                           timestamp:
                             description: Timestamp is the time when the action occurred.
@@ -7454,6 +7464,12 @@ spec:
                             description: To is the size after the action.
                             type: string
                         type: object
+                      message:
+                        description: |-
+                          Message provides additional context about the current state.
+                          For example, when State is "WaitingForDiskStatus", this field
+                          explains why disk status is unavailable.
+                        type: string
                       nextMaintenanceWindow:
                         description: NextMaintenanceWindow is the timestamp when pending
                           operations can execute.
@@ -7526,10 +7542,17 @@ spec:
                             kind:
                               description: 'Kind is the type of action: EmergencyGrow,
                                 ScheduledGrow.'
+                              enum:
+                              - EmergencyGrow
+                              - ScheduledGrow
                               type: string
                             result:
                               description: 'Result is the outcome: Success, Failed,
                                 Pending.'
+                              enum:
+                              - Success
+                              - Failed
+                              - Pending
                               type: string
                             timestamp:
                               description: Timestamp is the time when the action occurred.
@@ -7539,6 +7562,12 @@ spec:
                               description: To is the size after the action.
                               type: string
                           type: object
+                        message:
+                          description: |-
+                            Message provides additional context about the current state.
+                            For example, when State is "WaitingForDiskStatus", this field
+                            explains why disk status is unavailable.
+                          type: string
                         nextMaintenanceWindow:
                           description: NextMaintenanceWindow is the timestamp when
                             pending operations can execute.
@@ -7611,10 +7640,17 @@ spec:
                           kind:
                             description: 'Kind is the type of action: EmergencyGrow,
                               ScheduledGrow.'
+                            enum:
+                            - EmergencyGrow
+                            - ScheduledGrow
                             type: string
                           result:
                             description: 'Result is the outcome: Success, Failed,
                               Pending.'
+                            enum:
+                            - Success
+                            - Failed
+                            - Pending
                             type: string
                           timestamp:
                             description: Timestamp is the time when the action occurred.
@@ -7624,6 +7660,12 @@ spec:
                             description: To is the size after the action.
                             type: string
                         type: object
+                      message:
+                        description: |-
+                          Message provides additional context about the current state.
+                          For example, when State is "WaitingForDiskStatus", this field
+                          explains why disk status is unavailable.
+                        type: string
                       nextMaintenanceWindow:
                         description: NextMaintenanceWindow is the timestamp when pending
                           operations can execute.
