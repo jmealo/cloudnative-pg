@@ -1,0 +1,11 @@
+apiVersion: postgresql.cnpg.io/v1
+kind: Publication
+metadata:
+  name: test-pub
+spec:
+  name: test_pub
+  dbname: testdb
+  cluster:
+    name: logical-slot-source
+  target:
+    allTables: true

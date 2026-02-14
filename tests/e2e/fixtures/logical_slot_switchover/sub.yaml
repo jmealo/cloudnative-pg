@@ -1,0 +1,11 @@
+apiVersion: postgresql.cnpg.io/v1
+kind: Subscription
+metadata:
+  name: test-sub
+spec:
+  name: test_sub
+  dbname: testdb
+  publicationName: test_pub
+  cluster:
+    name: logical-slot-dest
+  externalClusterName: logical-slot-source
