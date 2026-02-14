@@ -596,7 +596,7 @@ _Appears in:_
 | `minSyncReplicas` _integer_ | Minimum number of instances required in synchronous replication with the<br />primary. Undefined or 0 allow writes to complete when no standby is<br />available. |  | 0 | Minimum: 0 <br /> |
 | `maxSyncReplicas` _integer_ | The target value for the synchronous replication quorum, that can be<br />decreased if the number of ready standbys is lower than this.<br />Undefined or 0 disable synchronous replication. |  | 0 | Minimum: 0 <br /> |
 | `postgresql` _[PostgresConfiguration](#postgresconfiguration)_ | Configuration of the PostgreSQL server |  |  |  |
-| `replicationSlots` _[ReplicationSlotsConfiguration](#replicationslotsconfiguration)_ | Replication slots management configuration |  | \{ highAvailability\: \{ enabled:true \} \} |  |
+| `replicationSlots` _[ReplicationSlotsConfiguration](#replicationslotsconfiguration)_ | Replication slots management configuration |  | \{ highAvailability:map[enabled:true] \} |  |
 | `bootstrap` _[BootstrapConfiguration](#bootstrapconfiguration)_ | Instructions to bootstrap this cluster |  |  |  |
 | `replica` _[ReplicaClusterConfiguration](#replicaclusterconfiguration)_ | Replica cluster configuration |  |  |  |
 | `superuserSecret` _[LocalObjectReference](https://pkg.go.dev/github.com/cloudnative-pg/machinery/pkg/api#LocalObjectReference)_ | The secret containing the superuser password. If not defined a new<br />secret will be created with a randomly generated password |  |  |  |
@@ -1446,7 +1446,7 @@ _Appears in:_
 
 | Field | Description | Required | Default | Validation |
 | --- | --- | --- | --- | --- |
-| `schedule` _string_ | Schedule in cron syntax: "minute hour day-of-month month day-of-week"<br />Examples: "0 3 * * *" (daily at 3 AM), "0 3 * * 0" (Sundays at 3 AM) | True | 0 3 * * * |  |
+| `schedule` _string_ | Schedule in cron syntax: "second minute hour day-of-month month day-of-week"<br />This uses the same 6-field format as ScheduledBackup.<br />Examples: "0 0 3 * * *" (daily at 3 AM), "0 0 3 * * 0" (Sundays at 3 AM) | True | 0 0 3 * * * |  |
 | `duration` _string_ | Duration of the maintenance window. | True | 2h |  |
 | `timezone` _string_ | Timezone for interpreting the schedule. | True | UTC |  |
 
@@ -2692,12 +2692,12 @@ _Appears in:_
 
 | Field | Description | Required | Default | Validation |
 | --- | --- | --- | --- | --- |
-| `kind` _string_ | Kind is the type of action: EmergencyGrow, ScheduledGrow. |  |  |  |
+| `kind` _string_ | Kind is the type of action: EmergencyGrow, ScheduledGrow. |  |  | Enum: [EmergencyGrow ScheduledGrow] <br /> |
 | `from` _string_ | From is the size before the action. |  |  |  |
 | `to` _string_ | To is the size after the action. |  |  |  |
 | `timestamp` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.34/#time-v1-meta)_ | Timestamp is the time when the action occurred. |  |  |  |
 | `instance` _string_ | Instance is the name of the instance affected by the action. |  |  |  |
-| `result` _string_ | Result is the outcome: Success, Failed, Pending. |  |  |  |
+| `result` _string_ | Result is the outcome: Success, Failed, Pending. |  |  | Enum: [Success Failed Pending] <br /> |
 
 
 #### SnapshotOwnerReference
@@ -2780,7 +2780,7 @@ _Appears in:_
 | Field | Description | Required | Default | Validation |
 | --- | --- | --- | --- | --- |
 | `data` _[VolumeSizingStatus](#volumesizingstatus)_ | Data volume sizing status. |  |  |  |
-| `wal` _[VolumeSizingStatus](#volumesizingstatus)_ | WAL volume sizing status (Phase 2). |  |  |  |
+| `wal` _[VolumeSizingStatus](#volumesizingstatus)_ | WAL volume sizing status. Reserved for future use when WAL volume<br />dynamic sizing is implemented. |  |  |  |
 | `tablespaces` _object (keys:string, values:[VolumeSizingStatus](#volumesizingstatus))_ | Tablespaces sizing status. |  |  |  |
 
 
@@ -3080,6 +3080,29 @@ _Appears in:_
 | `revoke` | RevokeUsageSpecType indicates a revoke usage permission.<br /> |
 
 
+#### VolumeSizingState
+
+_Underlying type:_ _string_
+
+VolumeSizingState represents the state of a volume in dynamic sizing.
+
+
+
+_Appears in:_
+
+- [VolumeSizingStatus](#volumesizingstatus)
+
+| Field | Description |
+| --- | --- |
+| `Balanced` | VolumeSizingStateBalanced indicates the volume is within target buffer.<br /> |
+| `NeedsGrow` | VolumeSizingStateNeedsGrow indicates the volume is below target buffer but not emergency.<br /> |
+| `Emergency` | VolumeSizingStateEmergency indicates the volume is in emergency growth condition.<br /> |
+| `PendingGrowth` | VolumeSizingStatePendingGrowth indicates growth is queued waiting for window.<br /> |
+| `Resizing` | VolumeSizingStateResizing indicates the volume is currently being resized by the provider.<br /> |
+| `AtLimit` | VolumeSizingStateAtLimit indicates the volume has reached its configured limit.<br /> |
+| `WaitingForDiskStatus` | VolumeSizingStateWaitingForDiskStatus indicates we're waiting for disk status from instances.<br /> |
+
+
 #### VolumeSizingStatus
 
 
@@ -3097,10 +3120,11 @@ _Appears in:_
 | `effectiveSize` _string_ | EffectiveSize is the current target size for new PVCs. |  |  |  |
 | `targetSize` _string_ | TargetSize is the calculated ideal size based on usage + buffer. |  |  |  |
 | `actualSizes` _object (keys:string, values:string)_ | ActualSizes maps instance names to their current PVC sizes. |  |  |  |
-| `state` _string_ | State is the current status of the logical volume: Balanced, NeedsGrow, Emergency,<br />PendingGrowth, Resizing, AtLimit, WaitingForDiskStatus. |  |  | Enum: [Balanced NeedsGrow Emergency PendingGrowth Resizing AtLimit WaitingForDiskStatus] <br /> |
+| `state` _[VolumeSizingState](#volumesizingstate)_ | State is the current status of the logical volume: Balanced, NeedsGrow, Emergency,<br />PendingGrowth, Resizing, AtLimit, WaitingForDiskStatus. |  |  | Enum: [Balanced NeedsGrow Emergency PendingGrowth Resizing AtLimit WaitingForDiskStatus] <br /> |
 | `lastAction` _[SizingAction](#sizingaction)_ | LastAction records the most recent sizing operation. |  |  |  |
 | `budget` _[BudgetStatus](#budgetstatus)_ | Budget tracks daily operation limits. |  |  |  |
 | `nextMaintenanceWindow` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.34/#time-v1-meta)_ | NextMaintenanceWindow is the timestamp when pending operations can execute. |  |  |  |
+| `message` _string_ | Message provides additional context about the current state.<br />For example, when State is "WaitingForDiskStatus", this field<br />explains why disk status is unavailable. |  |  |  |
 
 
 #### VolumeSnapshotConfiguration
