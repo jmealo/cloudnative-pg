@@ -55,6 +55,19 @@ func ReconcileReplicationSlots(
 		return dropReplicationSlots(ctx, db, cluster, isPrimary)
 	}
 
+	// Clean up orphaned logical slots on replicas when synchronizeLogicalDecoding is enabled.
+	// This handles the case where a former primary (with synced=false logical slots) becomes
+	// a replica after switchover - these slots must be dropped so PostgreSQL's native
+	// slot sync worker can recreate them with synced=true.
+	if !isPrimary && isSynchronizeLogicalDecodingEnabled(cluster) {
+		pgMajor, err := cluster.GetPostgresqlMajorVersion()
+		if err == nil && pgMajor >= 17 {
+			if err := cleanupOrphanedLogicalSlots(ctx, db); err != nil {
+				return reconcile.Result{}, fmt.Errorf("cleaning up orphaned logical slots: %w", err)
+			}
+		}
+	}
+
 	if isPrimary {
 		return reconcilePrimaryHAReplicationSlots(ctx, db, cluster)
 	}
