@@ -368,7 +368,12 @@ func (target *RecoveryTarget) GetTargetTLI() string {
 	return target.TargetTLI
 }
 
-// GetSizeOrNil returns the requests storage size
+// GetSizeOrNil returns the requested storage size using this priority:
+//  1. Size field (static sizing)
+//  2. Request field (dynamic sizing initial size)
+//  3. PersistentVolumeClaimTemplate storage request
+//
+// Returns nil if none are configured or if parsing fails.
 func (s *StorageConfiguration) GetSizeOrNil() *resource.Quantity {
 	if s == nil {
 		return nil
@@ -376,6 +381,16 @@ func (s *StorageConfiguration) GetSizeOrNil() *resource.Quantity {
 
 	if s.Size != "" {
 		quantity, err := resource.ParseQuantity(s.Size)
+		if err != nil {
+			return nil
+		}
+
+		return &quantity
+	}
+
+	// For dynamic sizing, use Request as the initial size
+	if s.Request != "" {
+		quantity, err := resource.ParseQuantity(s.Request)
 		if err != nil {
 			return nil
 		}

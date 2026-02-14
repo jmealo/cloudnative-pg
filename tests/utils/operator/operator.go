@@ -100,16 +100,23 @@ func Dump(ctx context.Context, crudClient client.Client, namespace, filename str
 
 // GetDeployment returns the operator Deployment if there is a single one running, error otherwise
 func GetDeployment(ctx context.Context, crudClient client.Client) (appsv1.Deployment, error) {
+	// Get operator namespace from environment, defaulting to cnpg-system
+	operatorNamespace := os.Getenv("OPERATOR_NAMESPACE")
+	if operatorNamespace == "" {
+		operatorNamespace = "cnpg-system"
+	}
+
 	deploymentList := &appsv1.DeploymentList{}
 	if err := objects.List(ctx, crudClient, deploymentList,
 		client.MatchingLabels{"app.kubernetes.io/name": "cloudnative-pg"},
+		client.InNamespace(operatorNamespace),
 	); err != nil {
 		return appsv1.Deployment{}, err
 	}
 	// We check if we have one or more deployments
 	switch {
 	case len(deploymentList.Items) > 1:
-		err := fmt.Errorf("number of operator deployments != 1")
+		err := fmt.Errorf("number of operator deployments != 1 in namespace %s", operatorNamespace)
 		return appsv1.Deployment{}, err
 	case len(deploymentList.Items) == 1:
 		return deploymentList.Items[0], nil
@@ -120,6 +127,7 @@ func GetDeployment(ctx context.Context, crudClient client.Client) (appsv1.Deploy
 		crudClient,
 		deploymentList,
 		client.HasLabels{"operators.coreos.com/cloudnative-pg.openshift-operators"},
+		client.InNamespace(operatorNamespace),
 	); err != nil {
 		return appsv1.Deployment{}, err
 	}
@@ -127,7 +135,7 @@ func GetDeployment(ctx context.Context, crudClient client.Client) (appsv1.Deploy
 	// We check if we have one or more deployments
 	switch {
 	case len(deploymentList.Items) > 1:
-		err := fmt.Errorf("number of operator deployments != 1")
+		err := fmt.Errorf("number of operator deployments != 1 in namespace %s", operatorNamespace)
 		return appsv1.Deployment{}, err
 	case len(deploymentList.Items) == 1:
 		return deploymentList.Items[0], nil
@@ -140,16 +148,25 @@ func GetDeployment(ctx context.Context, crudClient client.Client) (appsv1.Deploy
 func GetPod(ctx context.Context, crudClient client.Client) (corev1.Pod, error) {
 	podList := &corev1.PodList{}
 
+	// Get operator namespace from environment, defaulting to cnpg-system
+	operatorNamespace := os.Getenv("OPERATOR_NAMESPACE")
+	if operatorNamespace == "" {
+		operatorNamespace = "cnpg-system"
+	}
+
 	// This will work for newer versions of the operator, which are using
-	// our custom label
+	// our custom label. Filter by namespace to support multiple operators on the same cluster.
 	if err := objects.List(
 		ctx, crudClient,
-		podList, client.MatchingLabels{"app.kubernetes.io/name": "cloudnative-pg"}); err != nil {
+		podList,
+		client.MatchingLabels{"app.kubernetes.io/name": "cloudnative-pg"},
+		client.InNamespace(operatorNamespace)); err != nil {
 		return corev1.Pod{}, err
 	}
 	activePods := utils.FilterActivePods(podList.Items)
 	if len(activePods) != 1 {
-		err := fmt.Errorf("number of running operator different than 1: %v pods running", len(activePods))
+		err := fmt.Errorf(
+			"expected 1 running operator, found %v pods in namespace %s", len(activePods), operatorNamespace)
 		return corev1.Pod{}, err
 	}
 

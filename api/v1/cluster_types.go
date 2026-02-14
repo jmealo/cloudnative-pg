@@ -1030,6 +1030,139 @@ type ClusterStatus struct {
 	// SystemID is the latest detected PostgreSQL SystemID
 	// +optional
 	SystemID string `json:"systemID,omitempty"`
+
+	// StorageSizing tracks dynamic sizing state per logical volume.
+	// +optional
+	StorageSizing *StorageSizingStatus `json:"storageSizing,omitempty"`
+}
+
+// StorageSizingStatus tracks dynamic sizing state per logical volume.
+type StorageSizingStatus struct {
+	// Data volume sizing status.
+	// +optional
+	Data *VolumeSizingStatus `json:"data,omitempty"`
+
+	// WAL volume sizing status. Reserved for future use when WAL volume
+	// dynamic sizing is implemented.
+	// +optional
+	WAL *VolumeSizingStatus `json:"wal,omitempty"`
+
+	// Tablespaces sizing status.
+	// +optional
+	Tablespaces map[string]*VolumeSizingStatus `json:"tablespaces,omitempty"`
+}
+
+// VolumeSizingState represents the state of a volume in dynamic sizing.
+type VolumeSizingState string
+
+const (
+	// VolumeSizingStateBalanced indicates the volume is within target buffer.
+	VolumeSizingStateBalanced VolumeSizingState = "Balanced"
+
+	// VolumeSizingStateNeedsGrow indicates the volume is below target buffer but not emergency.
+	VolumeSizingStateNeedsGrow VolumeSizingState = "NeedsGrow"
+
+	// VolumeSizingStateEmergency indicates the volume is in emergency growth condition.
+	VolumeSizingStateEmergency VolumeSizingState = "Emergency"
+
+	// VolumeSizingStatePendingGrowth indicates growth is queued waiting for window.
+	VolumeSizingStatePendingGrowth VolumeSizingState = "PendingGrowth"
+
+	// VolumeSizingStateResizing indicates the volume is currently being resized by the provider.
+	VolumeSizingStateResizing VolumeSizingState = "Resizing"
+
+	// VolumeSizingStateAtLimit indicates the volume has reached its configured limit.
+	VolumeSizingStateAtLimit VolumeSizingState = "AtLimit"
+
+	// VolumeSizingStateWaitingForDiskStatus indicates we're waiting for disk status from instances.
+	VolumeSizingStateWaitingForDiskStatus VolumeSizingState = "WaitingForDiskStatus"
+)
+
+// VolumeSizingStatus tracks the sizing state of a logical volume.
+type VolumeSizingStatus struct {
+	// EffectiveSize is the current target size for new PVCs.
+	// +optional
+	EffectiveSize string `json:"effectiveSize,omitempty"`
+
+	// TargetSize is the calculated ideal size based on usage + buffer.
+	// +optional
+	TargetSize string `json:"targetSize,omitempty"`
+
+	// ActualSizes maps instance names to their current PVC sizes.
+	// +optional
+	ActualSizes map[string]string `json:"actualSizes,omitempty"`
+
+	// State is the current status of the logical volume: Balanced, NeedsGrow, Emergency,
+	// PendingGrowth, Resizing, AtLimit, WaitingForDiskStatus.
+	// +kubebuilder:validation:Enum=Balanced;NeedsGrow;Emergency;PendingGrowth;Resizing;AtLimit;WaitingForDiskStatus
+	// +optional
+	State VolumeSizingState `json:"state,omitempty"`
+
+	// LastAction records the most recent sizing operation.
+	// +optional
+	LastAction *SizingAction `json:"lastAction,omitempty"`
+
+	// Budget tracks daily operation limits.
+	// +optional
+	Budget *BudgetStatus `json:"budget,omitempty"`
+
+	// NextMaintenanceWindow is the timestamp when pending operations can execute.
+	// +optional
+	NextMaintenanceWindow *metav1.Time `json:"nextMaintenanceWindow,omitempty"`
+
+	// Message provides additional context about the current state.
+	// For example, when State is "WaitingForDiskStatus", this field
+	// explains why disk status is unavailable.
+	// +optional
+	Message string `json:"message,omitempty"`
+}
+
+// SizingAction records a sizing operation.
+type SizingAction struct {
+	// Kind is the type of action: EmergencyGrow, ScheduledGrow.
+	// +kubebuilder:validation:Enum=EmergencyGrow;ScheduledGrow
+	// +optional
+	Kind string `json:"kind,omitempty"`
+
+	// From is the size before the action.
+	// +optional
+	From string `json:"from,omitempty"`
+
+	// To is the size after the action.
+	// +optional
+	To string `json:"to,omitempty"`
+
+	// Timestamp is the time when the action occurred.
+	// +optional
+	Timestamp metav1.Time `json:"timestamp,omitempty"`
+
+	// Instance is the name of the instance affected by the action.
+	// +optional
+	Instance string `json:"instance,omitempty"`
+
+	// Result is the outcome: Success, Failed, Pending.
+	// +kubebuilder:validation:Enum=Success;Failed;Pending
+	// +optional
+	Result string `json:"result,omitempty"`
+}
+
+// BudgetStatus tracks daily resize operation budget.
+type BudgetStatus struct {
+	// ActionsLast24h is the count of resize operations in the last 24 hours.
+	// +optional
+	ActionsLast24h int `json:"actionsLast24h,omitempty"`
+
+	// AvailableForPlanned is the number of actions remaining for scheduled operations.
+	// +optional
+	AvailableForPlanned int `json:"availableForPlanned,omitempty"`
+
+	// AvailableForEmergency is the number of actions remaining for emergency operations.
+	// +optional
+	AvailableForEmergency int `json:"availableForEmergency,omitempty"`
+
+	// BudgetResetsAt is the time when the rolling 24h window resets.
+	// +optional
+	BudgetResetsAt metav1.Time `json:"budgetResetsAt,omitempty"`
 }
 
 // ImageInfo contains the information about a PostgreSQL image
@@ -2049,8 +2182,42 @@ type StorageConfiguration struct {
 	// Size of the storage. Required if not already specified in the PVC template.
 	// Changes to this field are automatically reapplied to the created PVCs.
 	// Size cannot be decreased.
+	// Mutually exclusive with Request/Limit dynamic sizing fields.
 	// +optional
 	Size string `json:"size,omitempty"`
+
+	// Request is the minimum provisioned storage size (floor).
+	// When set with Limit, enables dynamic sizing mode.
+	// The operator will never shrink below this value.
+	// Mutually exclusive with Size.
+	// +optional
+	Request string `json:"request,omitempty"`
+
+	// Limit is the maximum provisioned storage size (ceiling).
+	// When set with Request, enables dynamic sizing mode.
+	// The operator will never grow beyond this value.
+	// Mutually exclusive with Size.
+	// +optional
+	Limit string `json:"limit,omitempty"`
+
+	// TargetBuffer is the desired free space percentage (5-50%).
+	// Only applies when Request and Limit are set (dynamic sizing mode).
+	// The operator grows storage when free space drops below this percentage.
+	// +kubebuilder:validation:Minimum=5
+	// +kubebuilder:validation:Maximum=50
+	// +kubebuilder:default:=20
+	// +optional
+	TargetBuffer *int `json:"targetBuffer,omitempty"`
+
+	// MaintenanceWindow defines when non-urgent sizing operations occur.
+	// Only applies when Request and Limit are set (dynamic sizing mode).
+	// +optional
+	MaintenanceWindow *MaintenanceWindowConfig `json:"maintenanceWindow,omitempty"`
+
+	// EmergencyGrow controls growth outside the maintenance window.
+	// Only applies when Request and Limit are set (dynamic sizing mode).
+	// +optional
+	EmergencyGrow *EmergencyGrowConfig `json:"emergencyGrow,omitempty"`
 
 	// Resize existent PVCs, defaults to true
 	// +optional
@@ -2060,6 +2227,54 @@ type StorageConfiguration struct {
 	// Template to be used to generate the Persistent Volume Claim
 	// +optional
 	PersistentVolumeClaimTemplate *corev1.PersistentVolumeClaimSpec `json:"pvcTemplate,omitempty"`
+}
+
+// MaintenanceWindowConfig defines when non-urgent sizing operations can occur.
+type MaintenanceWindowConfig struct {
+	// Schedule in cron syntax: "second minute hour day-of-month month day-of-week"
+	// This uses the same 6-field format as ScheduledBackup.
+	// Examples: "0 0 3 * * *" (daily at 3 AM), "0 0 3 * * 0" (Sundays at 3 AM)
+	// +kubebuilder:default:="0 0 3 * * *"
+	Schedule string `json:"schedule,omitempty"`
+
+	// Duration of the maintenance window.
+	// +kubebuilder:default:="2h"
+	Duration string `json:"duration,omitempty"`
+
+	// Timezone for interpreting the schedule.
+	// +kubebuilder:default:="UTC"
+	Timezone string `json:"timezone,omitempty"`
+}
+
+// EmergencyGrowConfig controls emergency growth outside maintenance windows.
+type EmergencyGrowConfig struct {
+	// Enabled allows emergency growth outside maintenance windows.
+	// +kubebuilder:default:=true
+	Enabled *bool `json:"enabled,omitempty"`
+
+	// CriticalThreshold is the usage percentage that triggers emergency growth.
+	// +kubebuilder:validation:Minimum=80
+	// +kubebuilder:validation:Maximum=99
+	// +kubebuilder:default:=95
+	CriticalThreshold int `json:"criticalThreshold,omitempty"`
+
+	// CriticalMinimumFree triggers emergency growth when free space drops below this value.
+	// +kubebuilder:default:="1Gi"
+	CriticalMinimumFree string `json:"criticalMinimumFree,omitempty"`
+
+	// ExceedLimitOnEmergency allows growth beyond Limit as a last resort.
+	// Use with caution - this can lead to unexpected costs.
+	// +kubebuilder:default:=false
+	ExceedLimitOnEmergency *bool `json:"exceedLimitOnEmergency,omitempty"`
+
+	// MaxActionsPerDay limits total resize operations per 24-hour window.
+	// Cloud providers often limit volume modifications (e.g., AWS EBS ~4/day).
+	// +kubebuilder:default:=4
+	MaxActionsPerDay *int `json:"maxActionsPerDay,omitempty"`
+
+	// ReservedActionsForEmergency from the daily budget.
+	// +kubebuilder:default:=1
+	ReservedActionsForEmergency *int `json:"reservedActionsForEmergency,omitempty"`
 }
 
 // TablespaceConfiguration is the configuration of a tablespace, and includes

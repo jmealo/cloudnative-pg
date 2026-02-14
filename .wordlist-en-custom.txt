@@ -1,5 +1,9 @@
+ActionsLast
+ActualSizes
 AES
 API's
+Cooldowns
+cooldown
 APIGroup
 APIs
 ARMv
@@ -14,8 +18,14 @@ AllNamespaces
 AntiAffinity
 AppArmor
 AppArmorProfile
+ArgoCD
 Armando
 AuthQuery
+AtLimit
+Autoresize
+autoresize
+AvailableForEmergency
+AvailableForPlanned
 AuthQuerySecret
 Autoscaler
 AvailableArchitecture
@@ -24,6 +34,8 @@ AzureCredentials
 AzurePVCUpdateEnabled
 Azurite
 BDR
+BudgetResetsAt
+BudgetStatus
 BUSL
 BackupCapabilities
 BackupConfiguration
@@ -76,8 +88,11 @@ Ceph
 CertificatesConfiguration
 CertificatesStatus
 Certmanager
+CamelCase
 CiliumNetworkPolicy
 ClassName
+CriticalMinimumFree
+CriticalThreshold
 ClientCASecret
 ClientTLSSecret
 CloudNativePG
@@ -112,6 +127,7 @@ CustomResourceDefinitions
 Customizations
 DBA
 DBaaS
+DS
 DISA
 DNS
 DataBackupConfiguration
@@ -146,12 +162,16 @@ EOF
 EOL
 ESO
 EdwinaZhu
+effectiveSize
+EmergencyGrow
+EmergencyGrowConfig
 EmbeddedObjectMetadata
 EnablePDB
 Endevir
 EndpointCA
 EnsureOption
 EnterpriseDB
+ExceedLimitOnEmergency
 Enum
 EnvFrom
 EnvFromSource
@@ -186,6 +206,7 @@ GUCs
 Gabriele
 GaugeVec
 GeoSpatial
+GiB
 Gi
 GitOps
 GoArch
@@ -197,12 +218,14 @@ GrantUsageSpecType
 HH
 HashiCorp
 HistoryTags
+Homoegeneity
 Homebrew
 Huß
 IAM
 INPLACE
 IOPS
 IPv
+Idempotency
 IRSA
 IaC
 Ibryam
@@ -219,6 +242,8 @@ InstanceID
 InstanceReportedState
 IsolationCheckConfiguration
 Isovalent
+Invariants
+invariants
 Istio
 Istio's
 JSON
@@ -231,6 +256,8 @@ Krew
 KubeCon
 Kubegres
 KubernetesClusterDomain
+LabelDynamicStorage
+LastAction
 LDAP
 LDAPBindAsAuth
 LDAPBindSearchAuth
@@ -256,12 +283,15 @@ LoadBalancer
 LocalObjectReference
 MAPPEDMETRIC
 MVCC
+MaintenanceWindow
+MaintenanceWindowConfig
 ManagedConfiguration
 ManagedRoles
 ManagedRolesStatus
 ManagedService
 ManagedServices
 MaxItems
+Mealo
 MetricDescription
 MetricName
 MetricType
@@ -282,9 +312,11 @@ NOCREATEDB
 NOCREATEROLE
 NOSUPERUSER
 Namespaces
+NeedsGrow
 Nenciarini
 NetworkPolicies
 NetworkPolicy
+NextMaintenanceWindow
 NodeAffinity
 NodeMaintenanceWindow
 NodeSelector
@@ -322,7 +354,9 @@ PPROF
 PV
 PVCs
 PascalBourdier
+PascalCase
 PasswordState
+PendingGrowth
 PasswordStatus
 Patroni
 Percona
@@ -373,6 +407,7 @@ PrimaryUpdateStrategySupervised
 PrimaryUpdateStrategyUnsupervised
 PriorityClass
 PriorityClassName
+PRs
 Probe
 ProbeStrategyPgIsReady
 ProbeStrategyQuery
@@ -382,6 +417,7 @@ ProbeTerminationGracePeriod
 ProbeWithStrategy
 ProbesConfiguration
 ProjectedVolumeSource
+PrometheusRule
 Promotable
 PublicationReclaimDelete
 PublicationReclaimPolicy
@@ -396,7 +432,9 @@ PullPolicy
 PushSecret
 QoS
 QuickStart
+ralph
 RBAC
+refactorability
 README
 RHSA
 RLS
@@ -411,12 +449,14 @@ ReplicaSet
 ReplicationSlotsConfiguration
 ReplicationSlotsHAConfiguration
 ReplicationTLSSecret
+ReservedActionsForEmergency
 ResizingPVC
 ResourceRequirements
 ResourceVersion
 RestoreJobHook
 RestoreJobHookCapabilities
 RetentionPolicy
+retriable
 RevokeUsageSpecType
 RoleBinding
 RoleConfiguration
@@ -435,6 +475,7 @@ SDK
 SELinux
 SHA
 SLA
+SLO
 SLSA
 SPDX
 SPoF
@@ -449,6 +490,8 @@ ScheduledBackupList
 ScheduledBackupSpec
 ScheduledBackupStatus
 ScheduledBackups
+ScheduledGrow
+ScheduledShrink
 SchemaSpec
 Scorsolini
 Seccomp
@@ -457,6 +500,7 @@ SecretKeySelector
 SecretRefs
 SecretStore
 SecretVersion
+SizingAction
 SecretsResourceVersion
 SecurityContextConstraints
 Seealso
@@ -491,7 +535,10 @@ StartupProbe
 StatefulSets
 StorageClass
 StorageConfiguration
+StorageSizing
+StorageSizingStatus
 Storages
+Strawman
 SubscriptionReclaimDelete
 SubscriptionReclaimPolicy
 SubscriptionReclaimRetain
@@ -506,6 +553,7 @@ SynchronizeReplicasConfiguration
 SynchronousReplicaConfiguration
 SynchronousReplicaConfigurationMethod
 SystemID
+TBD
 TCP
 TLS
 TLSv
@@ -520,6 +568,7 @@ TablespaceStatus
 TablespaceStatusPendingReconciliation
 TablespaceStatusReconciled
 Tablespaces
+TargetSize
 TemporaryData
 TimelineId
 TopologyKey
@@ -546,7 +595,9 @@ VolumeSnapshot
 VolumeSnapshotClass
 VolumeSnapshotConfiguration
 VolumeSnapshots
+VolumeSizingStatus
 WAL
+WaitingForDiskStatus
 WALArchiver
 WALBackupConfiguration
 WALCapabilities
@@ -672,7 +723,9 @@ bootstrappgbasebackup
 bootstraprecovery
 br
 bs
+budgetstatus
 builtinLocale
+bkp
 bw
 byStatus
 bypassrls
@@ -823,6 +876,7 @@ dn
 dns
 dockle
 dod
+ds
 downtimes
 dvcmQ
 dwm
@@ -832,6 +886,7 @@ ecdsa
 edb
 eks
 embeddedobjectmetadata
+emergencygrowconfig
 enableAlterSystem
 enableInstancePprof
 enablePDB
@@ -914,6 +969,7 @@ govulncheck
 grafana
 gzip
 hanshal
+hardcode
 hardcoded
 hashicorp
 hba
@@ -1055,6 +1111,7 @@ mTLS
 macOS
 majorVersion
 majorVersionUpgradeFromImage
+maintenancewindowconfig
 malcolm
 mallocs
 managedRoleSecretVersion
@@ -1066,8 +1123,10 @@ managedservices
 matchExpressions
 matchLabels
 mateusoliveira
+maxActionsPerDay
 maxClientConnections
 maxParallel
+maxStep
 maxStandbyNamesFromCluster
 maxSyncReplicas
 maximumLag
@@ -1085,6 +1144,7 @@ microservices
 microsoft
 minApplyDelay
 minKubeVersion
+minStep
 minSyncReplicas
 minikube
 minio
@@ -1245,6 +1305,7 @@ postgresqlcnpgiov
 ppc
 pprof
 pre
+preflight
 preferredDuringSchedulingIgnoredDuringExecution
 preload
 prepended
@@ -1326,12 +1387,15 @@ resourcerequirements
 restoreAdditionalCommandArgs
 restoreJobHookCapabilities
 resync
+resumable
 retentionPolicy
+reviewable
 retryable
 reusePVC
 ro
 robfig
 roleRef
+rst
 roleconfiguration
 rolestatus
 rollout
@@ -1398,6 +1462,8 @@ shmmax
 shusaan
 sig
 sigs
+sizeRange
+sizingaction
 sigstore
 singlenamespace
 slotPrefix
@@ -1445,6 +1511,7 @@ storageSasToken
 storageclass
 storageclasses
 storageconfiguration
+storagesizingstatus
 strflocaltime
 subcommand
 subcommands
@@ -1481,6 +1548,7 @@ systemd
 sysv
 tAc
 tableExpression
+targetBuffer
 tablesInSchema
 tablespace
 tablespaceClassName
@@ -1523,6 +1591,7 @@ toto
 transactionID
 transactional
 transactionid
+tunable
 tx
 ubi
 ui
@@ -1563,6 +1632,7 @@ volumeSnapshot
 volumeSnapshots
 volumesnapshot
 volumesnapshotconfiguration
+volumesizingstatus
 waitForArchive
 wal
 walCapabilities
@@ -1577,6 +1647,7 @@ webserver
 webtest
 wp
 writeService
+writeback
 wsl
 www
 xact
@@ -1584,5 +1655,6 @@ xlog
 xml
 xz
 yaml
+yf
 yml
 zstd
