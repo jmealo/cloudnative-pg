@@ -856,7 +856,14 @@ func executeAction(
 		return nil
 	}
 
-	return updateStatusAfterAction(cluster, result)
+	// Update status to record the successful action. If this fails, log a warning
+	// but don't fail the reconciliation since the PVC patches already succeeded.
+	// The status will be corrected on the next reconcile.
+	if err := updateStatusAfterAction(cluster, result); err != nil {
+		contextLogger.Warning("Failed to update status after storage action, will retry on next reconcile",
+			"error", err)
+	}
+	return nil
 }
 
 func patchPVCsForVolume(
@@ -944,18 +951,21 @@ func updateStatusAfterAction(cluster *apiv1.Cluster, result *ReconcileResult) er
 		}
 	}
 
-	if status != nil && cfg != nil {
-		status.LastAction = &apiv1.SizingAction{
-			Kind:      string(result.Action),
-			From:      result.CurrentSize.String(),
-			To:        result.TargetSize.String(),
-			Timestamp: metav1.Now(),
-			Instance:  result.InstanceName,
-			Result:    "Success",
-		}
-		status.EffectiveSize = result.TargetSize.String()
-		status.Budget = IncrementBudgetUsage(cfg, status)
+	if status == nil || cfg == nil {
+		return fmt.Errorf("cannot update status after action: volume status or config not found for %s %s",
+			result.VolumeType, result.TablespaceName)
 	}
+
+	status.LastAction = &apiv1.SizingAction{
+		Kind:      string(result.Action),
+		From:      result.CurrentSize.String(),
+		To:        result.TargetSize.String(),
+		Timestamp: metav1.Now(),
+		Instance:  result.InstanceName,
+		Result:    "Success",
+	}
+	status.EffectiveSize = result.TargetSize.String()
+	status.Budget = IncrementBudgetUsage(cfg, status)
 	return nil
 }
 
