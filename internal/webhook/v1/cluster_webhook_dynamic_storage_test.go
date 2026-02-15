@@ -606,5 +606,4 @@ var _ = Describe("dynamic storage validation", func() {
 			Expect(result).To(BeEmpty())
 		})
 	})
-
 })

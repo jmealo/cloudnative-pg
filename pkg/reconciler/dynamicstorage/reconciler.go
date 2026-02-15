@@ -69,6 +69,11 @@ const (
 	VolumeTypeTablespace VolumeType = "tablespace"
 )
 
+const (
+	// unknownPodName is used when pod name cannot be determined from status.
+	unknownPodName = "unknown"
+)
+
 // ReconcileResult contains the result of a sizing evaluation.
 type ReconcileResult struct {
 	Action         ActionType
@@ -186,7 +191,7 @@ func reconcileDataVolume(
 			var instancesWithoutDiskStatus []string
 			var instanceErrors []string
 			for _, status := range instanceStatuses.Items {
-				podName := "unknown"
+				podName := unknownPodName
 				if status.Pod != nil {
 					podName = status.Pod.Name
 				}
@@ -326,7 +331,7 @@ func reconcileWALVolume(
 			var instancesWithoutDiskStatus []string
 			var instanceErrors []string
 			for _, status := range instanceStatuses.Items {
-				podName := "unknown"
+				podName := unknownPodName
 				if status.Pod != nil {
 					podName = status.Pod.Name
 				}
@@ -425,7 +430,7 @@ func reconcileTablespaces(
 				cluster.Status.StorageSizing.Tablespaces[tbs.Name].State = apiv1.VolumeSizingStateWaitingForDiskStatus
 				var tablespaceErrors []string
 				for _, status := range instanceStatuses.Items {
-					podName := "unknown"
+					podName := unknownPodName
 					if status.Pod != nil {
 						podName = status.Pod.Name
 					}
