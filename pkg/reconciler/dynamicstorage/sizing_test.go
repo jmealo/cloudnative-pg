@@ -329,5 +329,15 @@ var _ = Describe("sizing", func() {
 			cfg := &apiv1.StorageConfiguration{}
 			Expect(NeedsGrowth(cfg, 0, 0)).To(BeFalse())
 		})
+
+		It("return true when used exceeds total (transient state)", func() {
+			cfg := &apiv1.StorageConfiguration{
+				TargetBuffer: ptr.To(20),
+			}
+			// Transient state: used > total (e.g., race condition or filesystem reporting lag)
+			total := uint64(10 * 1024 * 1024 * 1024) // 10 Gi
+			used := uint64(11 * 1024 * 1024 * 1024)  // 11 Gi (exceeds total)
+			Expect(NeedsGrowth(cfg, total, used)).To(BeTrue())
+		})
 	})
 })

@@ -209,6 +209,11 @@ func NeedsGrowth(cfg *apiv1.StorageConfiguration, totalBytes, usedBytes uint64) 
 		return false
 	}
 
+	// Guard against uint64 underflow: if used >= total, disk is full
+	if usedBytes >= totalBytes {
+		return true
+	}
+
 	targetBuffer := GetTargetBuffer(cfg)
 	currentFreePercent := float64(totalBytes-usedBytes) / float64(totalBytes) * 100
 
