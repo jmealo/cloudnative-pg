@@ -73,6 +73,12 @@ const (
 	poolerClusterKey              = ".spec.cluster.name"
 	disableDefaultQueriesSpecPath = ".spec.monitoring.disableDefaultQueries"
 	imageCatalogKey               = ".spec.imageCatalog.name"
+
+	// dynamicStorageRequeueInterval is the interval at which the controller
+	// requeues for dynamic storage monitoring when dynamic sizing is enabled.
+	// This ensures periodic disk usage checks to trigger storage growth when
+	// thresholds are crossed.
+	dynamicStorageRequeueInterval = 30 * time.Second
 )
 
 var apiSGVString = apiv1.SchemeGroupVersion.String()
@@ -608,7 +614,7 @@ func (r *ClusterReconciler) reconcile(ctx context.Context, cluster *apiv1.Cluste
 	// to trigger storage growth when thresholds are crossed. Without this, the
 	// reconciler would only run on watch events, missing disk usage changes.
 	if dynamicstorage.IsAnyDynamicSizingEnabled(cluster) {
-		dynamicResult := ctrl.Result{RequeueAfter: 30 * time.Second}
+		dynamicResult := ctrl.Result{RequeueAfter: dynamicStorageRequeueInterval}
 		if statusResult.RequeueAfter > 0 && statusResult.RequeueAfter < dynamicResult.RequeueAfter {
 			return statusResult, nil
 		}
