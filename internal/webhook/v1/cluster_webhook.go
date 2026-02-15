@@ -2099,17 +2099,31 @@ func validateDynamicStorageChange(
 ) field.ErrorList {
 	var result field.ErrorList
 
-	// Parse old and new request/limit values
-	newRequest, _ := resource.ParseQuantity(newStorage.Request)
-	oldLimit, _ := resource.ParseQuantity(oldStorage.Limit)
-	newLimit, _ := resource.ParseQuantity(newStorage.Limit)
+	// Parse and validate new request
+	newRequest, errReq := resource.ParseQuantity(newStorage.Request)
+	if errReq != nil {
+		result = append(result, field.Invalid(
+			structPath.Child("request"),
+			newStorage.Request,
+			fmt.Sprintf("invalid request quantity: %v", errReq)))
+		return result
+	}
+
+	// Parse and validate new limit
+	newLimit, errLimit := resource.ParseQuantity(newStorage.Limit)
+	if errLimit != nil {
+		result = append(result, field.Invalid(
+			structPath.Child("limit"),
+			newStorage.Limit,
+			fmt.Sprintf("invalid limit quantity: %v", errLimit)))
+		return result
+	}
 
 	// Request can change freely - it's just a floor for the controller
 	// No validation needed for request changes
 
 	// Limit can be increased (allows growing ceiling)
 	// Decreasing limit is allowed but will prevent further growth
-	_ = oldLimit // Acknowledge that we intentionally don't restrict limit decreases
 
 	// Ensure new request <= new limit
 	if newRequest.Cmp(newLimit) > 0 {
