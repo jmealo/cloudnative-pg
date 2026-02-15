@@ -60,9 +60,9 @@ func IsMaintenanceWindowOpen(cfg *apiv1.StorageConfiguration) bool {
 
 	cronSchedule, err := cronParser.Parse(schedule)
 	if err != nil {
-		log.Warning("Failed to parse maintenance window cron schedule, treating window as closed",
+		log.Error(err, "Failed to parse maintenance window cron schedule, treating window as closed",
 			"schedule", schedule,
-			"error", err)
+			"configPath", "spec.storageConfiguration.maintenanceWindow.schedule")
 		return false
 	}
 
@@ -71,9 +71,9 @@ func IsMaintenanceWindowOpen(cfg *apiv1.StorageConfiguration) bool {
 	if cfg.MaintenanceWindow.Timezone != "" {
 		parsedLoc, err := time.LoadLocation(cfg.MaintenanceWindow.Timezone)
 		if err != nil {
-			log.Warning("Failed to parse maintenance window timezone, falling back to UTC",
+			log.Error(err, "Failed to parse maintenance window timezone, falling back to UTC",
 				"timezone", cfg.MaintenanceWindow.Timezone,
-				"error", err)
+				"configPath", "spec.storageConfiguration.maintenanceWindow.timezone")
 		} else {
 			loc = parsedLoc
 		}
@@ -84,10 +84,10 @@ func IsMaintenanceWindowOpen(cfg *apiv1.StorageConfiguration) bool {
 	if cfg.MaintenanceWindow.Duration != "" {
 		parsedDuration, err := time.ParseDuration(cfg.MaintenanceWindow.Duration)
 		if err != nil {
-			log.Warning("Failed to parse maintenance window duration, falling back to default",
+			log.Error(err, "Failed to parse maintenance window duration, falling back to default",
 				"duration", cfg.MaintenanceWindow.Duration,
 				"default", DefaultMaintenanceDuration,
-				"error", err)
+				"configPath", "spec.storageConfiguration.maintenanceWindow.duration")
 		} else {
 			duration = parsedDuration
 		}
@@ -119,9 +119,9 @@ func NextMaintenanceWindow(cfg *apiv1.StorageConfiguration) *time.Time {
 
 	cronSchedule, err := cronParser.Parse(schedule)
 	if err != nil {
-		log.Warning("Failed to parse maintenance window cron schedule for next window calculation",
+		log.Error(err, "Failed to parse maintenance window cron schedule for next window calculation",
 			"schedule", schedule,
-			"error", err)
+			"configPath", "spec.storageConfiguration.maintenanceWindow.schedule")
 		return nil
 	}
 
@@ -130,9 +130,9 @@ func NextMaintenanceWindow(cfg *apiv1.StorageConfiguration) *time.Time {
 	if cfg.MaintenanceWindow.Timezone != "" {
 		parsedLoc, err := time.LoadLocation(cfg.MaintenanceWindow.Timezone)
 		if err != nil {
-			log.Warning("Failed to parse maintenance window timezone, falling back to UTC",
+			log.Error(err, "Failed to parse maintenance window timezone, falling back to UTC",
 				"timezone", cfg.MaintenanceWindow.Timezone,
-				"error", err)
+				"configPath", "spec.storageConfiguration.maintenanceWindow.timezone")
 		} else {
 			loc = parsedLoc
 		}
