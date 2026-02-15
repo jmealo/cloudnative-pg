@@ -21,13 +21,17 @@ package dynamicstorage
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrs "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	apiv1 "github.com/cloudnative-pg/cloudnative-pg/api/v1"
@@ -38,6 +42,39 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 )
+
+type conflictStatusClient struct {
+	client.Client
+	statusUpdateConflicts int
+}
+
+type conflictStatusWriter struct {
+	client.SubResourceWriter
+	parent *conflictStatusClient
+}
+
+func (c *conflictStatusClient) Status() client.SubResourceWriter {
+	return &conflictStatusWriter{
+		SubResourceWriter: c.Client.Status(),
+		parent:            c,
+	}
+}
+
+func (w *conflictStatusWriter) Update(
+	ctx context.Context,
+	obj client.Object,
+	opts ...client.SubResourceUpdateOption,
+) error {
+	if w.parent.statusUpdateConflicts > 0 {
+		w.parent.statusUpdateConflicts--
+		return apierrs.NewConflict(
+			schema.GroupResource{Group: "postgresql.cnpg.io", Resource: "clusters"},
+			obj.GetName(),
+			errors.New("simulated optimistic lock conflict"),
+		)
+	}
+	return w.SubResourceWriter.Update(ctx, obj, opts...)
+}
 
 var _ = Describe("reconciler", func() {
 	var (
@@ -436,46 +473,6 @@ var _ = Describe("reconciler", func() {
 			Expect(res.IsZero()).To(BeTrue())
 
 			Expect(cluster.Status.StorageSizing.Data.State).To(Equal(apiv1.VolumeSizingStatePendingGrowth))
-		})
-	})
-
-	Describe("maxPVCSize", func() {
-		It("return zero for empty map", func() {
-			result := maxPVCSize(nil)
-			Expect(result.IsZero()).To(BeTrue())
-		})
-
-		It("return zero for empty non-nil map", func() {
-			result := maxPVCSize(map[string]string{})
-			Expect(result.IsZero()).To(BeTrue())
-		})
-
-		It("return the single entry size", func() {
-			sizes := map[string]string{"instance-1": "5Gi"}
-			result := maxPVCSize(sizes)
-			expected := resource.MustParse("5Gi")
-			Expect(result.Cmp(expected)).To(Equal(0))
-		})
-
-		It("return the largest of multiple entries", func() {
-			sizes := map[string]string{
-				"instance-1": "5Gi",
-				"instance-2": "10Gi",
-				"instance-3": "7Gi",
-			}
-			result := maxPVCSize(sizes)
-			expected := resource.MustParse("10Gi")
-			Expect(result.Cmp(expected)).To(Equal(0))
-		})
-
-		It("skip invalid entries", func() {
-			sizes := map[string]string{
-				"instance-1": "5Gi",
-				"instance-2": "not-a-size",
-			}
-			result := maxPVCSize(sizes)
-			expected := resource.MustParse("5Gi")
-			Expect(result.Cmp(expected)).To(Equal(0))
 		})
 	})
 
@@ -1121,6 +1118,139 @@ var _ = Describe("reconciler", func() {
 			result := evaluateSizing(cluster, &cluster.Spec.StorageConfiguration, VolumeTypeData, "", diskStatus, pvcSizes)
 			Expect(result.Action).To(Equal(ActionEmergencyGrow))
 			Expect(result.TargetSize.Cmp(resource.MustParse("10Gi"))).To(BeNumerically(">", 0))
+		})
+	})
+
+	Describe("helper function coverage", func() {
+		Describe("GetEffectiveSizeForNewPVC", func() {
+			It("return static size when dynamic sizing is disabled", func() {
+				cluster.Spec.StorageConfiguration = apiv1.StorageConfiguration{Size: "10Gi"}
+				Expect(GetEffectiveSizeForNewPVC(cluster, VolumeTypeData, "")).To(Equal("10Gi"))
+			})
+
+			It("return request when dynamic sizing is enabled without effective status", func() {
+				cluster.Spec.StorageConfiguration = apiv1.StorageConfiguration{
+					Request: "10Gi",
+					Limit:   "100Gi",
+				}
+				cluster.Status.StorageSizing = nil
+				Expect(GetEffectiveSizeForNewPVC(cluster, VolumeTypeData, "")).To(Equal("10Gi"))
+			})
+
+			It("return effective size from status when available", func() {
+				cluster.Spec.StorageConfiguration = apiv1.StorageConfiguration{
+					Request: "10Gi",
+					Limit:   "100Gi",
+				}
+				cluster.Status.StorageSizing = &apiv1.StorageSizingStatus{
+					Data: &apiv1.VolumeSizingStatus{
+						EffectiveSize: "25Gi",
+					},
+				}
+				Expect(GetEffectiveSizeForNewPVC(cluster, VolumeTypeData, "")).To(Equal("25Gi"))
+			})
+
+			It("return empty string for missing tablespace", func() {
+				cluster.Spec.Tablespaces = []apiv1.TablespaceConfiguration{}
+				Expect(GetEffectiveSizeForNewPVC(cluster, VolumeTypeTablespace, "missing")).To(Equal(""))
+			})
+		})
+
+		Describe("collectActualSizes", func() {
+			It("prefer status capacity and fallback to spec request", func() {
+				pvcs := []corev1.PersistentVolumeClaim{
+					{
+						ObjectMeta: metav1.ObjectMeta{
+							Name: "cluster-1",
+							Labels: map[string]string{
+								utils.PvcRoleLabelName:      string(utils.PVCRolePgData),
+								utils.InstanceNameLabelName: "cluster-1",
+							},
+						},
+						Status: corev1.PersistentVolumeClaimStatus{
+							Capacity: corev1.ResourceList{
+								corev1.ResourceStorage: resource.MustParse("10Gi"),
+							},
+						},
+					},
+					{
+						ObjectMeta: metav1.ObjectMeta{
+							Name: "cluster-2",
+							Labels: map[string]string{
+								utils.PvcRoleLabelName:      string(utils.PVCRolePgData),
+								utils.InstanceNameLabelName: "cluster-2",
+							},
+						},
+						Spec: corev1.PersistentVolumeClaimSpec{
+							Resources: corev1.VolumeResourceRequirements{
+								Requests: corev1.ResourceList{
+									corev1.ResourceStorage: resource.MustParse("8Gi"),
+								},
+							},
+						},
+					},
+				}
+
+				actual := collectActualSizes(pvcs, VolumeTypeData, "")
+				Expect(actual).To(HaveKeyWithValue("cluster-1", "10Gi"))
+				Expect(actual).To(HaveKeyWithValue("cluster-2", "8Gi"))
+			})
+
+			It("skip PVCs without instance labels", func() {
+				pvcs := []corev1.PersistentVolumeClaim{
+					{
+						ObjectMeta: metav1.ObjectMeta{
+							Name: "orphan",
+							Labels: map[string]string{
+								utils.PvcRoleLabelName: string(utils.PVCRolePgData),
+							},
+						},
+					},
+				}
+				Expect(collectActualSizes(pvcs, VolumeTypeData, "")).To(BeEmpty())
+			})
+		})
+
+		Describe("collectDiskStatusForVolume", func() {
+			It("return nil for nil status list", func() {
+				Expect(collectDiskStatusForVolume(nil, VolumeTypeData, "")).To(BeNil())
+			})
+
+			It("collect data disk status by pod name", func() {
+				statuses := &postgres.PostgresqlStatusList{
+					Items: []postgres.PostgresqlStatus{
+						{
+							Pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "cluster-1"}},
+							DiskStatus: &postgres.DiskStatus{
+								TotalBytes:     10,
+								UsedBytes:      5,
+								AvailableBytes: 5,
+								PercentUsed:    50,
+							},
+						},
+					},
+				}
+
+				disk := collectDiskStatusForVolume(statuses, VolumeTypeData, "")
+				Expect(disk).To(HaveLen(1))
+				Expect(disk).To(HaveKey("cluster-1"))
+				Expect(disk["cluster-1"].UsedBytes).To(Equal(uint64(5)))
+			})
+		})
+
+		Describe("updateStatusAfterAction", func() {
+			It("return error when volume status is missing", func() {
+				cluster.Status.StorageSizing = nil
+				result := &ReconcileResult{
+					Action:      ActionEmergencyGrow,
+					VolumeType:  VolumeTypeData,
+					CurrentSize: resource.MustParse("5Gi"),
+					TargetSize:  resource.MustParse("10Gi"),
+				}
+
+				err := updateStatusAfterAction(cluster, result)
+				Expect(err).To(HaveOccurred())
+			})
 		})
 	})
 })

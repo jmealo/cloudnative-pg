@@ -486,9 +486,11 @@ func evaluateSizing(
 	currentSize := minPVCSize(pvcSizes)
 	pvcSizesAvailable := !currentSize.IsZero()
 	if currentSize.IsZero() {
-		// Fallback to filesystem TotalBytes if no PVC sizes available.
-		// This is only safe for emergency conditions where we must act regardless.
-		// For scheduled growth, we need accurate PVC sizes to avoid false growth.
+		// Fallback to filesystem TotalBytes if no PVC sizes are available.
+		// This sets pvcSizesAvailable=false, which:
+		// - Allows emergency growth evaluation to proceed
+		// - Blocks scheduled growth in evaluateGrowth ("waiting for PVC size data")
+		// This preserves emergency behavior while preventing false scheduled growth.
 		log.Warning("PVC size data unavailable, falling back to filesystem TotalBytes",
 			"volumeType", volumeType,
 			"tablespaceName", tbsName,
@@ -573,37 +575,6 @@ func findMaxUsage(diskStatusMap map[string]*DiskInfo) (uint64, uint64, uint64, s
 		minAvailable = 0
 	}
 	return maxUsed, maxTotal, minAvailable, highestUsageInstance
-}
-
-// maxPVCSize returns the largest PVC capacity from the provided map.
-// This gives the authoritative current volume size, unaffected by filesystem overhead.
-// Returns a zero quantity if all PVCs fail to parse or if the map is empty.
-func maxPVCSize(pvcSizes map[string]string) resource.Quantity {
-	var maxSize resource.Quantity
-	parseErrors := 0
-	for instanceName, sizeStr := range pvcSizes {
-		qty, err := resource.ParseQuantity(sizeStr)
-		if err != nil {
-			parseErrors++
-			log.Warning("Failed to parse PVC size quantity, skipping",
-				"instance", instanceName,
-				"size", sizeStr,
-				"error", err)
-			continue
-		}
-		if qty.Cmp(maxSize) > 0 {
-			maxSize = qty
-		}
-	}
-	// Log an error if all PVCs failed to parse - this indicates a serious problem
-	if len(pvcSizes) > 0 && parseErrors == len(pvcSizes) {
-		log.Error(
-			fmt.Errorf("all %d PVC size quantities failed to parse", len(pvcSizes)),
-			"PVC size data unavailable",
-			"totalPVCs", len(pvcSizes),
-			"parseErrors", parseErrors)
-	}
-	return maxSize
 }
 
 // minPVCSize returns the smallest PVC capacity from the provided map.
