@@ -112,6 +112,14 @@ func IsEmergencyGrowEnabled(cfg *apiv1.StorageConfiguration) bool {
 	return *cfg.EmergencyGrow.Enabled
 }
 
+// GetExceedLimitOnEmergency returns true if emergency growth can exceed the configured limit.
+func GetExceedLimitOnEmergency(cfg *apiv1.StorageConfiguration) bool {
+	if cfg == nil || cfg.EmergencyGrow == nil || cfg.EmergencyGrow.ExceedLimitOnEmergency == nil {
+		return false // default disabled
+	}
+	return *cfg.EmergencyGrow.ExceedLimitOnEmergency
+}
+
 // CalculateTargetSize calculates the ideal storage size based on used bytes and target buffer.
 // Formula: targetSize = usedBytes / (1 - targetBuffer%)
 func CalculateTargetSize(usedBytes uint64, targetBuffer int) resource.Quantity {
@@ -137,8 +145,9 @@ func CalculateTargetSize(usedBytes uint64, targetBuffer int) resource.Quantity {
 }
 
 // CalculateEmergencyGrowthSize calculates the new size for emergency growth.
-// It grows by GrowthStepPercent of current size, up to the limit.
-func CalculateEmergencyGrowthSize(currentSize, limit resource.Quantity) resource.Quantity {
+// It grows by GrowthStepPercent of current size. When exceedLimit is false,
+// the growth is capped at limit.
+func CalculateEmergencyGrowthSize(currentSize, limit resource.Quantity, exceedLimit bool) resource.Quantity {
 	currentBytes := currentSize.Value()
 	limitBytes := limit.Value()
 
@@ -152,7 +161,7 @@ func CalculateEmergencyGrowthSize(currentSize, limit resource.Quantity) resource
 	}
 
 	newBytes := currentBytes + growthBytes
-	if newBytes > limitBytes {
+	if !exceedLimit && newBytes > limitBytes {
 		newBytes = limitBytes
 	}
 

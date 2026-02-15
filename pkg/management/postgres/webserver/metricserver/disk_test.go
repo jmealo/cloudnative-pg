@@ -22,7 +22,9 @@ package metricserver
 import (
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	apiv1 "github.com/cloudnative-pg/cloudnative-pg/api/v1"
 	"github.com/cloudnative-pg/cloudnative-pg/pkg/management/postgres"
 	postgresstatus "github.com/cloudnative-pg/cloudnative-pg/pkg/postgres"
 
@@ -85,6 +87,68 @@ var _ = Describe("diskCollector", func() {
 				Expect(seen).To(BeFalse(), "Duplicate metric found for %s with labels %s", mfName, labelStr)
 				labelsSeen[labelStr] = struct{}{}
 			}
+		}
+	})
+
+	It("should expose budget metrics per tablespace without label collisions", func() {
+		instance := postgres.NewInstance()
+		collector := newDiskCollector(instance)
+
+		collector.getStatus = func() (*postgresstatus.PostgresqlStatus, error) {
+			return &postgresstatus.PostgresqlStatus{}, nil
+		}
+		collector.getCluster = func() (*apiv1.Cluster, error) {
+			return &apiv1.Cluster{
+				Status: apiv1.ClusterStatus{
+					StorageSizing: &apiv1.StorageSizingStatus{
+						Data: &apiv1.VolumeSizingStatus{
+							Budget: &apiv1.BudgetStatus{
+								ActionsLast24h:        1,
+								AvailableForPlanned:   2,
+								AvailableForEmergency: 1,
+								BudgetResetsAt:        metav1.Now(),
+							},
+						},
+						Tablespaces: map[string]*apiv1.VolumeSizingStatus{
+							"fast": {
+								Budget: &apiv1.BudgetStatus{
+									ActionsLast24h:        2,
+									AvailableForPlanned:   1,
+									AvailableForEmergency: 1,
+									BudgetResetsAt:        metav1.Now(),
+								},
+							},
+							"bulk": {
+								Budget: &apiv1.BudgetStatus{
+									ActionsLast24h:        3,
+									AvailableForPlanned:   0,
+									AvailableForEmergency: 1,
+									BudgetResetsAt:        metav1.Now(),
+								},
+							},
+						},
+					},
+				},
+			}, nil
+		}
+
+		reg := prometheus.NewRegistry()
+		err := reg.Register(collector)
+		Expect(err).ToNot(HaveOccurred())
+
+		metricFamilies, err := reg.Gather()
+		Expect(err).ToNot(HaveOccurred())
+
+		budgetUsed := getMetricFamily(metricFamilies, "cnpg_dynamic_storage_budget_used")
+		Expect(budgetUsed).ToNot(BeNil())
+		Expect(budgetUsed.GetMetric()).To(HaveLen(3))
+
+		labelsSeen := make(map[string]struct{})
+		for _, m := range budgetUsed.GetMetric() {
+			labelStr := formatLabels(m.GetLabel())
+			_, seen := labelsSeen[labelStr]
+			Expect(seen).To(BeFalse(), "duplicate dynamic-storage budget metric labels: %s", labelStr)
+			labelsSeen[labelStr] = struct{}{}
 		}
 	})
 })

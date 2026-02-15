@@ -99,13 +99,25 @@ type PostgresqlStatus struct {
 	// This is used by the dynamic storage sizing feature to monitor disk usage.
 	DiskStatus *DiskStatus `json:"diskStatus,omitempty"`
 
+	// DataDiskStatusError contains the latest data-volume probe error.
+	// This does not indicate that the whole instance status request failed.
+	DataDiskStatusError string `json:"dataDiskStatusError,omitempty"`
+
 	// WALDiskStatus contains filesystem statistics for the WAL volume.
 	// This is populated only when walStorage is configured.
 	WALDiskStatus *DiskStatus `json:"walDiskStatus,omitempty"`
 
+	// WALDiskStatusError contains the latest WAL-volume probe error.
+	// This does not indicate that the whole instance status request failed.
+	WALDiskStatusError string `json:"walDiskStatusError,omitempty"`
+
 	// TablespaceDiskStatus contains filesystem statistics for tablespace volumes.
 	// Maps tablespace name to disk status.
 	TablespaceDiskStatus map[string]*DiskStatus `json:"tablespaceDiskStatus,omitempty"`
+
+	// TablespaceDiskStatusErrors maps tablespace name to the latest probe error.
+	// This does not indicate that the whole instance status request failed.
+	TablespaceDiskStatusErrors map[string]string `json:"tablespaceDiskStatusErrors,omitempty"`
 
 	// This field represents the Kubelet point-of-view of the readiness
 	// status of this instance and may be slightly stale when the Kubelet has

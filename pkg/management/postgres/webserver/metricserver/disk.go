@@ -128,28 +128,28 @@ func newDiskCollector(instance *postgres.Instance) *diskCollector {
 			Subsystem: dynamicSubsystem,
 			Name:      "budget_total",
 			Help:      "Total daily operations budget",
-		}, []string{"volume_type"}),
+		}, []string{"volume_type", "tablespace"}),
 
 		budgetUsed: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: PrometheusNamespace,
 			Subsystem: dynamicSubsystem,
 			Name:      "budget_used",
 			Help:      "Operations used in last 24h",
-		}, []string{"volume_type"}),
+		}, []string{"volume_type", "tablespace"}),
 
 		budgetEmergencyReserved: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: PrometheusNamespace,
 			Subsystem: dynamicSubsystem,
 			Name:      "budget_emergency_reserved",
 			Help:      "Emergency reserve remaining",
-		}, []string{"volume_type"}),
+		}, []string{"volume_type", "tablespace"}),
 
 		nextWindowSeconds: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: PrometheusNamespace,
 			Subsystem: dynamicSubsystem,
 			Name:      "next_window_seconds",
 			Help:      "Seconds until next maintenance window",
-		}, []string{"volume_type"}),
+		}, []string{"volume_type", "tablespace"}),
 	}
 }
 
@@ -309,17 +309,19 @@ func (d *diskCollector) recordVolumeSizing(
 
 	// Budget
 	if s.Budget != nil {
-		d.budgetUsed.WithLabelValues(volumeType).Set(float64(s.Budget.ActionsLast24h))
-		d.budgetEmergencyReserved.WithLabelValues(volumeType).Set(float64(s.Budget.AvailableForEmergency))
+		d.budgetUsed.WithLabelValues(volumeType, tablespace).Set(float64(s.Budget.ActionsLast24h))
+		d.budgetEmergencyReserved.WithLabelValues(volumeType, tablespace).Set(float64(s.Budget.AvailableForEmergency))
 		// Available for planned is also useful
-		d.budgetTotal.WithLabelValues(volumeType).Set(float64(s.Budget.AvailableForPlanned + s.Budget.ActionsLast24h))
+		d.budgetTotal.WithLabelValues(volumeType, tablespace).Set(
+			float64(s.Budget.AvailableForPlanned + s.Budget.ActionsLast24h),
+		)
 	}
 
 	// Next window
 	if s.NextMaintenanceWindow != nil {
-		d.nextWindowSeconds.WithLabelValues(volumeType).Set(time.Until(s.NextMaintenanceWindow.Time).Seconds())
+		d.nextWindowSeconds.WithLabelValues(volumeType, tablespace).Set(time.Until(s.NextMaintenanceWindow.Time).Seconds())
 	} else {
-		d.nextWindowSeconds.WithLabelValues(volumeType).Set(0)
+		d.nextWindowSeconds.WithLabelValues(volumeType, tablespace).Set(0)
 	}
 }
 

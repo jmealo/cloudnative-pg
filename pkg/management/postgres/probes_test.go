@@ -55,6 +55,20 @@ var _ = Describe("probes", func() {
 		Expect(status.DiskStatus.TotalBytes).To(BeNumerically(">", 0))
 	})
 
+	It("GetStatus should surface data disk probe errors without masking status", func() {
+		instance := NewInstance()
+		instance.PgData = "/path/that/does/not/exist"
+
+		status, err := instance.GetStatus()
+		Expect(err).To(HaveOccurred())
+		Expect(status).ToNot(BeNil())
+
+		Expect(status.DataDiskStatusError).ToNot(BeEmpty())
+		Expect(status.DiskStatus).To(BeNil())
+		// ErrorMessage still reports the overall status probe error
+		Expect(status.ErrorMessage).ToNot(BeEmpty())
+	})
+
 	It("fillWalStatus should properly handle errors", func() {
 		instance := &Instance{}
 		status := &postgres.PostgresqlStatus{

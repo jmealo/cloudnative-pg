@@ -133,6 +133,22 @@ var _ = Describe("sizing", func() {
 		})
 	})
 
+	Describe("GetExceedLimitOnEmergency", func() {
+		It("return false by default", func() {
+			Expect(GetExceedLimitOnEmergency(nil)).To(BeFalse())
+			Expect(GetExceedLimitOnEmergency(&apiv1.StorageConfiguration{})).To(BeFalse())
+		})
+
+		It("return configured value", func() {
+			cfg := &apiv1.StorageConfiguration{
+				EmergencyGrow: &apiv1.EmergencyGrowConfig{
+					ExceedLimitOnEmergency: ptr.To(true),
+				},
+			}
+			Expect(GetExceedLimitOnEmergency(cfg)).To(BeTrue())
+		})
+	})
+
 	Describe("CalculateTargetSize", func() {
 		It("calculate correct target with 20% buffer", func() {
 			usedBytes := uint64(8 * 1024 * 1024 * 1024) // 8 Gi
@@ -171,7 +187,7 @@ var _ = Describe("sizing", func() {
 		It("grow by 25% of current size", func() {
 			current := resource.MustParse("100Gi")
 			limit := resource.MustParse("200Gi")
-			result := CalculateEmergencyGrowthSize(current, limit)
+			result := CalculateEmergencyGrowthSize(current, limit, false)
 			// 100 Gi + 25% = 125 Gi
 			expected := resource.MustParse("125Gi")
 			Expect(result.Cmp(expected)).To(Equal(0))
@@ -180,7 +196,7 @@ var _ = Describe("sizing", func() {
 		It("respect the limit", func() {
 			current := resource.MustParse("90Gi")
 			limit := resource.MustParse("100Gi")
-			result := CalculateEmergencyGrowthSize(current, limit)
+			result := CalculateEmergencyGrowthSize(current, limit, false)
 			// 90 Gi + 25% = 112.5 Gi, but limit is 100 Gi
 			Expect(result.Cmp(limit)).To(Equal(0))
 		})
@@ -188,9 +204,17 @@ var _ = Describe("sizing", func() {
 		It("ensure minimum growth of 1Gi", func() {
 			current := resource.MustParse("2Gi")
 			limit := resource.MustParse("100Gi")
-			result := CalculateEmergencyGrowthSize(current, limit)
+			result := CalculateEmergencyGrowthSize(current, limit, false)
 			// 2 Gi + 25% = 2.5 Gi, but min growth is 1 Gi, so 3 Gi
 			expected := resource.MustParse("3Gi")
+			Expect(result.Cmp(expected)).To(Equal(0))
+		})
+
+		It("allow growth above limit when configured", func() {
+			current := resource.MustParse("90Gi")
+			limit := resource.MustParse("100Gi")
+			result := CalculateEmergencyGrowthSize(current, limit, true)
+			expected := *resource.NewQuantity(current.Value()+current.Value()*GrowthStepPercent/100, resource.BinarySI)
 			Expect(result.Cmp(expected)).To(Equal(0))
 		})
 	})

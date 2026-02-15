@@ -479,6 +479,34 @@ var _ = Describe("reconciler", func() {
 		})
 	})
 
+	Describe("minPVCSize", func() {
+		It("return zero for empty map", func() {
+			result := minPVCSize(nil)
+			Expect(result.IsZero()).To(BeTrue())
+		})
+
+		It("return the smallest of multiple entries", func() {
+			sizes := map[string]string{
+				"instance-1": "5Gi",
+				"instance-2": "10Gi",
+				"instance-3": "7Gi",
+			}
+			result := minPVCSize(sizes)
+			expected := resource.MustParse("5Gi")
+			Expect(result.Cmp(expected)).To(Equal(0))
+		})
+
+		It("skip invalid entries", func() {
+			sizes := map[string]string{
+				"instance-1": "5Gi",
+				"instance-2": "not-a-size",
+			}
+			result := minPVCSize(sizes)
+			expected := resource.MustParse("5Gi")
+			Expect(result.Cmp(expected)).To(Equal(0))
+		})
+	})
+
 	Describe("findMaxUsage", func() {
 		It("track minAvailable independently from maxUsed instance", func() {
 			// This verifies the fix for the case where a smaller disk with less absolute
@@ -1035,6 +1063,64 @@ var _ = Describe("reconciler", func() {
 				"target should be 6Gi, got %s", result.TargetSize.String())
 			Expect(result.CurrentSize.Cmp(resource.MustParse("5Gi"))).To(Equal(0),
 				"currentSize should be 5Gi (PVC), got %s", result.CurrentSize.String())
+		})
+
+		It("use the smallest PVC size when instances diverge after partial patching", func() {
+			// instance-1 stayed at 5Gi while instance-2 already reached 10Gi.
+			// We must continue reconciling from the smallest size to avoid stalling.
+			diskStatus := map[string]*DiskInfo{
+				"instance-1": {
+					TotalBytes:     5 * 1024 * 1024 * 1024,
+					UsedBytes:      4600 * 1024 * 1024, // ~4.49Gi, growth needed
+					AvailableBytes: 520 * 1024 * 1024,
+					PercentUsed:    89.8,
+				},
+				"instance-2": {
+					TotalBytes:     10 * 1024 * 1024 * 1024,
+					UsedBytes:      4 * 1024 * 1024 * 1024,
+					AvailableBytes: 6 * 1024 * 1024 * 1024,
+					PercentUsed:    40,
+				},
+			}
+			pvcSizes := map[string]string{
+				"instance-1": "5Gi",
+				"instance-2": "10Gi",
+			}
+
+			cluster.Spec.StorageConfiguration.Request = "5Gi"
+			cluster.Spec.StorageConfiguration.EmergencyGrow = &apiv1.EmergencyGrowConfig{
+				CriticalThreshold:   99,
+				CriticalMinimumFree: "100Mi",
+			}
+
+			result := evaluateSizing(cluster, &cluster.Spec.StorageConfiguration, VolumeTypeData, "", diskStatus, pvcSizes)
+			Expect(result.Action).To(Equal(ActionScheduledGrow))
+			Expect(result.CurrentSize.Cmp(resource.MustParse("5Gi"))).To(Equal(0))
+			Expect(result.TargetSize.Cmp(resource.MustParse("6Gi"))).To(Equal(0))
+		})
+
+		It("allow emergency growth above limit when configured", func() {
+			diskStatus := map[string]*DiskInfo{
+				"instance-1": {
+					TotalBytes:     10 * 1024 * 1024 * 1024,
+					UsedBytes:      98 * 1024 * 1024 * 100, // ~9.58Gi used, emergency
+					AvailableBytes: 200 * 1024 * 1024,
+					PercentUsed:    95.8,
+				},
+			}
+			pvcSizes := map[string]string{"instance-1": "10Gi"}
+
+			cluster.Spec.StorageConfiguration.Request = "5Gi"
+			cluster.Spec.StorageConfiguration.Limit = "10Gi"
+			cluster.Spec.StorageConfiguration.EmergencyGrow = &apiv1.EmergencyGrowConfig{
+				CriticalThreshold:      90,
+				CriticalMinimumFree:    "1Gi",
+				ExceedLimitOnEmergency: ptr.To(true),
+			}
+
+			result := evaluateSizing(cluster, &cluster.Spec.StorageConfiguration, VolumeTypeData, "", diskStatus, pvcSizes)
+			Expect(result.Action).To(Equal(ActionEmergencyGrow))
+			Expect(result.TargetSize.Cmp(resource.MustParse("10Gi"))).To(BeNumerically(">", 0))
 		})
 	})
 })

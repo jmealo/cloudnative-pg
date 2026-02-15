@@ -728,6 +728,7 @@ func (instance *Instance) fillDiskStatus(result *postgres.PostgresqlStatus) {
 		// Log warning - disk status is needed for dynamic storage sizing
 		log.Warning("Failed to probe data volume disk status after retries - dynamic storage sizing will be impaired",
 			"path", pgData, "error", err)
+		result.DataDiskStatusError = err.Error()
 	} else {
 		result.DiskStatus = &postgres.DiskStatus{
 			TotalBytes:     dataStatus.TotalBytes,
@@ -747,6 +748,7 @@ func (instance *Instance) fillDiskStatus(result *postgres.PostgresqlStatus) {
 		walStatus, err := disk.Probe(specs.PgWalVolumePath)
 		if err != nil {
 			log.Warning("Failed to probe WAL volume disk status", "path", specs.PgWalVolumePath, "error", err)
+			result.WALDiskStatusError = err.Error()
 		} else {
 			result.WALDiskStatus = &postgres.DiskStatus{
 				TotalBytes:     walStatus.TotalBytes,
@@ -758,22 +760,22 @@ func (instance *Instance) fillDiskStatus(result *postgres.PostgresqlStatus) {
 	}
 
 	// Probe tablespace volumes if they exist
-	result.TablespaceDiskStatus = probeTablespaceDiskStatus()
+	result.TablespaceDiskStatus, result.TablespaceDiskStatusErrors = probeTablespaceDiskStatus()
 }
 
 // probeTablespaceDiskStatus probes disk status for all tablespace volumes.
-func probeTablespaceDiskStatus() map[string]*postgres.DiskStatus {
+func probeTablespaceDiskStatus() (map[string]*postgres.DiskStatus, map[string]string) {
 	if _, err := os.Stat(specs.PgTablespaceVolumePath); err != nil {
 		log.Debug("Tablespace volume path does not exist",
 			"path", specs.PgTablespaceVolumePath,
 			"error", err)
-		return nil
+		return nil, nil
 	}
 
 	entries, err := os.ReadDir(specs.PgTablespaceVolumePath)
 	if err != nil {
 		log.Info("Failed to read tablespace volume directory", "path", specs.PgTablespaceVolumePath, "error", err)
-		return nil
+		return nil, map[string]string{"_directory": err.Error()}
 	}
 
 	log.Debug("Found tablespace volume entries",
@@ -781,6 +783,7 @@ func probeTablespaceDiskStatus() map[string]*postgres.DiskStatus {
 		"entryCount", len(entries))
 
 	statusMap := make(map[string]*postgres.DiskStatus)
+	errorMap := make(map[string]string)
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			log.Debug("Skipping non-directory tablespace entry",
@@ -794,6 +797,7 @@ func probeTablespaceDiskStatus() map[string]*postgres.DiskStatus {
 				"tablespace", entry.Name(),
 				"path", tsPath,
 				"error", err)
+			errorMap[entry.Name()] = err.Error()
 			continue
 		}
 		statusMap[entry.Name()] = &postgres.DiskStatus{
@@ -809,5 +813,8 @@ func probeTablespaceDiskStatus() map[string]*postgres.DiskStatus {
 			"usedBytes", tsStatus.UsedBytes,
 			"percentUsed", tsStatus.PercentUsed)
 	}
-	return statusMap
+	if len(errorMap) == 0 {
+		errorMap = nil
+	}
+	return statusMap, errorMap
 }

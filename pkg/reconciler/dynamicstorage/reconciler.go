@@ -181,18 +181,23 @@ func reconcileDataVolume(
 					podName = status.Pod.Name
 				}
 				hasDiskStatus := status.DiskStatus != nil
-				hasError := status.Error != nil || status.ErrorMessage != ""
+				hasError := status.Error != nil || status.ErrorMessage != "" || status.DataDiskStatusError != ""
 				contextLogger.Info("Instance disk status detail",
 					"pod", podName,
 					"hasDiskStatus", hasDiskStatus,
 					"hasError", hasError,
-					"errorMessage", status.ErrorMessage)
+					"errorMessage", status.ErrorMessage,
+					"dataDiskStatusError", status.DataDiskStatusError)
 
 				if !hasDiskStatus {
 					instancesWithoutDiskStatus = append(instancesWithoutDiskStatus, podName)
 				}
 				if hasError && status.ErrorMessage != "" {
 					instanceErrors = append(instanceErrors, fmt.Sprintf("%s: %s", podName, status.ErrorMessage))
+				}
+				if status.DataDiskStatusError != "" {
+					instanceErrors = append(instanceErrors, fmt.Sprintf("%s: data disk probe failed: %s",
+						podName, status.DataDiskStatusError))
 				}
 			}
 
@@ -313,6 +318,27 @@ func reconcileTablespaces(
 			// Set state to indicate we're waiting for disk status
 			if instanceStatuses != nil && len(instanceStatuses.Items) > 0 {
 				cluster.Status.StorageSizing.Tablespaces[tbs.Name].State = apiv1.VolumeSizingStateWaitingForDiskStatus
+				var tablespaceErrors []string
+				for _, status := range instanceStatuses.Items {
+					podName := "unknown"
+					if status.Pod != nil {
+						podName = status.Pod.Name
+					}
+					if status.TablespaceDiskStatusErrors != nil {
+						if errMsg, ok := status.TablespaceDiskStatusErrors[tbs.Name]; ok && errMsg != "" {
+							tablespaceErrors = append(tablespaceErrors, fmt.Sprintf("%s: %s", podName, errMsg))
+						}
+					}
+				}
+				if len(tablespaceErrors) > 0 {
+					cluster.Status.StorageSizing.Tablespaces[tbs.Name].Message = fmt.Sprintf(
+						"Waiting for tablespace disk status. Errors: %v", tablespaceErrors,
+					)
+				} else {
+					cluster.Status.StorageSizing.Tablespaces[tbs.Name].Message = fmt.Sprintf(
+						"Waiting for tablespace disk status for %q", tbs.Name,
+					)
+				}
 
 				// Persist the status update so users can see the waiting state via kubectl
 				if err := c.Status().Update(ctx, cluster); err != nil {
@@ -454,11 +480,10 @@ func evaluateSizing(
 		}
 	}
 
-	// Use PVC capacity as currentSize rather than filesystem TotalBytes.
-	// Filesystem metadata overhead (~3% for ext4/xfs) makes statfs.TotalBytes smaller
-	// than the actual PVC capacity, which would cause false growth (e.g., "growing"
-	// from 4.84Gi → 5Gi when PVC is already 5Gi).
-	currentSize := maxPVCSize(pvcSizes)
+	// Use the smallest PVC capacity as currentSize.
+	// This ensures we continue reconciling when only a subset of PVC patches
+	// succeeded in a previous run.
+	currentSize := minPVCSize(pvcSizes)
 	pvcSizesAvailable := !currentSize.IsZero()
 	if currentSize.IsZero() {
 		// Fallback to filesystem TotalBytes if no PVC sizes available.
@@ -472,23 +497,23 @@ func evaluateSizing(
 		currentSize = *resource.NewQuantity(int64(maxTotal), resource.BinarySI) //nolint:gosec
 	}
 
-	// Check if at limit
-	if currentSize.Cmp(limit) >= 0 {
-		return &ReconcileResult{
-			Action:      ActionNoOp,
-			VolumeType:  volumeType,
-			CurrentSize: currentSize,
-			TargetSize:  limit,
-			Reason:      "at limit",
-		}
-	}
-
+	atLimit := currentSize.Cmp(limit) >= 0
+	exceedLimitOnEmergency := GetExceedLimitOnEmergency(cfg)
 	volumeStatus := getVolumeSizingStatus(cluster, volumeType, tbsName)
 
 	// Check for emergency condition
 	if IsEmergencyCondition(cfg, maxTotal, maxUsed, minAvailable) {
+		if atLimit && !exceedLimitOnEmergency {
+			return &ReconcileResult{
+				Action:      ActionNoOp,
+				VolumeType:  volumeType,
+				CurrentSize: currentSize,
+				TargetSize:  limit,
+				Reason:      "at limit",
+			}
+		}
 		if HasBudgetForEmergency(cfg, volumeStatus) {
-			targetSize := CalculateEmergencyGrowthSize(currentSize, limit)
+			targetSize := CalculateEmergencyGrowthSize(currentSize, limit, exceedLimitOnEmergency)
 			return &ReconcileResult{
 				Action:       ActionEmergencyGrow,
 				VolumeType:   volumeType,
@@ -506,6 +531,17 @@ func evaluateSizing(
 			CurrentSize: currentSize,
 			TargetSize:  targetSize,
 			Reason:      "emergency budget exhausted",
+		}
+	}
+
+	// Check if at limit for non-emergency flow
+	if atLimit {
+		return &ReconcileResult{
+			Action:      ActionNoOp,
+			VolumeType:  volumeType,
+			CurrentSize: currentSize,
+			TargetSize:  limit,
+			Reason:      "at limit",
 		}
 	}
 
@@ -566,6 +602,38 @@ func maxPVCSize(pvcSizes map[string]string) resource.Quantity {
 			"parseErrors", parseErrors)
 	}
 	return maxSize
+}
+
+// minPVCSize returns the smallest PVC capacity from the provided map.
+// This allows reconciliation to recover when PVCs have diverged in size
+// due to partial patch failures in previous runs.
+// Returns a zero quantity if all PVCs fail to parse or if the map is empty.
+func minPVCSize(pvcSizes map[string]string) resource.Quantity {
+	var minSize resource.Quantity
+	first := true
+	parseErrors := 0
+	for instanceName, sizeStr := range pvcSizes {
+		qty, err := resource.ParseQuantity(sizeStr)
+		if err != nil {
+			parseErrors++
+			log.Warning("Failed to parse PVC size quantity, skipping",
+				"instance", instanceName,
+				"size", sizeStr,
+				"error", err)
+			continue
+		}
+		if first || qty.Cmp(minSize) < 0 {
+			minSize = qty
+			first = false
+		}
+	}
+	// Log an error if all PVCs failed to parse - this indicates a serious problem
+	if len(pvcSizes) > 0 && parseErrors == len(pvcSizes) {
+		log.Error(nil, "All PVC size quantities failed to parse - PVC size data unavailable",
+			"totalPVCs", len(pvcSizes),
+			"parseErrors", parseErrors)
+	}
+	return minSize
 }
 
 func getVolumeSizingStatus(cluster *apiv1.Cluster, volumeType VolumeType, tbsName string) *apiv1.VolumeSizingStatus {
@@ -716,9 +784,14 @@ func updateVolumeStatus(
 	// Update state
 	switch result.Action {
 	case ActionNoOp:
-		if result.Reason == "at limit" {
+		switch result.Reason {
+		case "at limit":
 			status.State = apiv1.VolumeSizingStateAtLimit
-		} else {
+		case "waiting for PVC size data":
+			status.State = apiv1.VolumeSizingStateNeedsGrow
+		case "emergency budget exhausted":
+			status.State = apiv1.VolumeSizingStateEmergency
+		default:
 			status.State = apiv1.VolumeSizingStateBalanced
 		}
 	case ActionEmergencyGrow:
