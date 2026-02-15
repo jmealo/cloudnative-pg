@@ -609,9 +609,6 @@ func (r *ClusterReconciler) reconcile(ctx context.Context, cluster *apiv1.Cluste
 	// reconciler would only run on watch events, missing disk usage changes.
 	if dynamicstorage.IsAnyDynamicSizingEnabled(cluster) {
 		dynamicResult := ctrl.Result{RequeueAfter: 30 * time.Second}
-		if statusResult.Requeue {
-			return statusResult, nil
-		}
 		if statusResult.RequeueAfter > 0 && statusResult.RequeueAfter < dynamicResult.RequeueAfter {
 			return statusResult, nil
 		}
