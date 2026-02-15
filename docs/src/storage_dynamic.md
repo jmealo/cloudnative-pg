@@ -270,10 +270,10 @@ Dynamic storage exposes the following metrics:
 | `cnpg_dynamic_storage_actual_size_bytes` | `volume_type`, `tablespace`, `instance` | Actual PVC size per instance |
 | `cnpg_dynamic_storage_effective_size_bytes` | `volume_type`, `tablespace` | Current effective size for new replicas |
 | `cnpg_dynamic_storage_state` | `volume_type`, `tablespace`, `state` | 1 for current state, 0 for others |
-| `cnpg_dynamic_storage_budget_total` | `volume_type` | Total daily operations budget |
-| `cnpg_dynamic_storage_budget_used` | `volume_type` | Operations used in last 24h |
-| `cnpg_dynamic_storage_budget_emergency_reserved` | `volume_type` | Emergency reserve remaining |
-| `cnpg_dynamic_storage_next_window_seconds` | `volume_type` | Seconds until next maintenance window |
+| `cnpg_dynamic_storage_budget_total` | `volume_type`, `tablespace` | Total daily operations budget |
+| `cnpg_dynamic_storage_budget_used` | `volume_type`, `tablespace` | Operations used in last 24h |
+| `cnpg_dynamic_storage_budget_emergency_reserved` | `volume_type`, `tablespace` | Emergency reserve remaining |
+| `cnpg_dynamic_storage_next_window_seconds` | `volume_type`, `tablespace` | Seconds until next maintenance window |
 
 ### Cluster Status
 

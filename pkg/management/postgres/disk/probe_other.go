@@ -26,7 +26,7 @@ import (
 )
 
 // Probe returns disk status for the given path using statfs.
-// This implementation works on Unix-like systems (darwin, freebsd, etc).
+// This implementation is built for darwin.
 func Probe(path string) (*Status, error) {
 	var stat syscall.Statfs_t
 	if err := syscall.Statfs(path, &stat); err != nil {

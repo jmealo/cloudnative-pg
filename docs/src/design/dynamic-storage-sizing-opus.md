@@ -625,10 +625,10 @@ type BudgetStatus struct {
 | `cnpg_dynamic_storage_actual_size_bytes` | Gauge | `volume_type`, `tablespace`, `instance` | Actual PVC size per instance |
 | `cnpg_dynamic_storage_state` | Gauge | `volume_type`, `tablespace`, `state` | 1 for current state, 0 for others |
 | `cnpg_dynamic_storage_pending_operations` | Gauge | `volume_type`, `tablespace`, `type` | Count of pending grow/shrink ops |
-| `cnpg_dynamic_storage_budget_total` | Gauge | `volume_type` | Total daily operations budget |
-| `cnpg_dynamic_storage_budget_used` | Gauge | `volume_type` | Operations used in last 24h |
-| `cnpg_dynamic_storage_budget_emergency_reserved` | Gauge | `volume_type` | Emergency reserve remaining |
-| `cnpg_dynamic_storage_next_window_seconds` | Gauge | `volume_type` | Seconds until next maintenance window |
+| `cnpg_dynamic_storage_budget_total` | Gauge | `volume_type`, `tablespace` | Total daily operations budget |
+| `cnpg_dynamic_storage_budget_used` | Gauge | `volume_type`, `tablespace` | Operations used in last 24h |
+| `cnpg_dynamic_storage_budget_emergency_reserved` | Gauge | `volume_type`, `tablespace` | Emergency reserve remaining |
+| `cnpg_dynamic_storage_next_window_seconds` | Gauge | `volume_type`, `tablespace` | Seconds until next maintenance window |
 | `cnpg_dynamic_storage_operations_total` | Counter | `volume_type`, `tablespace`, `type`, `result` | Total sizing operations |
 | `cnpg_dynamic_storage_shrink_progress` | Gauge | `volume_type`, `tablespace` | 0-1 progress of rolling shrink |
 

@@ -102,7 +102,7 @@ func Reconcile(
 ) (ctrl.Result, error) {
 	contextLogger := log.FromContext(ctx)
 
-	// Check if dynamic sizing is enabled for any volume (data or tablespace)
+	// Check if dynamic sizing is enabled for any volume (data, WAL, or tablespace)
 	if !IsAnyDynamicSizingEnabled(cluster) {
 		return ctrl.Result{}, nil
 	}
@@ -124,6 +124,16 @@ func Reconcile(
 	// Reconcile data volume if dynamic sizing is enabled for it
 	if IsDynamicSizingEnabled(&cluster.Spec.StorageConfiguration) {
 		res, err := reconcileDataVolume(ctx, c, cluster, instanceStatuses, pvcs)
+		if err != nil || !res.IsZero() {
+			return res, err
+		}
+	}
+
+	// Reconcile WAL volume if dynamic sizing is enabled for it
+	if cluster.ShouldCreateWalArchiveVolume() &&
+		cluster.Spec.WalStorage != nil &&
+		IsDynamicSizingEnabled(cluster.Spec.WalStorage) {
+		res, err := reconcileWALVolume(ctx, c, cluster, instanceStatuses, pvcs)
 		if err != nil || !res.IsZero() {
 			return res, err
 		}
@@ -280,6 +290,101 @@ func reconcileDataVolume(
 				return ctrl.Result{RequeueAfter: time.Second}, nil
 			}
 			return ctrl.Result{}, fmt.Errorf("while updating cluster status after dynamic storage action: %w", err)
+		}
+	}
+
+	return ctrl.Result{}, nil
+}
+
+// reconcileWALVolume performs dynamic storage reconciliation for the WAL volume.
+//
+//nolint:gocognit // waiting state logic requires checking multiple conditions
+func reconcileWALVolume(
+	ctx context.Context,
+	c client.Client,
+	cluster *apiv1.Cluster,
+	instanceStatuses *postgres.PostgresqlStatusList,
+	pvcs []corev1.PersistentVolumeClaim,
+) (ctrl.Result, error) {
+	contextLogger := log.FromContext(ctx)
+
+	// Safety guard: caller should check this, but keep this resilient.
+	if cluster.Spec.WalStorage == nil {
+		return ctrl.Result{}, nil
+	}
+
+	diskStatusMap := collectDiskStatusForVolume(instanceStatuses, VolumeTypeWAL, "")
+
+	// Initialize WAL volume status
+	if cluster.Status.StorageSizing.WAL == nil {
+		cluster.Status.StorageSizing.WAL = &apiv1.VolumeSizingStatus{}
+	}
+
+	//nolint:nestif // waiting state logic requires checking multiple conditions
+	if len(diskStatusMap) == 0 {
+		if instanceStatuses != nil && len(instanceStatuses.Items) > 0 {
+			var instancesWithoutDiskStatus []string
+			var instanceErrors []string
+			for _, status := range instanceStatuses.Items {
+				podName := "unknown"
+				if status.Pod != nil {
+					podName = status.Pod.Name
+				}
+
+				if status.WALDiskStatus == nil {
+					instancesWithoutDiskStatus = append(instancesWithoutDiskStatus, podName)
+				}
+				if status.WALDiskStatusError != "" {
+					instanceErrors = append(instanceErrors,
+						fmt.Sprintf("%s: WAL disk probe failed: %s", podName, status.WALDiskStatusError))
+				}
+			}
+
+			cluster.Status.StorageSizing.WAL.State = apiv1.VolumeSizingStateWaitingForDiskStatus
+			if len(instanceErrors) > 0 {
+				cluster.Status.StorageSizing.WAL.Message = fmt.Sprintf(
+					"Waiting for WAL disk status from %d instance(s). Errors: %v",
+					len(instancesWithoutDiskStatus), instanceErrors)
+			} else {
+				cluster.Status.StorageSizing.WAL.Message = fmt.Sprintf(
+					"Waiting for WAL disk status from %d instance(s): %v",
+					len(instancesWithoutDiskStatus), instancesWithoutDiskStatus)
+			}
+
+			if err := c.Status().Update(ctx, cluster); err != nil {
+				if apierrs.IsConflict(err) {
+					contextLogger.Info("Optimistic locking conflict while updating WAL status, requeueing")
+					return ctrl.Result{RequeueAfter: time.Second}, nil
+				}
+				return ctrl.Result{}, fmt.Errorf("while updating cluster status to WaitingForDiskStatus for WAL: %w", err)
+			}
+
+			contextLogger.Info("No WAL disk status available yet, status updated to reflect waiting state",
+				"instanceCount", len(instanceStatuses.Items))
+			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		}
+		contextLogger.Debug("No instances available for WAL disk status collection")
+		return ctrl.Result{}, nil
+	}
+
+	actualSizes := collectActualSizes(pvcs, VolumeTypeWAL, "")
+	result := evaluateSizing(cluster, cluster.Spec.WalStorage, VolumeTypeWAL, "", diskStatusMap, actualSizes)
+	updateVolumeStatus(cluster.Status.StorageSizing.WAL, cluster.Spec.WalStorage, result, actualSizes)
+
+	if result.Action != ActionNoOp && result.Action != ActionPendingGrowth {
+		if err := executeAction(ctx, c, cluster, pvcs, result); err != nil {
+			return ctrl.Result{}, fmt.Errorf("while executing WAL dynamic storage action: %w", err)
+		}
+	}
+
+	if result.Action != ActionNoOp {
+		if err := c.Status().Update(ctx, cluster); err != nil {
+			if apierrs.IsConflict(err) {
+				contextLogger.Info("Optimistic locking conflict while updating WAL status after action, requeueing",
+					"action", result.Action)
+				return ctrl.Result{RequeueAfter: time.Second}, nil
+			}
+			return ctrl.Result{}, fmt.Errorf("while updating WAL status after dynamic storage action: %w", err)
 		}
 	}
 
@@ -469,12 +574,20 @@ func evaluateSizing(
 
 	request, err := resource.ParseQuantity(cfg.Request)
 	if err != nil {
+		log.Error(err, "Failed to parse dynamic storage request quantity",
+			"volumeType", volumeType,
+			"tablespaceName", tbsName,
+			"request", cfg.Request)
 		return &ReconcileResult{
 			Action: ActionNoOp, VolumeType: volumeType, Reason: fmt.Errorf("parsing request: %w", err).Error(),
 		}
 	}
 	limit, err := resource.ParseQuantity(cfg.Limit)
 	if err != nil {
+		log.Error(err, "Failed to parse dynamic storage limit quantity",
+			"volumeType", volumeType,
+			"tablespaceName", tbsName,
+			"limit", cfg.Limit)
 		return &ReconcileResult{
 			Action: ActionNoOp, VolumeType: volumeType, Reason: fmt.Errorf("parsing limit: %w", err).Error(),
 		}
@@ -559,13 +672,23 @@ func findMaxUsage(diskStatusMap map[string]*DiskInfo) (uint64, uint64, uint64, s
 	var maxUsed, maxTotal uint64
 	minAvailable := uint64(math.MaxUint64)
 	var highestUsageInstance string
+	var maxUsagePercent float64
 	for instanceName, info := range diskStatusMap {
 		// Track minimum available space independently across ALL instances
 		// to correctly detect CriticalMinimumFree conditions on any instance.
 		if info.AvailableBytes < minAvailable {
 			minAvailable = info.AvailableBytes
 		}
-		if info.UsedBytes > maxUsed {
+		// Select the instance with the highest usage percentage rather than
+		// highest absolute UsedBytes. This ensures a smaller PVC near-full
+		// (e.g., 50GB at 96%) is correctly identified over a larger PVC
+		// with more absolute bytes used (e.g., 100GB at 60%).
+		var usagePercent float64
+		if info.TotalBytes > 0 {
+			usagePercent = float64(info.UsedBytes) / float64(info.TotalBytes)
+		}
+		if usagePercent > maxUsagePercent || (usagePercent == maxUsagePercent && info.UsedBytes > maxUsed) {
+			maxUsagePercent = usagePercent
 			maxUsed = info.UsedBytes
 			maxTotal = info.TotalBytes
 			highestUsageInstance = instanceName
@@ -743,6 +866,12 @@ func collectActualSizes(
 			actualSizes[instanceName] = capacity.String()
 		} else if size, ok := pvc.Spec.Resources.Requests[corev1.ResourceStorage]; ok {
 			actualSizes[instanceName] = size.String()
+		} else {
+			log.Warning("Skipping PVC without storage capacity or request",
+				"pvc", pvc.Name,
+				"namespace", pvc.Namespace,
+				"instanceName", instanceName,
+				"volumeType", volumeType)
 		}
 	}
 
@@ -827,12 +956,10 @@ func executeAction(
 		return nil
 	}
 
-	// Update status to record the successful action. If this fails, log a warning
-	// but don't fail the reconciliation since the PVC patches already succeeded.
-	// The status will be corrected on the next reconcile.
+	// Update status to record the successful action.
+	// If this fails, surface the error so reconciliation is retried explicitly.
 	if err := updateStatusAfterAction(cluster, result); err != nil {
-		contextLogger.Warning("Failed to update status after storage action, will retry on next reconcile",
-			"error", err)
+		return fmt.Errorf("while updating status after storage action: %w", err)
 	}
 	return nil
 }

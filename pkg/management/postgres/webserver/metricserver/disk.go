@@ -311,9 +311,9 @@ func (d *diskCollector) recordVolumeSizing(
 	if s.Budget != nil {
 		d.budgetUsed.WithLabelValues(volumeType, tablespace).Set(float64(s.Budget.ActionsLast24h))
 		d.budgetEmergencyReserved.WithLabelValues(volumeType, tablespace).Set(float64(s.Budget.AvailableForEmergency))
-		// Available for planned is also useful
+		// Total daily budget = used + available planned + available emergency.
 		d.budgetTotal.WithLabelValues(volumeType, tablespace).Set(
-			float64(s.Budget.AvailableForPlanned + s.Budget.ActionsLast24h),
+			float64(s.Budget.AvailableForPlanned + s.Budget.AvailableForEmergency + s.Budget.ActionsLast24h),
 		)
 	}
 

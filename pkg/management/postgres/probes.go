@@ -59,19 +59,26 @@ func (instance *Instance) GetStatus() (result *postgres.PostgresqlStatus, err er
 			result.ErrorMessage = err.Error()
 		}
 
-		if !result.MightBeUnavailable {
+		// If the instance is expected to be temporarily unavailable, mask probe
+		// failures and derive primary status from data-dir marker files.
+		if !result.MightBeUnavailable || err == nil {
 			return
 		}
-		if result.MightBeUnavailable && err == nil {
-			return
-		}
+
 		// we save the error that we are masking
 		result.MightBeUnavailableMaskedError = err.Error()
-		// We override the error. We only care about checking if isPrimary is correctly detected
-		result.IsPrimary, err = instance.IsPrimary()
-		if err != nil {
+		// We override the original probe error with IsPrimary marker-file checks.
+		isPrimary, primaryErr := instance.IsPrimary()
+		if primaryErr != nil {
+			err = primaryErr
+			result.ErrorMessage = primaryErr.Error()
 			return
 		}
+		result.IsPrimary = isPrimary
+
+		// Masking succeeded, so clear the error signal fields.
+		err = nil
+		result.ErrorMessage = ""
 	}()
 
 	if instance.PgRewindIsRunning {

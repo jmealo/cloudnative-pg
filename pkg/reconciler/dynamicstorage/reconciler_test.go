@@ -474,6 +474,223 @@ var _ = Describe("reconciler", func() {
 
 			Expect(cluster.Status.StorageSizing.Data.State).To(Equal(apiv1.VolumeSizingStatePendingGrowth))
 		})
+
+		It("trigger scheduled WAL growth when WAL usage exceeds buffer", func() {
+			// Disable data dynamic sizing so this test focuses on WAL.
+			cluster.Spec.StorageConfiguration = apiv1.StorageConfiguration{Size: "10Gi"}
+			cluster.Spec.WalStorage = &apiv1.StorageConfiguration{
+				Request:      "5Gi",
+				Limit:        "20Gi",
+				TargetBuffer: ptr.To(20),
+				EmergencyGrow: &apiv1.EmergencyGrowConfig{
+					CriticalThreshold:   99,
+					CriticalMinimumFree: "100Mi",
+				},
+			}
+
+			status := &postgres.PostgresqlStatusList{
+				Items: []postgres.PostgresqlStatus{
+					{
+						Pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "test-cluster-1"}},
+						WALDiskStatus: &postgres.DiskStatus{
+							TotalBytes:     5 * 1024 * 1024 * 1024,
+							UsedBytes:      4600 * 1024 * 1024, // ~4.49Gi used (~90%)
+							AvailableBytes: 520 * 1024 * 1024,
+							PercentUsed:    89.8,
+						},
+					},
+				},
+			}
+
+			walPVC := corev1.PersistentVolumeClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-cluster-1-wal",
+					Namespace: "default",
+					Labels: map[string]string{
+						utils.PvcRoleLabelName:      string(utils.PVCRolePgWal),
+						utils.InstanceNameLabelName: "test-cluster-1",
+					},
+				},
+				Spec: corev1.PersistentVolumeClaimSpec{
+					Resources: corev1.VolumeResourceRequirements{
+						Requests: corev1.ResourceList{
+							corev1.ResourceStorage: resource.MustParse("5Gi"),
+						},
+					},
+				},
+				Status: corev1.PersistentVolumeClaimStatus{
+					Capacity: corev1.ResourceList{
+						corev1.ResourceStorage: resource.MustParse("5Gi"),
+					},
+				},
+			}
+
+			c := fake.NewClientBuilder().
+				WithScheme(scheme.BuildWithAllKnownScheme()).
+				WithObjects(cluster, &walPVC).
+				WithStatusSubresource(cluster).
+				Build()
+
+			res, err := Reconcile(ctx, c, cluster, nil, status, []corev1.PersistentVolumeClaim{walPVC})
+			Expect(err).ToNot(HaveOccurred())
+			Expect(res.IsZero()).To(BeTrue())
+
+			var updatedPVC corev1.PersistentVolumeClaim
+			err = c.Get(ctx, types.NamespacedName{Name: "test-cluster-1-wal", Namespace: "default"}, &updatedPVC)
+			Expect(err).ToNot(HaveOccurred())
+			pvcSize := updatedPVC.Spec.Resources.Requests[corev1.ResourceStorage]
+			Expect(pvcSize.Cmp(resource.MustParse("6Gi"))).To(Equal(0))
+
+			var updatedCluster apiv1.Cluster
+			err = c.Get(ctx, types.NamespacedName{Name: "test-cluster", Namespace: "default"}, &updatedCluster)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(updatedCluster.Status.StorageSizing).ToNot(BeNil())
+			Expect(updatedCluster.Status.StorageSizing.WAL).ToNot(BeNil())
+			Expect(updatedCluster.Status.StorageSizing.WAL.LastAction).ToNot(BeNil())
+			Expect(updatedCluster.Status.StorageSizing.WAL.LastAction.Kind).To(Equal("ScheduledGrow"))
+		})
+
+		It("trigger emergency WAL growth when critical threshold is exceeded", func() {
+			// Disable data dynamic sizing so this test focuses on WAL.
+			cluster.Spec.StorageConfiguration = apiv1.StorageConfiguration{Size: "10Gi"}
+			cluster.Spec.WalStorage = &apiv1.StorageConfiguration{
+				Request:      "5Gi",
+				Limit:        "20Gi",
+				TargetBuffer: ptr.To(20),
+				EmergencyGrow: &apiv1.EmergencyGrowConfig{
+					CriticalThreshold:   70,
+					CriticalMinimumFree: "100Mi",
+				},
+			}
+
+			status := &postgres.PostgresqlStatusList{
+				Items: []postgres.PostgresqlStatus{
+					{
+						Pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "test-cluster-1"}},
+						WALDiskStatus: &postgres.DiskStatus{
+							TotalBytes:     5 * 1024 * 1024 * 1024,
+							UsedBytes:      4600 * 1024 * 1024, // ~4.49Gi used (~90%)
+							AvailableBytes: 520 * 1024 * 1024,
+							PercentUsed:    89.8,
+						},
+					},
+				},
+			}
+
+			walPVC := corev1.PersistentVolumeClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-cluster-1-wal",
+					Namespace: "default",
+					Labels: map[string]string{
+						utils.PvcRoleLabelName:      string(utils.PVCRolePgWal),
+						utils.InstanceNameLabelName: "test-cluster-1",
+					},
+				},
+				Spec: corev1.PersistentVolumeClaimSpec{
+					Resources: corev1.VolumeResourceRequirements{
+						Requests: corev1.ResourceList{
+							corev1.ResourceStorage: resource.MustParse("5Gi"),
+						},
+					},
+				},
+				Status: corev1.PersistentVolumeClaimStatus{
+					Capacity: corev1.ResourceList{
+						corev1.ResourceStorage: resource.MustParse("5Gi"),
+					},
+				},
+			}
+
+			c := fake.NewClientBuilder().
+				WithScheme(scheme.BuildWithAllKnownScheme()).
+				WithObjects(cluster, &walPVC).
+				WithStatusSubresource(cluster).
+				Build()
+
+			res, err := Reconcile(ctx, c, cluster, nil, status, []corev1.PersistentVolumeClaim{walPVC})
+			Expect(err).ToNot(HaveOccurred())
+			Expect(res.IsZero()).To(BeTrue())
+
+			var updatedPVC corev1.PersistentVolumeClaim
+			err = c.Get(ctx, types.NamespacedName{Name: "test-cluster-1-wal", Namespace: "default"}, &updatedPVC)
+			Expect(err).ToNot(HaveOccurred())
+			pvcSize := updatedPVC.Spec.Resources.Requests[corev1.ResourceStorage]
+			Expect(pvcSize.Cmp(resource.MustParse("5Gi"))).To(BeNumerically(">", 0))
+
+			var updatedCluster apiv1.Cluster
+			err = c.Get(ctx, types.NamespacedName{Name: "test-cluster", Namespace: "default"}, &updatedCluster)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(updatedCluster.Status.StorageSizing).ToNot(BeNil())
+			Expect(updatedCluster.Status.StorageSizing.WAL).ToNot(BeNil())
+			Expect(updatedCluster.Status.StorageSizing.WAL.LastAction).ToNot(BeNil())
+			Expect(updatedCluster.Status.StorageSizing.WAL.LastAction.Kind).To(Equal("EmergencyGrow"))
+		})
+
+		It("not grow WAL volume when already at limit", func() {
+			// Disable data dynamic sizing so this test focuses on WAL.
+			cluster.Spec.StorageConfiguration = apiv1.StorageConfiguration{Size: "10Gi"}
+			cluster.Spec.WalStorage = &apiv1.StorageConfiguration{
+				Request:      "5Gi",
+				Limit:        "5Gi",
+				TargetBuffer: ptr.To(20),
+				EmergencyGrow: &apiv1.EmergencyGrowConfig{
+					CriticalThreshold:   99,
+					CriticalMinimumFree: "100Mi",
+				},
+			}
+
+			status := &postgres.PostgresqlStatusList{
+				Items: []postgres.PostgresqlStatus{
+					{
+						Pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "test-cluster-1"}},
+						WALDiskStatus: &postgres.DiskStatus{
+							TotalBytes:     5 * 1024 * 1024 * 1024,
+							UsedBytes:      4600 * 1024 * 1024,
+							AvailableBytes: 520 * 1024 * 1024,
+							PercentUsed:    89.8,
+						},
+					},
+				},
+			}
+
+			walPVC := corev1.PersistentVolumeClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-cluster-1-wal",
+					Namespace: "default",
+					Labels: map[string]string{
+						utils.PvcRoleLabelName:      string(utils.PVCRolePgWal),
+						utils.InstanceNameLabelName: "test-cluster-1",
+					},
+				},
+				Spec: corev1.PersistentVolumeClaimSpec{
+					Resources: corev1.VolumeResourceRequirements{
+						Requests: corev1.ResourceList{
+							corev1.ResourceStorage: resource.MustParse("5Gi"),
+						},
+					},
+				},
+				Status: corev1.PersistentVolumeClaimStatus{
+					Capacity: corev1.ResourceList{
+						corev1.ResourceStorage: resource.MustParse("5Gi"),
+					},
+				},
+			}
+
+			c := fake.NewClientBuilder().
+				WithScheme(scheme.BuildWithAllKnownScheme()).
+				WithObjects(cluster, &walPVC).
+				WithStatusSubresource(cluster).
+				Build()
+
+			res, err := Reconcile(ctx, c, cluster, nil, status, []corev1.PersistentVolumeClaim{walPVC})
+			Expect(err).ToNot(HaveOccurred())
+			Expect(res.IsZero()).To(BeTrue())
+
+			var updatedPVC corev1.PersistentVolumeClaim
+			err = c.Get(ctx, types.NamespacedName{Name: "test-cluster-1-wal", Namespace: "default"}, &updatedPVC)
+			Expect(err).ToNot(HaveOccurred())
+			pvcSize := updatedPVC.Spec.Resources.Requests[corev1.ResourceStorage]
+			Expect(pvcSize.Cmp(resource.MustParse("5Gi"))).To(Equal(0))
+		})
 	})
 
 	Describe("minPVCSize", func() {
@@ -505,32 +722,56 @@ var _ = Describe("reconciler", func() {
 	})
 
 	Describe("findMaxUsage", func() {
-		It("track minAvailable independently from maxUsed instance", func() {
-			// This verifies the fix for the case where a smaller disk with less absolute
-			// used bytes could have critically low available space that would be missed
-			// if minAvailable was only tracked from the highest-used instance.
+		It("select instance with highest usage percentage, not highest absolute bytes", func() {
+			// This verifies that a smaller PVC near-full is correctly identified
+			// over a larger PVC with more absolute bytes used but lower percentage.
 			diskStatusMap := map[string]*DiskInfo{
 				"instance-1": {
-					// Large disk, high absolute usage, plenty available
+					// Large disk, high absolute usage (90Gi), but only 90% full
 					TotalBytes:     100 * 1024 * 1024 * 1024, // 100Gi
-					UsedBytes:      90 * 1024 * 1024 * 1024,  // 90Gi used
+					UsedBytes:      90 * 1024 * 1024 * 1024,  // 90Gi used (90%)
 					AvailableBytes: 10 * 1024 * 1024 * 1024,  // 10Gi available
 				},
 				"instance-2": {
-					// Small disk, less absolute usage, critically low available
+					// Small disk, less absolute usage (9.5Gi), but 95% full
 					TotalBytes:     10 * 1024 * 1024 * 1024,          // 10Gi
-					UsedBytes:      9*1024*1024*1024 + 500*1024*1024, // 9.5Gi used
+					UsedBytes:      9*1024*1024*1024 + 500*1024*1024, // 9.5Gi used (95%)
 					AvailableBytes: 500 * 1024 * 1024,                // 500Mi available (critical!)
 				},
 			}
 
-			maxUsed, _, minAvailable, highestUsageInstance := findMaxUsage(diskStatusMap)
+			maxUsed, maxTotal, minAvailable, highestUsageInstance := findMaxUsage(diskStatusMap)
 
-			// maxUsed should be from instance-1 (90Gi > 9.5Gi)
-			Expect(highestUsageInstance).To(Equal("instance-1"))
-			Expect(maxUsed).To(Equal(uint64(90 * 1024 * 1024 * 1024)))
+			// instance-2 should be selected: 95% > 90% usage
+			Expect(highestUsageInstance).To(Equal("instance-2"))
+			Expect(maxUsed).To(Equal(uint64(9*1024*1024*1024 + 500*1024*1024)))
+			Expect(maxTotal).To(Equal(uint64(10 * 1024 * 1024 * 1024)))
 
-			// minAvailable should be from instance-2 (500Mi < 10Gi)
+			// minAvailable should still be from instance-2 (500Mi < 10Gi)
+			Expect(minAvailable).To(Equal(uint64(500 * 1024 * 1024)))
+		})
+
+		It("track minAvailable independently across all instances", func() {
+			// minAvailable should come from the instance with least free space,
+			// regardless of which instance has highest usage percentage.
+			diskStatusMap := map[string]*DiskInfo{
+				"instance-1": {
+					TotalBytes:     100 * 1024 * 1024 * 1024, // 100Gi
+					UsedBytes:      50 * 1024 * 1024 * 1024,  // 50Gi used (50%)
+					AvailableBytes: 50 * 1024 * 1024 * 1024,  // 50Gi available
+				},
+				"instance-2": {
+					TotalBytes:     10 * 1024 * 1024 * 1024,          // 10Gi
+					UsedBytes:      9*1024*1024*1024 + 500*1024*1024, // 9.5Gi used (95%)
+					AvailableBytes: 500 * 1024 * 1024,                // 500Mi available
+				},
+			}
+
+			_, _, minAvailable, highestUsageInstance := findMaxUsage(diskStatusMap)
+
+			// instance-2 selected by percentage (95% > 50%)
+			Expect(highestUsageInstance).To(Equal("instance-2"))
+			// minAvailable from instance-2 (500Mi < 50Gi)
 			Expect(minAvailable).To(Equal(uint64(500 * 1024 * 1024)))
 		})
 
@@ -943,6 +1184,54 @@ var _ = Describe("reconciler", func() {
 			// LastAction should NOT be set since no actual patching happened
 			Expect(cluster.Status.StorageSizing.Data.LastAction).To(BeNil())
 		})
+
+		It("return error when status cannot be recorded after successful patch", func() {
+			// Intentionally omit StorageSizing to force updateStatusAfterAction failure.
+			cluster.Status.StorageSizing = nil
+
+			pvc := corev1.PersistentVolumeClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-cluster-1",
+					Namespace: "default",
+					Labels: map[string]string{
+						utils.PvcRoleLabelName:      string(utils.PVCRolePgData),
+						utils.InstanceNameLabelName: "test-cluster-1",
+					},
+				},
+				Spec: corev1.PersistentVolumeClaimSpec{
+					Resources: corev1.VolumeResourceRequirements{
+						Requests: corev1.ResourceList{
+							corev1.ResourceStorage: resource.MustParse("5Gi"),
+						},
+					},
+				},
+			}
+
+			c := fake.NewClientBuilder().
+				WithScheme(scheme.BuildWithAllKnownScheme()).
+				WithObjects(cluster, &pvc).
+				WithStatusSubresource(cluster).
+				Build()
+
+			result := &ReconcileResult{
+				Action:       ActionScheduledGrow,
+				VolumeType:   VolumeTypeData,
+				CurrentSize:  resource.MustParse("5Gi"),
+				TargetSize:   resource.MustParse("10Gi"),
+				InstanceName: "test-cluster-1",
+			}
+
+			err := executeAction(ctx, c, cluster, []corev1.PersistentVolumeClaim{pvc}, result)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("while updating status after storage action"))
+
+			// PVC patch still happened before status write failed.
+			var updatedPVC corev1.PersistentVolumeClaim
+			err = c.Get(ctx, types.NamespacedName{Name: "test-cluster-1", Namespace: "default"}, &updatedPVC)
+			Expect(err).ToNot(HaveOccurred())
+			pvcSize := updatedPVC.Spec.Resources.Requests[corev1.ResourceStorage]
+			Expect(pvcSize.Cmp(resource.MustParse("10Gi"))).To(Equal(0))
+		})
 	})
 
 	Describe("evaluateSizing with filesystem overhead", func() {
@@ -1094,6 +1383,40 @@ var _ = Describe("reconciler", func() {
 			Expect(result.Action).To(Equal(ActionScheduledGrow))
 			Expect(result.CurrentSize.Cmp(resource.MustParse("5Gi"))).To(Equal(0))
 			Expect(result.TargetSize.Cmp(resource.MustParse("6Gi"))).To(Equal(0))
+		})
+
+		It("use the most utilized instance for growth even when absolute used bytes are lower", func() {
+			// instance-1 uses more absolute bytes but has 40% free, so no growth needed for it.
+			// instance-2 uses fewer absolute bytes but has only 10% free, so growth is required.
+			diskStatus := map[string]*DiskInfo{
+				"instance-1": {
+					TotalBytes:     200 * 1024 * 1024 * 1024, // 200Gi
+					UsedBytes:      120 * 1024 * 1024 * 1024, // 60% used
+					AvailableBytes: 80 * 1024 * 1024 * 1024,  // 40% free
+					PercentUsed:    60,
+				},
+				"instance-2": {
+					TotalBytes:     50 * 1024 * 1024 * 1024, // 50Gi
+					UsedBytes:      45 * 1024 * 1024 * 1024, // 90% used
+					AvailableBytes: 5 * 1024 * 1024 * 1024,  // 10% free
+					PercentUsed:    90,
+				},
+			}
+			pvcSizes := map[string]string{
+				"instance-1": "200Gi",
+				"instance-2": "50Gi",
+			}
+
+			cluster.Spec.StorageConfiguration.Request = "50Gi"
+			cluster.Spec.StorageConfiguration.Limit = "500Gi"
+			cluster.Spec.StorageConfiguration.EmergencyGrow = &apiv1.EmergencyGrowConfig{
+				CriticalThreshold:   99,
+				CriticalMinimumFree: "100Mi",
+			}
+
+			result := evaluateSizing(cluster, &cluster.Spec.StorageConfiguration, VolumeTypeData, "", diskStatus, pvcSizes)
+			Expect(result.Action).To(Equal(ActionScheduledGrow))
+			Expect(result.InstanceName).To(Equal("instance-2"))
 		})
 
 		It("allow emergency growth above limit when configured", func() {
@@ -1250,6 +1573,164 @@ var _ = Describe("reconciler", func() {
 
 				err := updateStatusAfterAction(cluster, result)
 				Expect(err).To(HaveOccurred())
+			})
+		})
+
+		Describe("conflict handling on status updates", func() {
+			It("requeue on optimistic-lock conflict while setting data waiting status", func() {
+				status := &postgres.PostgresqlStatusList{
+					Items: []postgres.PostgresqlStatus{
+						{Pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "test-cluster-1"}}},
+					},
+				}
+
+				baseClient := fake.NewClientBuilder().
+					WithScheme(scheme.BuildWithAllKnownScheme()).
+					WithObjects(cluster).
+					WithStatusSubresource(cluster).
+					Build()
+				c := &conflictStatusClient{Client: baseClient, statusUpdateConflicts: 1}
+
+				res, err := Reconcile(ctx, c, cluster, nil, status, nil)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(res.RequeueAfter).To(Equal(time.Second))
+			})
+
+			It("requeue on optimistic-lock conflict after data action status update", func() {
+				status := &postgres.PostgresqlStatusList{
+					Items: []postgres.PostgresqlStatus{
+						{
+							Pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "test-cluster-1"}},
+							DiskStatus: &postgres.DiskStatus{
+								TotalBytes:     100 * 1024 * 1024 * 1024,
+								UsedBytes:      96 * 1024 * 1024 * 1024,
+								AvailableBytes: 4 * 1024 * 1024 * 1024,
+								PercentUsed:    96,
+							},
+						},
+					},
+				}
+				pvc := corev1.PersistentVolumeClaim{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-cluster-1",
+						Namespace: "default",
+						Labels: map[string]string{
+							utils.PvcRoleLabelName:      string(utils.PVCRolePgData),
+							utils.InstanceNameLabelName: "test-cluster-1",
+						},
+					},
+					Spec: corev1.PersistentVolumeClaimSpec{
+						Resources: corev1.VolumeResourceRequirements{
+							Requests: corev1.ResourceList{
+								corev1.ResourceStorage: resource.MustParse("100Gi"),
+							},
+						},
+					},
+				}
+
+				baseClient := fake.NewClientBuilder().
+					WithScheme(scheme.BuildWithAllKnownScheme()).
+					WithObjects(cluster, &pvc).
+					WithStatusSubresource(cluster).
+					Build()
+				c := &conflictStatusClient{Client: baseClient, statusUpdateConflicts: 1}
+
+				res, err := Reconcile(ctx, c, cluster, nil, status, []corev1.PersistentVolumeClaim{pvc})
+				Expect(err).ToNot(HaveOccurred())
+				Expect(res.RequeueAfter).To(Equal(time.Second))
+			})
+
+			It("requeue on optimistic-lock conflict while setting tablespace waiting status", func() {
+				cluster.Spec.StorageConfiguration = apiv1.StorageConfiguration{Size: "10Gi"}
+				cluster.Spec.Tablespaces = []apiv1.TablespaceConfiguration{
+					{
+						Name: "tbs1",
+						Storage: apiv1.StorageConfiguration{
+							Request: "5Gi",
+							Limit:   "20Gi",
+						},
+					},
+				}
+
+				status := &postgres.PostgresqlStatusList{
+					Items: []postgres.PostgresqlStatus{
+						{Pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "test-cluster-1"}}},
+					},
+				}
+
+				baseClient := fake.NewClientBuilder().
+					WithScheme(scheme.BuildWithAllKnownScheme()).
+					WithObjects(cluster).
+					WithStatusSubresource(cluster).
+					Build()
+				c := &conflictStatusClient{Client: baseClient, statusUpdateConflicts: 1}
+
+				res, err := Reconcile(ctx, c, cluster, nil, status, nil)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(res.RequeueAfter).To(Equal(time.Second))
+			})
+
+			It("requeue on optimistic-lock conflict after tablespace action status update", func() {
+				cluster.Spec.StorageConfiguration = apiv1.StorageConfiguration{Size: "10Gi"}
+				cluster.Spec.Tablespaces = []apiv1.TablespaceConfiguration{
+					{
+						Name: "tbs1",
+						Storage: apiv1.StorageConfiguration{
+							Request: "5Gi",
+							Limit:   "20Gi",
+						},
+					},
+				}
+
+				status := &postgres.PostgresqlStatusList{
+					Items: []postgres.PostgresqlStatus{
+						{
+							Pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "test-cluster-1"}},
+							TablespaceDiskStatus: map[string]*postgres.DiskStatus{
+								"tbs1": {
+									TotalBytes:     5 * 1024 * 1024 * 1024,
+									UsedBytes:      4 * 1024 * 1024 * 1024,
+									AvailableBytes: 1 * 1024 * 1024 * 1024,
+									PercentUsed:    80,
+								},
+							},
+						},
+					},
+				}
+				pvc := corev1.PersistentVolumeClaim{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-cluster-1-tbs1",
+						Namespace: "default",
+						Labels: map[string]string{
+							utils.PvcRoleLabelName:        string(utils.PVCRolePgTablespace),
+							utils.TablespaceNameLabelName: "tbs1",
+							utils.InstanceNameLabelName:   "test-cluster-1",
+						},
+					},
+					Spec: corev1.PersistentVolumeClaimSpec{
+						Resources: corev1.VolumeResourceRequirements{
+							Requests: corev1.ResourceList{
+								corev1.ResourceStorage: resource.MustParse("5Gi"),
+							},
+						},
+					},
+					Status: corev1.PersistentVolumeClaimStatus{
+						Capacity: corev1.ResourceList{
+							corev1.ResourceStorage: resource.MustParse("5Gi"),
+						},
+					},
+				}
+
+				baseClient := fake.NewClientBuilder().
+					WithScheme(scheme.BuildWithAllKnownScheme()).
+					WithObjects(cluster, &pvc).
+					WithStatusSubresource(cluster).
+					Build()
+				c := &conflictStatusClient{Client: baseClient, statusUpdateConflicts: 1}
+
+				res, err := Reconcile(ctx, c, cluster, nil, status, []corev1.PersistentVolumeClaim{pvc})
+				Expect(err).ToNot(HaveOccurred())
+				Expect(res.RequeueAfter).To(Equal(time.Second))
 			})
 		})
 	})

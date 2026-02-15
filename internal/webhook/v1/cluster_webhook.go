@@ -2061,7 +2061,7 @@ func validateStorageConfigurationChange(
 	// For dynamic mode, validate that request is not increased (would be like shrinking)
 	// and limit changes are valid
 	if oldIsDynamic && newIsDynamic {
-		result = append(result, validateDynamicStorageChange(structPath, oldStorage, newStorage)...)
+		result = append(result, validateDynamicStorageChange(structPath, newStorage)...)
 		return result
 	}
 
@@ -2094,7 +2094,6 @@ func validateStorageConfigurationChange(
 // validateDynamicStorageChange validates changes to dynamic storage configuration
 func validateDynamicStorageChange(
 	structPath *field.Path,
-	oldStorage apiv1.StorageConfiguration,
 	newStorage apiv1.StorageConfiguration,
 ) field.ErrorList {
 	var result field.ErrorList

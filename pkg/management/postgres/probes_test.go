@@ -33,6 +33,23 @@ import (
 )
 
 var _ = Describe("probes", func() {
+	It("GetStatus should mask probe errors when instance might be unavailable", func() {
+		tmpDir := GinkgoT().TempDir()
+
+		instance := NewInstance()
+		instance.PgData = tmpDir
+		instance.SetMightBeUnavailable(true)
+
+		status, err := instance.GetStatus()
+		Expect(err).ToNot(HaveOccurred())
+
+		Expect(status).ToNot(BeNil())
+		Expect(status.MightBeUnavailable).To(BeTrue())
+		Expect(status.MightBeUnavailableMaskedError).ToNot(BeEmpty())
+		Expect(status.ErrorMessage).To(BeEmpty())
+		Expect(status.IsPrimary).To(BeTrue())
+	})
+
 	It("GetStatus should return partial status with ErrorMessage when DB is down but disk is accessible", func() {
 		// Mock the PgData path
 		tmpDir := GinkgoT().TempDir()

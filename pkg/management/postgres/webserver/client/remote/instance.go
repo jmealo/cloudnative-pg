@@ -338,7 +338,13 @@ func (r *instanceClientImpl) rawInstanceStatusRequest(
 		return result
 	}
 
-	if result.ErrorMessage != "" {
+	// Reconstruct Error from ErrorMessage, but respect MightBeUnavailable masking.
+	// When the instance manager intentionally masked an error (probes.go defer block),
+	// ErrorMessage still contains the original error text while the actual err was
+	// cleared. Reconstructing Error here would undo that masking, causing the
+	// controller (cluster_controller.go:1096) to treat the instance as unavailable
+	// when it was intentionally tolerated.
+	if result.ErrorMessage != "" && result.MightBeUnavailableMaskedError == "" {
 		result.Error = errors.New(result.ErrorMessage)
 	}
 

@@ -65,6 +65,48 @@ var _ = Describe("sizing", func() {
 		})
 	})
 
+	Describe("IsAnyDynamicSizingEnabled", func() {
+		It("return false when dynamic sizing is disabled for all volumes", func() {
+			cluster := &apiv1.Cluster{
+				Spec: apiv1.ClusterSpec{
+					StorageConfiguration: apiv1.StorageConfiguration{Size: "10Gi"},
+				},
+			}
+			Expect(IsAnyDynamicSizingEnabled(cluster)).To(BeFalse())
+		})
+
+		It("return true when WAL dynamic sizing is enabled", func() {
+			cluster := &apiv1.Cluster{
+				Spec: apiv1.ClusterSpec{
+					StorageConfiguration: apiv1.StorageConfiguration{Size: "10Gi"},
+					WalStorage: &apiv1.StorageConfiguration{
+						Request: "5Gi",
+						Limit:   "50Gi",
+					},
+				},
+			}
+			Expect(IsAnyDynamicSizingEnabled(cluster)).To(BeTrue())
+		})
+
+		It("return true when tablespace dynamic sizing is enabled", func() {
+			cluster := &apiv1.Cluster{
+				Spec: apiv1.ClusterSpec{
+					StorageConfiguration: apiv1.StorageConfiguration{Size: "10Gi"},
+					Tablespaces: []apiv1.TablespaceConfiguration{
+						{
+							Name: "tbs1",
+							Storage: apiv1.StorageConfiguration{
+								Request: "20Gi",
+								Limit:   "200Gi",
+							},
+						},
+					},
+				},
+			}
+			Expect(IsAnyDynamicSizingEnabled(cluster)).To(BeTrue())
+		})
+	})
+
 	Describe("GetCriticalThreshold", func() {
 		It("return default when config is nil", func() {
 			Expect(GetCriticalThreshold(nil)).To(Equal(DefaultCriticalThreshold))
@@ -112,6 +154,18 @@ var _ = Describe("sizing", func() {
 				},
 			}
 			Expect(GetCriticalThreshold(cfg)).To(Equal(99))
+		})
+	})
+
+	Describe("GetCriticalMinimumFree", func() {
+		It("return default when quantity is invalid", func() {
+			cfg := &apiv1.StorageConfiguration{
+				EmergencyGrow: &apiv1.EmergencyGrowConfig{
+					CriticalMinimumFree: "invalid-quantity",
+				},
+			}
+			result := GetCriticalMinimumFree(cfg)
+			Expect(result.Cmp(resource.MustParse(DefaultCriticalMinimumFree))).To(Equal(0))
 		})
 	})
 

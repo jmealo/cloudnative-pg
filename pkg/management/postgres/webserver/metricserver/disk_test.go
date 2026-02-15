@@ -150,6 +150,31 @@ var _ = Describe("diskCollector", func() {
 			Expect(seen).To(BeFalse(), "duplicate dynamic-storage budget metric labels: %s", labelStr)
 			labelsSeen[labelStr] = struct{}{}
 		}
+
+		budgetTotal := getMetricFamily(metricFamilies, "cnpg_dynamic_storage_budget_total")
+		Expect(budgetTotal).ToNot(BeNil())
+		Expect(budgetTotal.GetMetric()).To(HaveLen(3))
+
+		dataTotal, found := gaugeValueWithLabels(budgetTotal, map[string]string{
+			"volume_type": "data",
+			"tablespace":  "",
+		})
+		Expect(found).To(BeTrue())
+		Expect(dataTotal).To(BeNumerically("==", 4))
+
+		fastTotal, found := gaugeValueWithLabels(budgetTotal, map[string]string{
+			"volume_type": "tablespace",
+			"tablespace":  "fast",
+		})
+		Expect(found).To(BeTrue())
+		Expect(fastTotal).To(BeNumerically("==", 4))
+
+		bulkTotal, found := gaugeValueWithLabels(budgetTotal, map[string]string{
+			"volume_type": "tablespace",
+			"tablespace":  "bulk",
+		})
+		Expect(found).To(BeTrue())
+		Expect(bulkTotal).To(BeNumerically("==", 4))
 	})
 })
 
@@ -168,4 +193,27 @@ func formatLabels(labels []*dto.LabelPair) string {
 		res += l.GetName() + "=" + l.GetValue() + ","
 	}
 	return res
+}
+
+func gaugeValueWithLabels(mf *dto.MetricFamily, wanted map[string]string) (float64, bool) {
+	for _, m := range mf.GetMetric() {
+		matched := true
+		for k, v := range wanted {
+			found := false
+			for _, lp := range m.GetLabel() {
+				if lp.GetName() == k && lp.GetValue() == v {
+					found = true
+					break
+				}
+			}
+			if !found {
+				matched = false
+				break
+			}
+		}
+		if matched && m.GetGauge() != nil {
+			return m.GetGauge().GetValue(), true
+		}
+	}
+	return 0, false
 }

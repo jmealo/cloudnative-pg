@@ -49,9 +49,12 @@ func IsDynamicSizingEnabled(cfg *apiv1.StorageConfiguration) bool {
 }
 
 // IsAnyDynamicSizingEnabled returns true if dynamic sizing is configured for
-// any volume in the cluster (data volume or any tablespace).
+// any volume in the cluster (data volume, WAL volume, or any tablespace).
 func IsAnyDynamicSizingEnabled(cluster *apiv1.Cluster) bool {
 	if IsDynamicSizingEnabled(&cluster.Spec.StorageConfiguration) {
+		return true
+	}
+	if cluster.Spec.WalStorage != nil && IsDynamicSizingEnabled(cluster.Spec.WalStorage) {
 		return true
 	}
 	for i := range cluster.Spec.Tablespaces {

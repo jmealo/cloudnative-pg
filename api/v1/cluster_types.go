@@ -1042,8 +1042,7 @@ type StorageSizingStatus struct {
 	// +optional
 	Data *VolumeSizingStatus `json:"data,omitempty"`
 
-	// WAL volume sizing status. Reserved for future use when WAL volume
-	// dynamic sizing is implemented.
+	// WAL volume sizing status.
 	// +optional
 	WAL *VolumeSizingStatus `json:"wal,omitempty"`
 
@@ -1160,7 +1159,9 @@ type BudgetStatus struct {
 	// +optional
 	AvailableForEmergency int `json:"availableForEmergency,omitempty"`
 
-	// BudgetResetsAt is the time when the rolling 24h window resets.
+	// BudgetResetsAt is the time when the current budget tracking period expires.
+	// This uses a simplified 24h model where actions age out together based on
+	// the most recent action timestamp.
 	// +optional
 	BudgetResetsAt metav1.Time `json:"budgetResetsAt,omitempty"`
 }

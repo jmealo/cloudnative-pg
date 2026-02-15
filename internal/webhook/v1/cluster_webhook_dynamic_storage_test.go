@@ -188,6 +188,17 @@ var _ = Describe("dynamic storage validation", func() {
 			Expect(result[0].Error()).To(ContainSubstring("invalid duration"))
 		})
 
+		It("reject invalid timezone", func() {
+			mw := &apiv1.MaintenanceWindowConfig{
+				Schedule: "0 0 3 * * *",
+				Duration: "2h",
+				Timezone: "invalid/timezone",
+			}
+			result := validateMaintenanceWindow(*field.NewPath("maintenanceWindow"), mw)
+			Expect(result).To(HaveLen(1))
+			Expect(result[0].Error()).To(ContainSubstring("invalid timezone"))
+		})
+
 		It("accept various valid durations", func() {
 			durations := []string{"1h", "30m", "1h30m", "24h"}
 			for _, d := range durations {
@@ -448,6 +459,32 @@ var _ = Describe("dynamic storage validation", func() {
 			})
 		})
 
+		Describe("validateDynamicStorageChange", func() {
+			It("reject invalid request quantity", func() {
+				result := validateDynamicStorageChange(
+					field.NewPath("spec", "storage"),
+					apiv1.StorageConfiguration{
+						Request: "not-a-quantity",
+						Limit:   "100Gi",
+					},
+				)
+				Expect(result).ToNot(BeEmpty())
+				Expect(result[0].Error()).To(ContainSubstring("invalid request quantity"))
+			})
+
+			It("reject invalid limit quantity", func() {
+				result := validateDynamicStorageChange(
+					field.NewPath("spec", "storage"),
+					apiv1.StorageConfiguration{
+						Request: "10Gi",
+						Limit:   "not-a-quantity",
+					},
+				)
+				Expect(result).ToNot(BeEmpty())
+				Expect(result[0].Error()).To(ContainSubstring("invalid limit quantity"))
+			})
+		})
+
 		Context("static mode changes", func() {
 			It("allow increasing size", func() {
 				oldStorage := apiv1.StorageConfiguration{
@@ -569,4 +606,5 @@ var _ = Describe("dynamic storage validation", func() {
 			Expect(result).To(BeEmpty())
 		})
 	})
+
 })
