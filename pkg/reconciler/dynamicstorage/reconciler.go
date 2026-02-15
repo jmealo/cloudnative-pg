@@ -597,7 +597,9 @@ func maxPVCSize(pvcSizes map[string]string) resource.Quantity {
 	}
 	// Log an error if all PVCs failed to parse - this indicates a serious problem
 	if len(pvcSizes) > 0 && parseErrors == len(pvcSizes) {
-		log.Error(nil, "All PVC size quantities failed to parse - PVC size data unavailable",
+		log.Error(
+			fmt.Errorf("all %d PVC size quantities failed to parse", len(pvcSizes)),
+			"PVC size data unavailable",
 			"totalPVCs", len(pvcSizes),
 			"parseErrors", parseErrors)
 	}
@@ -629,7 +631,9 @@ func minPVCSize(pvcSizes map[string]string) resource.Quantity {
 	}
 	// Log an error if all PVCs failed to parse - this indicates a serious problem
 	if len(pvcSizes) > 0 && parseErrors == len(pvcSizes) {
-		log.Error(nil, "All PVC size quantities failed to parse - PVC size data unavailable",
+		log.Error(
+			fmt.Errorf("all %d PVC size quantities failed to parse", len(pvcSizes)),
+			"PVC size data unavailable",
 			"totalPVCs", len(pvcSizes),
 			"parseErrors", parseErrors)
 	}
