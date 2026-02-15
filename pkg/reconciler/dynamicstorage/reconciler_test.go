@@ -493,9 +493,9 @@ var _ = Describe("reconciler", func() {
 				},
 				"instance-2": {
 					// Small disk, less absolute usage, critically low available
-					TotalBytes:     10 * 1024 * 1024 * 1024,             // 10Gi
-					UsedBytes:      9*1024*1024*1024 + 500*1024*1024,    // 9.5Gi used
-					AvailableBytes: 500 * 1024 * 1024,                   // 500Mi available (critical!)
+					TotalBytes:     10 * 1024 * 1024 * 1024,          // 10Gi
+					UsedBytes:      9*1024*1024*1024 + 500*1024*1024, // 9.5Gi used
+					AvailableBytes: 500 * 1024 * 1024,                // 500Mi available (critical!)
 				},
 			}
 
