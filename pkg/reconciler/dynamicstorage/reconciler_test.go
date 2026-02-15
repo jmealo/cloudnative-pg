@@ -479,6 +479,58 @@ var _ = Describe("reconciler", func() {
 		})
 	})
 
+	Describe("findMaxUsage", func() {
+		It("track minAvailable independently from maxUsed instance", func() {
+			// This verifies the fix for the case where a smaller disk with less absolute
+			// used bytes could have critically low available space that would be missed
+			// if minAvailable was only tracked from the highest-used instance.
+			diskStatusMap := map[string]*DiskInfo{
+				"instance-1": {
+					// Large disk, high absolute usage, plenty available
+					TotalBytes:     100 * 1024 * 1024 * 1024, // 100Gi
+					UsedBytes:      90 * 1024 * 1024 * 1024,  // 90Gi used
+					AvailableBytes: 10 * 1024 * 1024 * 1024,  // 10Gi available
+				},
+				"instance-2": {
+					// Small disk, less absolute usage, critically low available
+					TotalBytes:     10 * 1024 * 1024 * 1024,             // 10Gi
+					UsedBytes:      9*1024*1024*1024 + 500*1024*1024,    // 9.5Gi used
+					AvailableBytes: 500 * 1024 * 1024,                   // 500Mi available (critical!)
+				},
+			}
+
+			maxUsed, _, minAvailable, highestUsageInstance := findMaxUsage(diskStatusMap)
+
+			// maxUsed should be from instance-1 (90Gi > 9.5Gi)
+			Expect(highestUsageInstance).To(Equal("instance-1"))
+			Expect(maxUsed).To(Equal(uint64(90 * 1024 * 1024 * 1024)))
+
+			// minAvailable should be from instance-2 (500Mi < 10Gi)
+			Expect(minAvailable).To(Equal(uint64(500 * 1024 * 1024)))
+		})
+
+		It("return zero minAvailable for empty map", func() {
+			diskStatusMap := map[string]*DiskInfo{}
+			_, _, minAvailable, _ := findMaxUsage(diskStatusMap)
+			Expect(minAvailable).To(Equal(uint64(0)))
+		})
+
+		It("return correct values for single instance", func() {
+			diskStatusMap := map[string]*DiskInfo{
+				"instance-1": {
+					TotalBytes:     10 * 1024 * 1024 * 1024,
+					UsedBytes:      8 * 1024 * 1024 * 1024,
+					AvailableBytes: 2 * 1024 * 1024 * 1024,
+				},
+			}
+			maxUsed, maxTotal, minAvailable, instance := findMaxUsage(diskStatusMap)
+			Expect(instance).To(Equal("instance-1"))
+			Expect(maxUsed).To(Equal(uint64(8 * 1024 * 1024 * 1024)))
+			Expect(maxTotal).To(Equal(uint64(10 * 1024 * 1024 * 1024)))
+			Expect(minAvailable).To(Equal(uint64(2 * 1024 * 1024 * 1024)))
+		})
+	})
+
 	Describe("patchPVCsForVolume", func() {
 		It("return error when PVC patch fails", func() {
 			pvc := corev1.PersistentVolumeClaim{
@@ -682,6 +734,95 @@ var _ = Describe("reconciler", func() {
 			err = c.Get(ctx, types.NamespacedName{Name: "test-cluster-1-wal", Namespace: "default"}, &updatedWalPVC)
 			Expect(err).ToNot(HaveOccurred())
 			Expect(updatedWalPVC.Spec.Resources.Requests[corev1.ResourceStorage]).To(Equal(resource.MustParse("2Gi")))
+		})
+
+		It("return partial success count when later PVC patch fails", func() {
+			// This test verifies that when patching multiple PVCs and one fails,
+			// we correctly report how many succeeded before the failure.
+			// This is important for understanding split-brain recovery scenarios.
+			pvc1 := corev1.PersistentVolumeClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-cluster-1",
+					Namespace: "default",
+					Labels: map[string]string{
+						utils.PvcRoleLabelName:      string(utils.PVCRolePgData),
+						utils.InstanceNameLabelName: "test-cluster-1",
+					},
+				},
+				Spec: corev1.PersistentVolumeClaimSpec{
+					Resources: corev1.VolumeResourceRequirements{
+						Requests: corev1.ResourceList{
+							corev1.ResourceStorage: resource.MustParse("5Gi"),
+						},
+					},
+				},
+			}
+			pvc2 := corev1.PersistentVolumeClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-cluster-2",
+					Namespace: "default",
+					Labels: map[string]string{
+						utils.PvcRoleLabelName:      string(utils.PVCRolePgData),
+						utils.InstanceNameLabelName: "test-cluster-2",
+					},
+				},
+				Spec: corev1.PersistentVolumeClaimSpec{
+					Resources: corev1.VolumeResourceRequirements{
+						Requests: corev1.ResourceList{
+							corev1.ResourceStorage: resource.MustParse("5Gi"),
+						},
+					},
+				},
+			}
+			pvc3 := corev1.PersistentVolumeClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-cluster-3",
+					Namespace: "default",
+					Labels: map[string]string{
+						utils.PvcRoleLabelName:      string(utils.PVCRolePgData),
+						utils.InstanceNameLabelName: "test-cluster-3",
+					},
+				},
+				Spec: corev1.PersistentVolumeClaimSpec{
+					Resources: corev1.VolumeResourceRequirements{
+						Requests: corev1.ResourceList{
+							corev1.ResourceStorage: resource.MustParse("5Gi"),
+						},
+					},
+				},
+			}
+
+			// Only register pvc1 and pvc3 in the client - pvc2 will fail to patch
+			c := fake.NewClientBuilder().
+				WithScheme(scheme.BuildWithAllKnownScheme()).
+				WithObjects(&pvc1, &pvc3).
+				Build()
+
+			result := &ReconcileResult{
+				Action:      ActionEmergencyGrow,
+				VolumeType:  VolumeTypeData,
+				CurrentSize: resource.MustParse("5Gi"),
+				TargetSize:  resource.MustParse("10Gi"),
+			}
+
+			// Pass all 3 PVCs - pvc1 succeeds, pvc2 fails, pvc3 never attempted
+			patchedCount, err := patchPVCsForVolume(ctx, c, []corev1.PersistentVolumeClaim{pvc1, pvc2, pvc3}, result)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("test-cluster-2"))
+			// pvc1 was patched before pvc2 failed
+			Expect(patchedCount).To(Equal(1))
+
+			// Verify pvc1 WAS patched (this is the split-brain state)
+			var updatedPVC1 corev1.PersistentVolumeClaim
+			err = c.Get(ctx, types.NamespacedName{Name: "test-cluster-1", Namespace: "default"}, &updatedPVC1)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(updatedPVC1.Spec.Resources.Requests[corev1.ResourceStorage]).To(Equal(resource.MustParse("10Gi")))
+
+			// Verify pvc3 was NOT patched (never reached due to early return)
+			var updatedPVC3 corev1.PersistentVolumeClaim
+			err = c.Get(ctx, types.NamespacedName{Name: "test-cluster-3", Namespace: "default"}, &updatedPVC3)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(updatedPVC3.Spec.Resources.Requests[corev1.ResourceStorage]).To(Equal(resource.MustParse("5Gi")))
 		})
 	})
 

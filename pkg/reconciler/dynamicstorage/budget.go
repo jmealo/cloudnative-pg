@@ -100,10 +100,11 @@ func CalculateBudget(cfg *apiv1.StorageConfiguration, status *apiv1.VolumeSizing
 		availableForPlanned = 0
 	}
 
-	// Calculate when budget resets. Since we track actions in a rolling 24h window,
-	// the next reset happens 24h from now (when current actions will have aged out).
-	// Note: This is an approximation - the actual reset is gradual as each action
-	// ages past 24h individually.
+	// Calculate when budget resets. The budget uses a simplified 24h tracking model:
+	// when the last action is more than 24h old, the entire action count resets to zero.
+	// This means all actions age out together based on the most recent action timestamp,
+	// rather than each action aging out individually. The reset time shown here is
+	// 24h from now, which represents when a new action taken now would age out.
 	budgetResetsAt := metav1.NewTime(time.Now().Add(24 * time.Hour))
 
 	return &apiv1.BudgetStatus{

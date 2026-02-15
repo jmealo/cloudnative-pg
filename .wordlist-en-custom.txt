@@ -595,7 +595,16 @@ VolumeSnapshot
 VolumeSnapshotClass
 VolumeSnapshotConfiguration
 VolumeSnapshots
+VolumeSizingState
+VolumeSizingStateAtLimit
+VolumeSizingStateBalanced
+VolumeSizingStateEmergency
+VolumeSizingStateNeedsGrow
+VolumeSizingStatePendingGrowth
+VolumeSizingStateResizing
+VolumeSizingStateWaitingForDiskStatus
 VolumeSizingStatus
+volumesizingstate
 WAL
 WaitingForDiskStatus
 WALArchiver

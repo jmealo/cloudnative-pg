@@ -22,6 +22,7 @@ package dynamicstorage
 import (
 	"context"
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/cloudnative-pg/machinery/pkg/log"
@@ -101,8 +102,8 @@ func Reconcile(
 ) (ctrl.Result, error) {
 	contextLogger := log.FromContext(ctx)
 
-	// Check if dynamic sizing is enabled for any volume
-	if !IsDynamicSizingEnabled(&cluster.Spec.StorageConfiguration) {
+	// Check if dynamic sizing is enabled for any volume (data or tablespace)
+	if !IsAnyDynamicSizingEnabled(cluster) {
 		return ctrl.Result{}, nil
 	}
 
@@ -115,6 +116,41 @@ func Reconcile(
 		"instanceStatusCount", instanceCount,
 		"pvcCount", len(pvcs))
 
+	// Initialize storage sizing status if needed (do this early so status is always set)
+	if cluster.Status.StorageSizing == nil {
+		cluster.Status.StorageSizing = &apiv1.StorageSizingStatus{}
+	}
+
+	// Reconcile data volume if dynamic sizing is enabled for it
+	if IsDynamicSizingEnabled(&cluster.Spec.StorageConfiguration) {
+		res, err := reconcileDataVolume(ctx, c, cluster, instanceStatuses, pvcs)
+		if err != nil || !res.IsZero() {
+			return res, err
+		}
+	}
+
+	// Reconcile tablespaces
+	res, err := reconcileTablespaces(ctx, c, cluster, instanceStatuses, pvcs)
+	if err != nil || !res.IsZero() {
+		return res, err
+	}
+
+	// Return empty result to allow the cluster controller to continue its reconciliation.
+	return ctrl.Result{}, nil
+}
+
+// reconcileDataVolume performs dynamic storage reconciliation for the data volume.
+//
+//nolint:gocognit // waiting state logic requires checking multiple conditions
+func reconcileDataVolume(
+	ctx context.Context,
+	c client.Client,
+	cluster *apiv1.Cluster,
+	instanceStatuses *postgres.PostgresqlStatusList,
+	pvcs []corev1.PersistentVolumeClaim,
+) (ctrl.Result, error) {
+	contextLogger := log.FromContext(ctx)
+
 	// Collect disk status from instance statuses
 	diskStatusMap := collectDiskStatusForVolume(instanceStatuses, VolumeTypeData, "")
 	contextLogger.Debug("Collected disk status map", "count", len(diskStatusMap))
@@ -126,10 +162,7 @@ func Reconcile(
 			"percentUsed", info.PercentUsed)
 	}
 
-	// Initialize storage sizing status if needed (do this early so status is always set)
-	if cluster.Status.StorageSizing == nil {
-		cluster.Status.StorageSizing = &apiv1.StorageSizingStatus{}
-	}
+	// Initialize data volume status
 	if cluster.Status.StorageSizing.Data == nil {
 		cluster.Status.StorageSizing.Data = &apiv1.VolumeSizingStatus{}
 	}
@@ -245,13 +278,6 @@ func Reconcile(
 		}
 	}
 
-	// Reconcile tablespaces
-	res, err := reconcileTablespaces(ctx, c, cluster, instanceStatuses, pvcs)
-	if err != nil || !res.IsZero() {
-		return res, err
-	}
-
-	// Return empty result to allow the cluster controller to continue its reconciliation.
 	return ctrl.Result{}, nil
 }
 
@@ -492,15 +518,23 @@ func evaluateSizing(
 }
 
 func findMaxUsage(diskStatusMap map[string]*DiskInfo) (uint64, uint64, uint64, string) {
-	var maxUsed, maxTotal, minAvailable uint64
+	var maxUsed, maxTotal uint64
+	minAvailable := uint64(math.MaxUint64)
 	var highestUsageInstance string
 	for instanceName, info := range diskStatusMap {
+		// Track minimum available space independently across ALL instances
+		// to correctly detect CriticalMinimumFree conditions on any instance.
+		if info.AvailableBytes < minAvailable {
+			minAvailable = info.AvailableBytes
+		}
 		if info.UsedBytes > maxUsed {
 			maxUsed = info.UsedBytes
 			maxTotal = info.TotalBytes
-			minAvailable = info.AvailableBytes
 			highestUsageInstance = instanceName
 		}
+	}
+	if len(diskStatusMap) == 0 {
+		minAvailable = 0
 	}
 	return maxUsed, maxTotal, minAvailable, highestUsageInstance
 }

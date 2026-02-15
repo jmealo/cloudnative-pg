@@ -382,6 +382,9 @@ func (s *StorageConfiguration) GetSizeOrNil() *resource.Quantity {
 	if s.Size != "" {
 		quantity, err := resource.ParseQuantity(s.Size)
 		if err != nil {
+			log.Warning("Failed to parse storage size, treating as unconfigured",
+				"size", s.Size,
+				"error", err)
 			return nil
 		}
 
@@ -392,6 +395,9 @@ func (s *StorageConfiguration) GetSizeOrNil() *resource.Quantity {
 	if s.Request != "" {
 		quantity, err := resource.ParseQuantity(s.Request)
 		if err != nil {
+			log.Warning("Failed to parse storage request, treating as unconfigured",
+				"request", s.Request,
+				"error", err)
 			return nil
 		}
 

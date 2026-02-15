@@ -197,5 +197,138 @@ var _ = Describe("budget", func() {
 			Expect(budget.AvailableForEmergency).To(Equal(1))
 			Expect(budget.AvailableForPlanned).To(Equal(2))
 		})
+
+		It("correctly handle sequential increments to exhaustion", func() {
+			// This test verifies that sequential budget increments work correctly
+			// and that availability counters are properly decremented.
+			// Note: Concurrent updates are handled by Kubernetes optimistic locking
+			// at the API server level (resourceVersion conflicts).
+			cfg := &apiv1.StorageConfiguration{
+				EmergencyGrow: &apiv1.EmergencyGrowConfig{
+					MaxActionsPerDay:            ptr.To(4),
+					ReservedActionsForEmergency: ptr.To(1),
+				},
+			}
+
+			// Simulate sequential increments as would happen across reconcile loops
+			status := &apiv1.VolumeSizingStatus{
+				LastAction: &apiv1.SizingAction{
+					Timestamp: metav1.NewTime(time.Now()),
+				},
+				Budget: &apiv1.BudgetStatus{
+					ActionsLast24h: 0,
+				},
+			}
+
+			// First increment: 0 -> 1, available for planned: 3 -> 2
+			budget := IncrementBudgetUsage(cfg, status)
+			Expect(budget.ActionsLast24h).To(Equal(1))
+			Expect(budget.AvailableForPlanned).To(Equal(2))
+			Expect(budget.AvailableForEmergency).To(Equal(1))
+
+			// Update status for next increment
+			status.Budget = budget
+
+			// Second increment: 1 -> 2, available for planned: 2 -> 1
+			budget = IncrementBudgetUsage(cfg, status)
+			Expect(budget.ActionsLast24h).To(Equal(2))
+			Expect(budget.AvailableForPlanned).To(Equal(1))
+			Expect(budget.AvailableForEmergency).To(Equal(1))
+
+			// Update status for next increment
+			status.Budget = budget
+
+			// Third increment: 2 -> 3, available for planned: 1 -> 0
+			budget = IncrementBudgetUsage(cfg, status)
+			Expect(budget.ActionsLast24h).To(Equal(3))
+			Expect(budget.AvailableForPlanned).To(Equal(0))
+			Expect(budget.AvailableForEmergency).To(Equal(1))
+
+			// Update status for next increment
+			status.Budget = budget
+
+			// Fourth increment: 3 -> 4, emergency reserve consumed
+			budget = IncrementBudgetUsage(cfg, status)
+			Expect(budget.ActionsLast24h).To(Equal(4))
+			Expect(budget.AvailableForPlanned).To(Equal(0))
+			Expect(budget.AvailableForEmergency).To(Equal(0))
+		})
+	})
+
+	Describe("Budget boundary conditions", func() {
+		It("correctly reset budget exactly at 24h boundary", func() {
+			cfg := &apiv1.StorageConfiguration{
+				EmergencyGrow: &apiv1.EmergencyGrowConfig{
+					MaxActionsPerDay: ptr.To(4),
+				},
+			}
+
+			// Last action exactly 24h ago (should NOT reset)
+			status := &apiv1.VolumeSizingStatus{
+				LastAction: &apiv1.SizingAction{
+					Timestamp: metav1.NewTime(time.Now().Add(-24 * time.Hour)),
+				},
+				Budget: &apiv1.BudgetStatus{
+					ActionsLast24h: 4,
+				},
+			}
+			budget := CalculateBudget(cfg, status)
+			// time.Since checks < 24h, so exactly 24h should reset
+			Expect(budget.ActionsLast24h).To(Equal(0))
+		})
+
+		It("preserve budget just under 24h boundary", func() {
+			cfg := &apiv1.StorageConfiguration{
+				EmergencyGrow: &apiv1.EmergencyGrowConfig{
+					MaxActionsPerDay: ptr.To(4),
+				},
+			}
+
+			// Last action just under 24h ago (should preserve)
+			status := &apiv1.VolumeSizingStatus{
+				LastAction: &apiv1.SizingAction{
+					Timestamp: metav1.NewTime(time.Now().Add(-23*time.Hour - 59*time.Minute)),
+				},
+				Budget: &apiv1.BudgetStatus{
+					ActionsLast24h: 4,
+				},
+			}
+			budget := CalculateBudget(cfg, status)
+			Expect(budget.ActionsLast24h).To(Equal(4))
+		})
+
+		It("correctly block emergency when at max budget", func() {
+			cfg := &apiv1.StorageConfiguration{
+				EmergencyGrow: &apiv1.EmergencyGrowConfig{
+					MaxActionsPerDay: ptr.To(4),
+				},
+			}
+			status := &apiv1.VolumeSizingStatus{
+				LastAction: &apiv1.SizingAction{
+					Timestamp: metav1.NewTime(time.Now()),
+				},
+				Budget: &apiv1.BudgetStatus{
+					ActionsLast24h: 4,
+				},
+			}
+			Expect(HasBudgetForEmergency(cfg, status)).To(BeFalse())
+		})
+
+		It("allow emergency at max-1 budget", func() {
+			cfg := &apiv1.StorageConfiguration{
+				EmergencyGrow: &apiv1.EmergencyGrowConfig{
+					MaxActionsPerDay: ptr.To(4),
+				},
+			}
+			status := &apiv1.VolumeSizingStatus{
+				LastAction: &apiv1.SizingAction{
+					Timestamp: metav1.NewTime(time.Now()),
+				},
+				Budget: &apiv1.BudgetStatus{
+					ActionsLast24h: 3,
+				},
+			}
+			Expect(HasBudgetForEmergency(cfg, status)).To(BeTrue())
+		})
 	})
 })

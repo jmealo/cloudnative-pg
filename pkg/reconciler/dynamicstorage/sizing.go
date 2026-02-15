@@ -48,6 +48,20 @@ func IsDynamicSizingEnabled(cfg *apiv1.StorageConfiguration) bool {
 	return cfg.Request != "" && cfg.Limit != ""
 }
 
+// IsAnyDynamicSizingEnabled returns true if dynamic sizing is configured for
+// any volume in the cluster (data volume or any tablespace).
+func IsAnyDynamicSizingEnabled(cluster *apiv1.Cluster) bool {
+	if IsDynamicSizingEnabled(&cluster.Spec.StorageConfiguration) {
+		return true
+	}
+	for i := range cluster.Spec.Tablespaces {
+		if IsDynamicSizingEnabled(&cluster.Spec.Tablespaces[i].Storage) {
+			return true
+		}
+	}
+	return false
+}
+
 // GetTargetBuffer returns the target buffer percentage from config or default.
 func GetTargetBuffer(cfg *apiv1.StorageConfiguration) int {
 	if cfg == nil || cfg.TargetBuffer == nil {

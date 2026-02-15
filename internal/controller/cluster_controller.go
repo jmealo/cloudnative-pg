@@ -596,15 +596,22 @@ func (r *ClusterReconciler) reconcile(ctx context.Context, cluster *apiv1.Cluste
 		return hookResult.Result, hookResult.Err
 	}
 
+	// Run plugin status hook before the dynamic storage requeue to ensure
+	// plugin status propagation is not blocked by the periodic requeue.
+	statusResult, statusErr := setStatusPluginHook(ctx, r.Client, cnpgiClient.GetPluginClientFromContext(ctx), cluster)
+	if statusErr != nil {
+		return statusResult, statusErr
+	}
+
 	// Request periodic requeue for dynamic storage monitoring.
 	// When dynamic storage is enabled, we need to periodically check disk usage
 	// to trigger storage growth when thresholds are crossed. Without this, the
 	// reconciler would only run on watch events, missing disk usage changes.
-	if dynamicstorage.IsDynamicSizingEnabled(&cluster.Spec.StorageConfiguration) {
+	if dynamicstorage.IsAnyDynamicSizingEnabled(cluster) {
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 
-	return setStatusPluginHook(ctx, r.Client, cnpgiClient.GetPluginClientFromContext(ctx), cluster)
+	return statusResult, nil
 }
 
 func (r *ClusterReconciler) ensureNoFailoverOnFullDisk(

@@ -103,7 +103,7 @@ func IsMaintenanceWindowOpen(cfg *apiv1.StorageConfiguration) bool {
 	}
 
 	windowEnd := windowStart.Add(duration)
-	return now.After(windowStart) && now.Before(windowEnd)
+	return !now.Before(windowStart) && now.Before(windowEnd)
 }
 
 // NextMaintenanceWindow returns the next maintenance window start time.
