@@ -56,6 +56,7 @@ import (
 	"github.com/cloudnative-pg/cloudnative-pg/pkg/certs"
 	"github.com/cloudnative-pg/cloudnative-pg/pkg/management/postgres/webserver/client/remote"
 	"github.com/cloudnative-pg/cloudnative-pg/pkg/postgres"
+	"github.com/cloudnative-pg/cloudnative-pg/pkg/reconciler/dynamicstorage"
 	"github.com/cloudnative-pg/cloudnative-pg/pkg/reconciler/hibernation"
 	instanceReconciler "github.com/cloudnative-pg/cloudnative-pg/pkg/reconciler/instance"
 	"github.com/cloudnative-pg/cloudnative-pg/pkg/reconciler/majorupgrade"
@@ -72,6 +73,12 @@ const (
 	poolerClusterKey              = ".spec.cluster.name"
 	disableDefaultQueriesSpecPath = ".spec.monitoring.disableDefaultQueries"
 	imageCatalogKey               = ".spec.imageCatalog.name"
+
+	// dynamicStorageRequeueInterval is the interval at which the controller
+	// requeues for dynamic storage monitoring when dynamic sizing is enabled.
+	// This ensures periodic disk usage checks to trigger storage growth when
+	// thresholds are crossed.
+	dynamicStorageRequeueInterval = 30 * time.Second
 )
 
 var apiSGVString = apiv1.SchemeGroupVersion.String()
@@ -351,36 +358,6 @@ func (r *ClusterReconciler) reconcile(ctx context.Context, cluster *apiv1.Cluste
 		return ctrl.Result{}, fmt.Errorf("cannot update the resource status: %w", err)
 	}
 
-	// Calls pre-reconcile hooks
-	if hookResult := preReconcilePluginHooks(ctx, cluster, cluster); hookResult.StopReconciliation {
-		contextLogger.Info("Pre-reconcile hook stopped the reconciliation loop",
-			"hookResult", hookResult)
-		return hookResult.Result, hookResult.Err
-	}
-
-	if cluster.Status.CurrentPrimary != "" &&
-		cluster.Status.CurrentPrimary != cluster.Status.TargetPrimary {
-		contextLogger.Info("There is a switchover or a failover "+
-			"in progress, waiting for the operation to complete",
-			"currentPrimary", cluster.Status.CurrentPrimary,
-			"targetPrimary", cluster.Status.TargetPrimary)
-
-		return ctrl.Result{RequeueAfter: 1 * time.Second}, nil
-	}
-
-	if cluster.ShouldPromoteFromReplicaCluster() {
-		if !(cluster.Status.Phase == apiv1.PhaseReplicaClusterPromotion ||
-			cluster.Status.Phase == apiv1.PhaseUnrecoverable) {
-			if err := r.RegisterPhase(ctx,
-				cluster,
-				apiv1.PhaseReplicaClusterPromotion,
-				"Replica cluster promotion in progress"); err != nil {
-				return ctrl.Result{}, err
-			}
-		}
-		return ctrl.Result{RequeueAfter: 1 * time.Second}, nil
-	}
-
 	// Store in the context the TLS configuration required communicating with the Pods
 	ctx, err = certs.NewTLSConfigForContext(
 		ctx,
@@ -394,6 +371,35 @@ func (r *ClusterReconciler) reconcile(ctx context.Context, cluster *apiv1.Cluste
 	// Get the replication status
 	instancesStatus := r.InstanceClient.GetStatusFromInstances(ctx, resources.instances)
 
+	// Dynamic storage sizing reconciliation.
+	// This runs even during switchover/failover because:
+	// 1. It operates at Kubernetes PVC level, not PostgreSQL level
+	// 2. Emergency disk growth should proceed regardless of cluster state
+	// 3. Running out of disk is critical and shouldn't wait for switchover
+	if res, err := dynamicstorage.Reconcile(
+		ctx,
+		r.Client,
+		cluster,
+		resources.instances.Items,
+		&instancesStatus,
+		resources.pvcs.Items,
+	); err != nil || !res.IsZero() {
+		return res, err
+	}
+
+	// Pause reconciliation during switchover/failover.
+	// Dynamic storage runs above, but the rest of reconciliation should wait
+	// to avoid conflicts with the switchover/failover process.
+	if cluster.Status.CurrentPrimary != "" &&
+		cluster.Status.CurrentPrimary != cluster.Status.TargetPrimary {
+		contextLogger.Info("There is a switchover or a failover "+
+			"in progress, waiting for the operation to complete",
+			"currentPrimary", cluster.Status.CurrentPrimary,
+			"targetPrimary", cluster.Status.TargetPrimary)
+
+		return ctrl.Result{RequeueAfter: 1 * time.Second}, nil
+	}
+
 	// we update all the cluster status fields that require the instances status
 	if err := r.updateClusterStatusThatRequiresInstancesState(ctx, cluster, instancesStatus); err != nil {
 		if apierrs.IsConflict(err) {
@@ -402,6 +408,26 @@ func (r *ClusterReconciler) reconcile(ctx context.Context, cluster *apiv1.Cluste
 			return ctrl.Result{Requeue: true}, nil
 		}
 		return ctrl.Result{}, fmt.Errorf("cannot update the instances status on the cluster: %w", err)
+	}
+
+	// Calls pre-reconcile hooks
+	if hookResult := preReconcilePluginHooks(ctx, cluster, cluster); hookResult.StopReconciliation {
+		contextLogger.Info("Pre-reconcile hook stopped the reconciliation loop",
+			"hookResult", hookResult)
+		return hookResult.Result, hookResult.Err
+	}
+
+	if cluster.ShouldPromoteFromReplicaCluster() {
+		if !(cluster.Status.Phase == apiv1.PhaseReplicaClusterPromotion ||
+			cluster.Status.Phase == apiv1.PhaseUnrecoverable) {
+			if err := r.RegisterPhase(ctx,
+				cluster,
+				apiv1.PhaseReplicaClusterPromotion,
+				"Replica cluster promotion in progress"); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
+		return ctrl.Result{RequeueAfter: 1 * time.Second}, nil
 	}
 
 	// If a Pod loses connectivity, the operator will fail over but the faulty
@@ -576,7 +602,26 @@ func (r *ClusterReconciler) reconcile(ctx context.Context, cluster *apiv1.Cluste
 		return hookResult.Result, hookResult.Err
 	}
 
-	return setStatusPluginHook(ctx, r.Client, cnpgiClient.GetPluginClientFromContext(ctx), cluster)
+	// Run plugin status hook before the dynamic storage requeue to ensure
+	// plugin status propagation is not blocked by the periodic requeue.
+	statusResult, statusErr := setStatusPluginHook(ctx, r.Client, cnpgiClient.GetPluginClientFromContext(ctx), cluster)
+	if statusErr != nil {
+		return statusResult, statusErr
+	}
+
+	// Request periodic requeue for dynamic storage monitoring.
+	// When dynamic storage is enabled, we need to periodically check disk usage
+	// to trigger storage growth when thresholds are crossed. Without this, the
+	// reconciler would only run on watch events, missing disk usage changes.
+	if dynamicstorage.IsAnyDynamicSizingEnabled(cluster) {
+		dynamicResult := ctrl.Result{RequeueAfter: dynamicStorageRequeueInterval}
+		if statusResult.RequeueAfter > 0 && statusResult.RequeueAfter < dynamicResult.RequeueAfter {
+			return statusResult, nil
+		}
+		return dynamicResult, nil
+	}
+
+	return statusResult, nil
 }
 
 func (r *ClusterReconciler) ensureNoFailoverOnFullDisk(

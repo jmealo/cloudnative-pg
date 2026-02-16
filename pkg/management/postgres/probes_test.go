@@ -33,6 +33,59 @@ import (
 )
 
 var _ = Describe("probes", func() {
+	It("GetStatus should mask probe errors when instance might be unavailable", func() {
+		tmpDir := GinkgoT().TempDir()
+
+		instance := NewInstance()
+		instance.PgData = tmpDir
+		instance.SetMightBeUnavailable(true)
+
+		status, err := instance.GetStatus()
+		Expect(err).ToNot(HaveOccurred())
+
+		Expect(status).ToNot(BeNil())
+		Expect(status.MightBeUnavailable).To(BeTrue())
+		Expect(status.MightBeUnavailableMaskedError).ToNot(BeEmpty())
+		Expect(status.ErrorMessage).To(BeEmpty())
+		Expect(status.IsPrimary).To(BeTrue())
+	})
+
+	It("GetStatus should return partial status with ErrorMessage when DB is down but disk is accessible", func() {
+		// Mock the PgData path
+		tmpDir := GinkgoT().TempDir()
+
+		// Create instance
+		instance := NewInstance()
+		instance.PgData = tmpDir
+
+		// We expect GetStatus to fail because the instance is not running/mocked DB connection fails
+		status, err := instance.GetStatus()
+		Expect(err).To(HaveOccurred())
+
+		// But we expect partial status to be returned
+		Expect(status).ToNot(BeNil())
+		Expect(status.ErrorMessage).ToNot(BeEmpty())
+		Expect(status.ErrorMessage).To(Equal(err.Error()))
+
+		// And specifically DiskStatus should be populated
+		Expect(status.DiskStatus).ToNot(BeNil())
+		Expect(status.DiskStatus.TotalBytes).To(BeNumerically(">", 0))
+	})
+
+	It("GetStatus should surface data disk probe errors without masking status", func() {
+		instance := NewInstance()
+		instance.PgData = "/path/that/does/not/exist"
+
+		status, err := instance.GetStatus()
+		Expect(err).To(HaveOccurred())
+		Expect(status).ToNot(BeNil())
+
+		Expect(status.DataDiskStatusError).ToNot(BeEmpty())
+		Expect(status.DiskStatus).To(BeNil())
+		// ErrorMessage still reports the overall status probe error
+		Expect(status.ErrorMessage).ToNot(BeEmpty())
+	})
+
 	It("fillWalStatus should properly handle errors", func() {
 		instance := &Instance{}
 		status := &postgres.PostgresqlStatus{

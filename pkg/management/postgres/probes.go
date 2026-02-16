@@ -23,8 +23,10 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/cloudnative-pg/machinery/pkg/fileutils"
 	"github.com/cloudnative-pg/machinery/pkg/log"
@@ -33,6 +35,7 @@ import (
 
 	apiv1 "github.com/cloudnative-pg/cloudnative-pg/api/v1"
 	"github.com/cloudnative-pg/cloudnative-pg/pkg/executablehash"
+	"github.com/cloudnative-pg/cloudnative-pg/pkg/management/postgres/disk"
 	"github.com/cloudnative-pg/cloudnative-pg/pkg/postgres"
 	"github.com/cloudnative-pg/cloudnative-pg/pkg/specs"
 	"github.com/cloudnative-pg/cloudnative-pg/pkg/versions"
@@ -46,21 +49,36 @@ func (instance *Instance) GetStatus() (result *postgres.PostgresqlStatus, err er
 		MightBeUnavailable:     instance.MightBeUnavailable(),
 	}
 
+	// Always collect disk status as it doesn't require a database connection.
+	// This is critical for dynamic storage sizing even when PostgreSQL is down.
+	instance.fillDiskStatus(result)
+
 	// this deferred function may override the error returned. Take extra care.
 	defer func() {
-		if !result.MightBeUnavailable {
+		if err != nil {
+			result.ErrorMessage = err.Error()
+		}
+
+		// If the instance is expected to be temporarily unavailable, mask probe
+		// failures and derive primary status from data-dir marker files.
+		if !result.MightBeUnavailable || err == nil {
 			return
 		}
-		if result.MightBeUnavailable && err == nil {
-			return
-		}
+
 		// we save the error that we are masking
 		result.MightBeUnavailableMaskedError = err.Error()
-		// We override the error. We only care about checking if isPrimary is correctly detected
-		result.IsPrimary, err = instance.IsPrimary()
-		if err != nil {
+		// We override the original probe error with IsPrimary marker-file checks.
+		isPrimary, primaryErr := instance.IsPrimary()
+		if primaryErr != nil {
+			err = primaryErr
+			result.ErrorMessage = primaryErr.Error()
 			return
 		}
+		result.IsPrimary = isPrimary
+
+		// Masking succeeded, so clear the error signal fields.
+		err = nil
+		result.ErrorMessage = ""
 	}()
 
 	if instance.PgRewindIsRunning {
@@ -266,7 +284,11 @@ func (instance *Instance) fillStatus(result *postgres.PostgresqlStatus) error {
 		return err
 	}
 
-	return instance.fillWalStatus(result)
+	if err := instance.fillWalStatus(result); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 func (instance *Instance) fillBasebackupStats(
@@ -688,4 +710,118 @@ func GetReadyWALFiles() (fileNames []string, err error) {
 	}
 
 	return fileNames, nil
+}
+
+// fillDiskStatus fills the disk status information for data, WAL, and tablespace volumes.
+// This is used by the dynamic storage sizing feature to monitor disk usage.
+func (instance *Instance) fillDiskStatus(result *postgres.PostgresqlStatus) {
+	pgData := instance.PgData
+	if pgData == "" {
+		pgData = specs.PgDataPath
+	}
+
+	// Probe data volume disk status with retries for transient filesystem issues
+	var dataStatus *disk.Status
+	var err error
+	for attempt := 0; attempt < 3; attempt++ {
+		dataStatus, err = disk.Probe(pgData)
+		if err == nil {
+			break
+		}
+		// Brief pause before retry
+		time.Sleep(100 * time.Millisecond)
+	}
+	if err != nil {
+		// Log warning - disk status is needed for dynamic storage sizing
+		log.Warning("Failed to probe data volume disk status after retries - dynamic storage sizing will be impaired",
+			"path", pgData, "error", err)
+		result.DataDiskStatusError = err.Error()
+	} else {
+		result.DiskStatus = &postgres.DiskStatus{
+			TotalBytes:     dataStatus.TotalBytes,
+			UsedBytes:      dataStatus.UsedBytes,
+			AvailableBytes: dataStatus.AvailableBytes,
+			PercentUsed:    dataStatus.PercentUsed,
+		}
+		log.Debug("Disk status collected successfully",
+			"path", pgData,
+			"totalBytes", dataStatus.TotalBytes,
+			"usedBytes", dataStatus.UsedBytes,
+			"percentUsed", dataStatus.PercentUsed)
+	}
+
+	// Probe WAL volume if it exists (separate WAL volume is optional)
+	if _, err := os.Stat(specs.PgWalVolumePath); err == nil {
+		walStatus, err := disk.Probe(specs.PgWalVolumePath)
+		if err != nil {
+			log.Warning("Failed to probe WAL volume disk status", "path", specs.PgWalVolumePath, "error", err)
+			result.WALDiskStatusError = err.Error()
+		} else {
+			result.WALDiskStatus = &postgres.DiskStatus{
+				TotalBytes:     walStatus.TotalBytes,
+				UsedBytes:      walStatus.UsedBytes,
+				AvailableBytes: walStatus.AvailableBytes,
+				PercentUsed:    walStatus.PercentUsed,
+			}
+		}
+	}
+
+	// Probe tablespace volumes if they exist
+	result.TablespaceDiskStatus, result.TablespaceDiskStatusErrors = probeTablespaceDiskStatus()
+}
+
+// probeTablespaceDiskStatus probes disk status for all tablespace volumes.
+func probeTablespaceDiskStatus() (map[string]*postgres.DiskStatus, map[string]string) {
+	if _, err := os.Stat(specs.PgTablespaceVolumePath); err != nil {
+		log.Debug("Tablespace volume path does not exist",
+			"path", specs.PgTablespaceVolumePath,
+			"error", err)
+		return nil, nil
+	}
+
+	entries, err := os.ReadDir(specs.PgTablespaceVolumePath)
+	if err != nil {
+		log.Info("Failed to read tablespace volume directory", "path", specs.PgTablespaceVolumePath, "error", err)
+		return nil, map[string]string{"_directory": err.Error()}
+	}
+
+	log.Debug("Found tablespace volume entries",
+		"path", specs.PgTablespaceVolumePath,
+		"entryCount", len(entries))
+
+	statusMap := make(map[string]*postgres.DiskStatus)
+	errorMap := make(map[string]string)
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			log.Debug("Skipping non-directory tablespace entry",
+				"name", entry.Name())
+			continue
+		}
+		tsPath := specs.MountForTablespace(entry.Name())
+		tsStatus, err := disk.Probe(tsPath)
+		if err != nil {
+			log.Info("Failed to probe tablespace volume disk status",
+				"tablespace", entry.Name(),
+				"path", tsPath,
+				"error", err)
+			errorMap[entry.Name()] = err.Error()
+			continue
+		}
+		statusMap[entry.Name()] = &postgres.DiskStatus{
+			TotalBytes:     tsStatus.TotalBytes,
+			UsedBytes:      tsStatus.UsedBytes,
+			AvailableBytes: tsStatus.AvailableBytes,
+			PercentUsed:    tsStatus.PercentUsed,
+		}
+		log.Debug("Tablespace disk status collected successfully",
+			"tablespace", entry.Name(),
+			"path", tsPath,
+			"totalBytes", tsStatus.TotalBytes,
+			"usedBytes", tsStatus.UsedBytes,
+			"percentUsed", tsStatus.PercentUsed)
+	}
+	if len(errorMap) == 0 {
+		errorMap = nil
+	}
+	return statusMap, errorMap
 }

@@ -1,0 +1,20 @@
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: dynamic-tbs-grow
+spec:
+  instances: 1
+
+  storage:
+    request: 5Gi
+    limit: 10Gi
+    targetBuffer: 20
+
+  tablespaces:
+    - name: tbsdynamic
+      storage:
+        request: 1Gi
+        limit: 5Gi
+        targetBuffer: 20
+        emergencyGrow:
+          criticalMinimumFree: 100Mi

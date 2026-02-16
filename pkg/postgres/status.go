@@ -75,6 +75,9 @@ type PostgresqlStatus struct {
 	// status of a Pod
 	Error error `json:"-"`
 
+	// ErrorMessage is the string representation of Error, for JSON serialization
+	ErrorMessage string `json:"errorMessage,omitempty"`
+
 	// contains the PgStatReplication rows content.
 	ReplicationInfo PgStatReplicationList `json:"replicationInfo,omitempty"`
 	// contains the PgReplicationSlot rows content.
@@ -92,6 +95,30 @@ type PostgresqlStatus struct {
 	// allowing detection of restarts that don't change the container ID or executable hash.
 	SessionID string `json:"sessionID"`
 
+	// DiskStatus contains filesystem statistics for the data volume.
+	// This is used by the dynamic storage sizing feature to monitor disk usage.
+	DiskStatus *DiskStatus `json:"diskStatus,omitempty"`
+
+	// DataDiskStatusError contains the latest data-volume probe error.
+	// This does not indicate that the whole instance status request failed.
+	DataDiskStatusError string `json:"dataDiskStatusError,omitempty"`
+
+	// WALDiskStatus contains filesystem statistics for the WAL volume.
+	// This is populated only when walStorage is configured.
+	WALDiskStatus *DiskStatus `json:"walDiskStatus,omitempty"`
+
+	// WALDiskStatusError contains the latest WAL-volume probe error.
+	// This does not indicate that the whole instance status request failed.
+	WALDiskStatusError string `json:"walDiskStatusError,omitempty"`
+
+	// TablespaceDiskStatus contains filesystem statistics for tablespace volumes.
+	// Maps tablespace name to disk status.
+	TablespaceDiskStatus map[string]*DiskStatus `json:"tablespaceDiskStatus,omitempty"`
+
+	// TablespaceDiskStatusErrors maps tablespace name to the latest probe error.
+	// This does not indicate that the whole instance status request failed.
+	TablespaceDiskStatusErrors map[string]string `json:"tablespaceDiskStatusErrors,omitempty"`
+
 	// This field represents the Kubelet point-of-view of the readiness
 	// status of this instance and may be slightly stale when the Kubelet has
 	// not still invoked the readiness probe.
@@ -101,6 +128,21 @@ type PostgresqlStatus struct {
 	//
 	// This field is never populated in the instance manager.
 	IsPodReady bool `json:"isPodReady"`
+}
+
+// DiskStatus represents filesystem statistics for a volume.
+type DiskStatus struct {
+	// TotalBytes is the total size of the filesystem in bytes.
+	TotalBytes uint64 `json:"totalBytes"`
+
+	// UsedBytes is the number of bytes used on the filesystem.
+	UsedBytes uint64 `json:"usedBytes"`
+
+	// AvailableBytes is the number of bytes available to non-root users.
+	AvailableBytes uint64 `json:"availableBytes"`
+
+	// PercentUsed is the percentage of the filesystem that is used.
+	PercentUsed float64 `json:"percentUsed"`
 }
 
 // PgStatReplication contains the replications of replicas as reported by the primary instance

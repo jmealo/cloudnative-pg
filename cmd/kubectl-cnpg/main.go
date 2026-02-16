@@ -50,6 +50,7 @@ import (
 	"github.com/cloudnative-pg/cloudnative-pg/internal/cmd/plugin/restart"
 	"github.com/cloudnative-pg/cloudnative-pg/internal/cmd/plugin/snapshot"
 	"github.com/cloudnative-pg/cloudnative-pg/internal/cmd/plugin/status"
+	"github.com/cloudnative-pg/cloudnative-pg/internal/cmd/plugin/storage"
 	"github.com/cloudnative-pg/cloudnative-pg/internal/cmd/versions"
 
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
@@ -132,6 +133,7 @@ func main() {
 		restart.NewCmd(),
 		snapshot.NewCmd(),
 		status.NewCmd(),
+		storage.NewCmd(),
 		subscription.NewCmd(),
 		versions.NewCmd(),
 	}

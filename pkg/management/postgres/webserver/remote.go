@@ -263,8 +263,15 @@ func (ws *remoteWebserverEndpoints) pgStatus(w http.ResponseWriter, _ *http.Requ
 		log.Debug(
 			"Instance status probe failing",
 			"err", err.Error())
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+
+		// If we have a status object, we still return it even if there was an error
+		// during collection of some fields. This ensures that fields like DiskStatus
+		// (which are collected early) are available to the operator even when
+		// the database is not ready.
+		if status == nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 	}
 
 	// Marshal the status back to the operator
