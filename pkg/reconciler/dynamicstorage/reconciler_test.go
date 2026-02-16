@@ -197,6 +197,7 @@ var _ = Describe("reconciler", func() {
 			Expect(updatedCluster.Status.StorageSizing.Data).ToNot(BeNil())
 			Expect(updatedCluster.Status.StorageSizing.Data.LastAction).ToNot(BeNil())
 			Expect(updatedCluster.Status.StorageSizing.Data.LastAction.Kind).To(Equal("EmergencyGrow"))
+			Expect(updatedCluster.Status.StorageSizing.Data.State).To(Equal(apiv1.VolumeSizingStateResizing))
 		})
 
 		It("not trigger false growth when filesystem overhead makes TotalBytes less than PVC capacity", func() {
@@ -412,6 +413,63 @@ var _ = Describe("reconciler", func() {
 			actual := updatedPVC.Spec.Resources.Requests[corev1.ResourceStorage]
 			Expect(actual.Cmp(expected)).To(Equal(0),
 				"PVC should grow from 5Gi to 6Gi, got %s", actual.String())
+		})
+
+		It("persist AtLimit state when limit is reached", func() {
+			status := &postgres.PostgresqlStatusList{
+				Items: []postgres.PostgresqlStatus{
+					{
+						Pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "test-cluster-1"}},
+						DiskStatus: &postgres.DiskStatus{
+							TotalBytes:     10 * 1024 * 1024 * 1024,
+							UsedBytes:      9 * 1024 * 1024 * 1024, // 90% used
+							AvailableBytes: 1 * 1024 * 1024 * 1024,
+							PercentUsed:    90,
+						},
+					},
+				},
+			}
+			pvc := corev1.PersistentVolumeClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-cluster-1",
+					Namespace: "default",
+					Labels: map[string]string{
+						utils.PvcRoleLabelName:      string(utils.PVCRolePgData),
+						utils.InstanceNameLabelName: "test-cluster-1",
+					},
+				},
+				Spec: corev1.PersistentVolumeClaimSpec{
+					Resources: corev1.VolumeResourceRequirements{
+						Requests: corev1.ResourceList{
+							corev1.ResourceStorage: resource.MustParse("10Gi"),
+						},
+					},
+				},
+				Status: corev1.PersistentVolumeClaimStatus{
+					Capacity: corev1.ResourceList{
+						corev1.ResourceStorage: resource.MustParse("10Gi"),
+					},
+				},
+			}
+
+			cluster.Spec.StorageConfiguration.Request = "5Gi"
+			cluster.Spec.StorageConfiguration.Limit = "10Gi" // Current size is at limit
+
+			c := fake.NewClientBuilder().
+				WithScheme(scheme.BuildWithAllKnownScheme()).
+				WithObjects(cluster, &pvc).
+				WithStatusSubresource(cluster).
+				Build()
+
+			res, err := Reconcile(ctx, c, cluster, nil, status, []corev1.PersistentVolumeClaim{pvc})
+			Expect(err).ToNot(HaveOccurred())
+			Expect(res.IsZero()).To(BeTrue())
+
+			// Check that cluster status was updated to AtLimit
+			var updatedCluster apiv1.Cluster
+			err = c.Get(ctx, types.NamespacedName{Name: "test-cluster", Namespace: "default"}, &updatedCluster)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(updatedCluster.Status.StorageSizing.Data.State).To(Equal(apiv1.VolumeSizingStateAtLimit))
 		})
 
 		It("queue growth if maintenance window is closed", func() {

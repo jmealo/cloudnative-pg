@@ -23,6 +23,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"reflect"
 	"time"
 
 	"github.com/cloudnative-pg/machinery/pkg/log"
@@ -260,6 +261,9 @@ func reconcileDataVolume(
 		"sizes", actualSizes,
 		"pvcCount", len(pvcs))
 
+	// Capture old status to detect changes that need persistence (e.g., transition to AtLimit)
+	oldStatus := cluster.Status.StorageSizing.Data.DeepCopy()
+
 	// Evaluate sizing for data volume, using PVC capacity as the authoritative current size.
 	// Filesystem TotalBytes from statfs is smaller than PVC capacity due to filesystem
 	// metadata overhead (~3% for ext4/xfs), so we must use PVC capacity to avoid
@@ -283,10 +287,10 @@ func reconcileDataVolume(
 			"reason", result.Reason)
 	}
 
-	// Always persist status updates when the action indicates a state change.
-	// PendingGrowth needs to be persisted so the test can observe the state,
-	// and other actions need their status changes persisted as well.
-	if result.Action != ActionNoOp {
+	// Persist status updates when the status has changed.
+	// This ensures that passive state changes like "AtLimit" or "PendingGrowth"
+	// are visible to operators even when no PVC patch was issued.
+	if !reflect.DeepEqual(oldStatus, cluster.Status.StorageSizing.Data) {
 		if err := c.Status().Update(ctx, cluster); err != nil {
 			// Optimistic locking conflict is transient - requeue to retry
 			if apierrs.IsConflict(err) {
@@ -373,6 +377,10 @@ func reconcileWALVolume(
 	}
 
 	actualSizes := collectActualSizes(pvcs, VolumeTypeWAL, "")
+
+	// Capture old status to detect changes that need persistence
+	oldStatus := cluster.Status.StorageSizing.WAL.DeepCopy()
+
 	result := evaluateSizing(cluster, cluster.Spec.WalStorage, VolumeTypeWAL, "", diskStatusMap, actualSizes)
 	updateVolumeStatus(cluster.Status.StorageSizing.WAL, cluster.Spec.WalStorage, result, actualSizes)
 
@@ -382,7 +390,8 @@ func reconcileWALVolume(
 		}
 	}
 
-	if result.Action != ActionNoOp {
+	// Persist status updates when the status has changed.
+	if !reflect.DeepEqual(oldStatus, cluster.Status.StorageSizing.WAL) {
 		if err := c.Status().Update(ctx, cluster); err != nil {
 			if apierrs.IsConflict(err) {
 				contextLogger.Info("Optimistic locking conflict while updating WAL status after action, requeueing",
@@ -481,6 +490,9 @@ func reconcileTablespaces(
 		// Collect actual PVC sizes for this tablespace
 		actualSizes := collectActualSizes(pvcs, VolumeTypeTablespace, tbs.Name)
 
+		// Capture old status to detect changes that need persistence
+		oldStatus := cluster.Status.StorageSizing.Tablespaces[tbs.Name].DeepCopy()
+
 		result := evaluateSizing(cluster, &tbs.Storage, VolumeTypeTablespace, tbs.Name, diskStatusMap, actualSizes)
 		result.TablespaceName = tbs.Name
 
@@ -498,8 +510,8 @@ func reconcileTablespaces(
 				"targetSize", result.TargetSize.String())
 		}
 
-		// Always persist status updates when the action indicates a state change
-		if result.Action != ActionNoOp {
+		// Persist status updates when the status has changed.
+		if !reflect.DeepEqual(oldStatus, cluster.Status.StorageSizing.Tablespaces[tbs.Name]) {
 			if err := c.Status().Update(ctx, cluster); err != nil {
 				// Optimistic locking conflict is transient - requeue to retry
 				if apierrs.IsConflict(err) {
@@ -903,9 +915,7 @@ func updateVolumeStatus(
 		default:
 			status.State = apiv1.VolumeSizingStateBalanced
 		}
-	case ActionEmergencyGrow:
-		status.State = apiv1.VolumeSizingStateEmergency
-	case ActionScheduledGrow:
+	case ActionEmergencyGrow, ActionScheduledGrow:
 		status.State = apiv1.VolumeSizingStateResizing
 	case ActionPendingGrowth:
 		status.State = apiv1.VolumeSizingStatePendingGrowth
