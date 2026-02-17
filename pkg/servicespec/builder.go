@@ -41,10 +41,12 @@ func New() *Builder {
 // NewFrom creates a serviceTemplate builder from a certain Service template
 func NewFrom(serviceTemplate *apiv1.ServiceTemplateSpec) *Builder {
 	if serviceTemplate == nil {
-		serviceTemplate = &apiv1.ServiceTemplateSpec{}
+		return &Builder{
+			status: apiv1.ServiceTemplateSpec{},
+		}
 	}
 	return &Builder{
-		status: *serviceTemplate,
+		status: *serviceTemplate.DeepCopy(),
 	}
 }
 

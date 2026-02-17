@@ -69,11 +69,6 @@ var _ = Describe("PGBouncer Connections", Label(tests.LabelServiceConnectivity),
 			Expect(err).ToNot(HaveOccurred())
 			AssertCreateCluster(namespace, clusterName, sampleFile, env)
 		})
-		JustAfterEach(func() {
-			primaryPod, err := clusterutils.GetPrimary(env.Ctx, env.Client, namespace, clusterName)
-			Expect(err).ToNot(HaveOccurred())
-			DeleteTableUsingPgBouncerService(namespace, clusterName, poolerBasicAuthRWSampleFile, env, primaryPod)
-		})
 
 		It("can connect to Postgres via pgbouncer service using basic authentication", func() {
 			By("setting up read write type pgbouncer pooler", func() {
@@ -152,6 +147,38 @@ var _ = Describe("PGBouncer Connections", Label(tests.LabelServiceConnectivity),
 				// verify read and write connections after pgbouncer deployment deletion
 				assertReadWriteConnectionUsingPgBouncerService(namespace, clusterName,
 					poolerBasicAuthROSampleFile, false)
+			})
+		})
+
+		It("reconciles Service annotations when ServiceTemplate is updated", func() {
+			poolerName, err := yaml.GetResourceNameFromYAML(env.Scheme, poolerBasicAuthRWSampleFile)
+			Expect(err).ToNot(HaveOccurred())
+
+			By("updating the Pooler with a ServiceTemplate annotation", func() {
+				err = retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+					pooler := &apiv1.Pooler{}
+					err = env.Client.Get(env.Ctx, types.NamespacedName{Name: poolerName, Namespace: namespace}, pooler)
+					Expect(err).ToNot(HaveOccurred())
+
+					if pooler.Spec.ServiceTemplate == nil {
+						pooler.Spec.ServiceTemplate = &apiv1.ServiceTemplateSpec{}
+					}
+					if pooler.Spec.ServiceTemplate.ObjectMeta.Annotations == nil {
+						pooler.Spec.ServiceTemplate.ObjectMeta.Annotations = make(map[string]string)
+					}
+					pooler.Spec.ServiceTemplate.ObjectMeta.Annotations["e2e-test-annotation"] = "reconciled"
+
+					return env.Client.Update(env.Ctx, pooler)
+				})
+				Expect(err).ToNot(HaveOccurred())
+			})
+
+			By("verifying that the Service has the new annotation", func() {
+				Eventually(func() (map[string]string, error) {
+					var service corev1.Service
+					err = env.Client.Get(env.Ctx, types.NamespacedName{Name: poolerName, Namespace: namespace}, &service)
+					return service.Annotations, err
+				}, 60).Should(HaveKeyWithValue("e2e-test-annotation", "reconciled"))
 			})
 		})
 	})

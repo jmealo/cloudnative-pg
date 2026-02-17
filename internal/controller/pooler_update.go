@@ -150,6 +150,27 @@ func (r *PoolerReconciler) reconcileService(
 	}
 
 	patchedService := resources.Service.DeepCopy()
+
+	// Preserve immutable or K8s-managed fields in Spec.
+	// These fields are assigned by the API server and should not be removed
+	// during a patch, otherwise the operation might fail.
+	expectedService.Spec.ClusterIP = resources.Service.Spec.ClusterIP
+	expectedService.Spec.ClusterIPs = resources.Service.Spec.ClusterIPs
+	expectedService.Spec.IPFamilyPolicy = resources.Service.Spec.IPFamilyPolicy
+	expectedService.Spec.IPFamilies = resources.Service.Spec.IPFamilies
+	expectedService.Spec.HealthCheckNodePort = resources.Service.Spec.HealthCheckNodePort
+
+	// NodePort might also be managed by K8s if not explicitly set by the user
+	for i := range expectedService.Spec.Ports {
+		for j := range resources.Service.Spec.Ports {
+			if expectedService.Spec.Ports[i].Name == resources.Service.Spec.Ports[j].Name {
+				if expectedService.Spec.Ports[i].NodePort == 0 {
+					expectedService.Spec.Ports[i].NodePort = resources.Service.Spec.Ports[j].NodePort
+				}
+			}
+		}
+	}
+
 	patchedService.Spec = expectedService.Spec
 	utils.MergeObjectsMetadata(patchedService, expectedService)
 
@@ -158,7 +179,7 @@ func (r *PoolerReconciler) reconcileService(
 		return nil
 	}
 
-	contextLog.Info("Updating the service metadata")
+	contextLog.Info("Updating the service")
 
 	return r.Patch(ctx, patchedService, client.MergeFrom(resources.Service))
 }

@@ -291,6 +291,55 @@ var _ = Describe("unit test of pooler_update reconciliation logic", func() {
 			Expect(expectedSVC.Labels[utils.ClusterLabelName]).ToNot(Equal(previousName))
 			Expect(expectedSVC.Labels[utils.ClusterLabelName]).To(Equal(cluster.Name))
 		})
+
+		By("making sure it reconciles if annotations from serviceTemplate are changed", func() {
+			// In a real K8s environment, the API server assigns a ClusterIP.
+			// We simulate this by setting it on the living resource.
+			{
+				latestSvc := &corev1.Service{}
+				err := env.client.Get(ctx, types.NamespacedName{Name: res.Service.Name, Namespace: res.Service.Namespace}, latestSvc)
+				Expect(err).ToNot(HaveOccurred())
+				latestSvc.Spec.ClusterIP = "10.0.0.1"
+				err = env.client.Update(ctx, latestSvc)
+				Expect(err).ToNot(HaveOccurred())
+				res.Service = latestSvc
+			}
+
+			previousResourceVersion := res.Service.ResourceVersion
+			pooler.Spec.ServiceTemplate = &apiv1.ServiceTemplateSpec{
+				ObjectMeta: apiv1.Metadata{
+					Annotations: map[string]string{
+						"test-annotation": "test-value",
+					},
+				},
+			}
+
+			err := env.poolerReconciler.reconcileService(ctx, pooler, res)
+			Expect(err).ToNot(HaveOccurred())
+
+			svc := &corev1.Service{}
+			err = env.client.Get(ctx, types.NamespacedName{Name: pooler.Name, Namespace: pooler.Namespace}, svc)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(svc.ResourceVersion).ToNot(Equal(previousResourceVersion))
+			Expect(svc.Annotations["test-annotation"]).To(Equal("test-value"))
+			Expect(svc.Spec.ClusterIP).To(Equal("10.0.0.1"))
+			res.Service = svc
+		})
+
+		By("making sure it reconciles if an existing annotation is updated", func() {
+			previousResourceVersion := res.Service.ResourceVersion
+			pooler.Spec.ServiceTemplate.ObjectMeta.Annotations["test-annotation"] = "new-value"
+
+			err := env.poolerReconciler.reconcileService(ctx, pooler, res)
+			Expect(err).ToNot(HaveOccurred())
+
+			svc := &corev1.Service{}
+			err = env.client.Get(ctx, types.NamespacedName{Name: pooler.Name, Namespace: pooler.Namespace}, svc)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(svc.ResourceVersion).ToNot(Equal(previousResourceVersion))
+			Expect(svc.Annotations["test-annotation"]).To(Equal("new-value"))
+			res.Service = svc
+		})
 	})
 
 	It("should not reconcile if pooler has podSpec reconciliation disabled", func() {
