@@ -1,0 +1,42 @@
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: autoresize-wal
+spec:
+  instances: 2
+
+  postgresql:
+    parameters:
+      log_checkpoints: "on"
+      log_lock_waits: "on"
+      log_statement: 'ddl'
+
+  bootstrap:
+    initdb:
+      database: app
+      owner: app
+
+  # Data volume with auto-resize
+  storage:
+    storageClass: ${E2E_DEFAULT_STORAGE_CLASS}
+    size: 1Gi
+    autoResize:
+      enabled: true
+      threshold: 70
+      increase: "20%"
+      maxSize: "3Gi"
+      cooldownPeriod: "1m"
+
+  # Separate WAL volume with auto-resize
+  walStorage:
+    storageClass: ${E2E_DEFAULT_STORAGE_CLASS}
+    size: 512Mi
+    autoResize:
+      enabled: true
+      threshold: 60
+      increase: "256Mi"
+      maxSize: "2Gi"
+      cooldownPeriod: "1m"
+      walSafetyPolicy:
+        requireArchiveHealthy: false
+        maxPendingWALFiles: 50

@@ -5770,6 +5770,78 @@ spec:
               storage:
                 description: Configuration of the storage of the instances
                 properties:
+                  autoResize:
+                    description: AutoResize configures automatic PVC expansion based
+                      on disk usage
+                    properties:
+                      cooldownPeriod:
+                        default: 1h
+                        description: |-
+                          CooldownPeriod is the minimum time between resize operations
+                          Prevents rapid successive resizes
+                        type: string
+                      enabled:
+                        default: false
+                        description: Enabled activates automatic PVC resizing for
+                          this volume
+                        type: boolean
+                      increase:
+                        default: 20%
+                        description: |-
+                          Increase specifies how much to grow the PVC when resizing
+                          Can be an absolute value (e.g., "10Gi") or percentage (e.g., "20%")
+                        type: string
+                      maxSize:
+                        description: |-
+                          MaxSize is the maximum size the PVC can grow to
+                          Prevents runaway growth; resize stops when this limit is reached
+                        type: string
+                      threshold:
+                        default: 80
+                        description: |-
+                          Threshold is the disk usage percentage that triggers a resize (1-99)
+                          When usage exceeds this threshold, the PVC will be expanded
+                        maximum: 99
+                        minimum: 1
+                        type: integer
+                      walSafetyPolicy:
+                        description: |-
+                          WALSafetyPolicy controls WAL-related safety checks
+                          Required for single-volume clusters; optional but recommended for all
+                        properties:
+                          acknowledgeWALRisk:
+                            description: |-
+                              AcknowledgeWALRisk must be true for single-volume clusters
+                              Acknowledges that WAL issues may trigger unnecessary resizes
+                            type: boolean
+                          alertOnResize:
+                            default: true
+                            description: |-
+                              AlertOnResize generates a warning event when resize occurs
+                              Useful for tracking WAL-related resizes that may need investigation
+                            type: boolean
+                          maxPendingWALFiles:
+                            default: 100
+                            description: |-
+                              MaxPendingWALFiles blocks resize if too many files await archiving
+                              Set to 0 to disable this check
+                            type: integer
+                          maxSlotRetentionBytes:
+                            description: |-
+                              MaxSlotRetentionBytes blocks resize if inactive slots retain too much WAL
+                              Set to 0 to disable this check
+                            format: int64
+                            type: integer
+                          requireArchiveHealthy:
+                            default: true
+                            description: |-
+                              RequireArchiveHealthy blocks resize if WAL archiving is failing
+                              Prevents masking archive failures by growing storage
+                            type: boolean
+                        type: object
+                    required:
+                    - enabled
+                    type: object
                   pvcTemplate:
                     description: Template to be used to generate the Persistent Volume
                       Claim
@@ -6022,6 +6094,78 @@ spec:
                     storage:
                       description: The storage configuration for the tablespace
                       properties:
+                        autoResize:
+                          description: AutoResize configures automatic PVC expansion
+                            based on disk usage
+                          properties:
+                            cooldownPeriod:
+                              default: 1h
+                              description: |-
+                                CooldownPeriod is the minimum time between resize operations
+                                Prevents rapid successive resizes
+                              type: string
+                            enabled:
+                              default: false
+                              description: Enabled activates automatic PVC resizing
+                                for this volume
+                              type: boolean
+                            increase:
+                              default: 20%
+                              description: |-
+                                Increase specifies how much to grow the PVC when resizing
+                                Can be an absolute value (e.g., "10Gi") or percentage (e.g., "20%")
+                              type: string
+                            maxSize:
+                              description: |-
+                                MaxSize is the maximum size the PVC can grow to
+                                Prevents runaway growth; resize stops when this limit is reached
+                              type: string
+                            threshold:
+                              default: 80
+                              description: |-
+                                Threshold is the disk usage percentage that triggers a resize (1-99)
+                                When usage exceeds this threshold, the PVC will be expanded
+                              maximum: 99
+                              minimum: 1
+                              type: integer
+                            walSafetyPolicy:
+                              description: |-
+                                WALSafetyPolicy controls WAL-related safety checks
+                                Required for single-volume clusters; optional but recommended for all
+                              properties:
+                                acknowledgeWALRisk:
+                                  description: |-
+                                    AcknowledgeWALRisk must be true for single-volume clusters
+                                    Acknowledges that WAL issues may trigger unnecessary resizes
+                                  type: boolean
+                                alertOnResize:
+                                  default: true
+                                  description: |-
+                                    AlertOnResize generates a warning event when resize occurs
+                                    Useful for tracking WAL-related resizes that may need investigation
+                                  type: boolean
+                                maxPendingWALFiles:
+                                  default: 100
+                                  description: |-
+                                    MaxPendingWALFiles blocks resize if too many files await archiving
+                                    Set to 0 to disable this check
+                                  type: integer
+                                maxSlotRetentionBytes:
+                                  description: |-
+                                    MaxSlotRetentionBytes blocks resize if inactive slots retain too much WAL
+                                    Set to 0 to disable this check
+                                  format: int64
+                                  type: integer
+                                requireArchiveHealthy:
+                                  default: true
+                                  description: |-
+                                    RequireArchiveHealthy blocks resize if WAL archiving is failing
+                                    Prevents masking archive failures by growing storage
+                                  type: boolean
+                              type: object
+                          required:
+                          - enabled
+                          type: object
                         pvcTemplate:
                           description: Template to be used to generate the Persistent
                             Volume Claim
@@ -6434,6 +6578,78 @@ spec:
                 description: Configuration of the storage for PostgreSQL WAL (Write-Ahead
                   Log)
                 properties:
+                  autoResize:
+                    description: AutoResize configures automatic PVC expansion based
+                      on disk usage
+                    properties:
+                      cooldownPeriod:
+                        default: 1h
+                        description: |-
+                          CooldownPeriod is the minimum time between resize operations
+                          Prevents rapid successive resizes
+                        type: string
+                      enabled:
+                        default: false
+                        description: Enabled activates automatic PVC resizing for
+                          this volume
+                        type: boolean
+                      increase:
+                        default: 20%
+                        description: |-
+                          Increase specifies how much to grow the PVC when resizing
+                          Can be an absolute value (e.g., "10Gi") or percentage (e.g., "20%")
+                        type: string
+                      maxSize:
+                        description: |-
+                          MaxSize is the maximum size the PVC can grow to
+                          Prevents runaway growth; resize stops when this limit is reached
+                        type: string
+                      threshold:
+                        default: 80
+                        description: |-
+                          Threshold is the disk usage percentage that triggers a resize (1-99)
+                          When usage exceeds this threshold, the PVC will be expanded
+                        maximum: 99
+                        minimum: 1
+                        type: integer
+                      walSafetyPolicy:
+                        description: |-
+                          WALSafetyPolicy controls WAL-related safety checks
+                          Required for single-volume clusters; optional but recommended for all
+                        properties:
+                          acknowledgeWALRisk:
+                            description: |-
+                              AcknowledgeWALRisk must be true for single-volume clusters
+                              Acknowledges that WAL issues may trigger unnecessary resizes
+                            type: boolean
+                          alertOnResize:
+                            default: true
+                            description: |-
+                              AlertOnResize generates a warning event when resize occurs
+                              Useful for tracking WAL-related resizes that may need investigation
+                            type: boolean
+                          maxPendingWALFiles:
+                            default: 100
+                            description: |-
+                              MaxPendingWALFiles blocks resize if too many files await archiving
+                              Set to 0 to disable this check
+                            type: integer
+                          maxSlotRetentionBytes:
+                            description: |-
+                              MaxSlotRetentionBytes blocks resize if inactive slots retain too much WAL
+                              Set to 0 to disable this check
+                            format: int64
+                            type: integer
+                          requireArchiveHealthy:
+                            default: true
+                            description: |-
+                              RequireArchiveHealthy blocks resize if WAL archiving is failing
+                              Prevents masking archive failures by growing storage
+                            type: boolean
+                        type: object
+                    required:
+                    - enabled
+                    type: object
                   pvcTemplate:
                     description: Template to be used to generate the Persistent Volume
                       Claim
@@ -6836,6 +7052,183 @@ spec:
                   TimeLineID, Latest checkpoint's REDO location, Latest checkpoint's REDO
                   WAL file, and Time of latest checkpoint
                 type: string
+              diskStatus:
+                description: DiskStatus reports disk usage for all instances
+                properties:
+                  instances:
+                    description: Instances contains per-instance disk status
+                    items:
+                      description: InstanceDiskStatus contains disk usage for a single
+                        instance
+                      properties:
+                        data:
+                          description: Data volume status
+                          properties:
+                            atMaxSize:
+                              description: AtMaxSize indicates the volume has reached
+                                the configured maxSize
+                              type: boolean
+                            availableBytes:
+                              description: AvailableBytes is the available space on
+                                the volume
+                              format: int64
+                              type: integer
+                            percentUsed:
+                              description: PercentUsed is the percentage of the volume
+                                that is used (0-100)
+                              type: integer
+                            totalBytes:
+                              description: TotalBytes is the total capacity of the
+                                volume
+                              format: int64
+                              type: integer
+                            usedBytes:
+                              description: UsedBytes is the used space on the volume
+                              format: int64
+                              type: integer
+                          required:
+                          - availableBytes
+                          - percentUsed
+                          - totalBytes
+                          - usedBytes
+                          type: object
+                        lastUpdated:
+                          description: LastUpdated is when this status was last refreshed
+                          format: date-time
+                          type: string
+                        podName:
+                          description: PodName is the name of the pod
+                          type: string
+                        tablespaces:
+                          additionalProperties:
+                            description: VolumeDiskStatus contains disk usage for
+                              a single volume
+                            properties:
+                              atMaxSize:
+                                description: AtMaxSize indicates the volume has reached
+                                  the configured maxSize
+                                type: boolean
+                              availableBytes:
+                                description: AvailableBytes is the available space
+                                  on the volume
+                                format: int64
+                                type: integer
+                              percentUsed:
+                                description: PercentUsed is the percentage of the
+                                  volume that is used (0-100)
+                                type: integer
+                              totalBytes:
+                                description: TotalBytes is the total capacity of the
+                                  volume
+                                format: int64
+                                type: integer
+                              usedBytes:
+                                description: UsedBytes is the used space on the volume
+                                format: int64
+                                type: integer
+                            required:
+                            - availableBytes
+                            - percentUsed
+                            - totalBytes
+                            - usedBytes
+                            type: object
+                          description: Tablespaces volume status (keyed by tablespace
+                            name)
+                          type: object
+                        wal:
+                          description: WAL volume status (nil if using single volume)
+                          properties:
+                            atMaxSize:
+                              description: AtMaxSize indicates the volume has reached
+                                the configured maxSize
+                              type: boolean
+                            availableBytes:
+                              description: AvailableBytes is the available space on
+                                the volume
+                              format: int64
+                              type: integer
+                            percentUsed:
+                              description: PercentUsed is the percentage of the volume
+                                that is used (0-100)
+                              type: integer
+                            totalBytes:
+                              description: TotalBytes is the total capacity of the
+                                volume
+                              format: int64
+                              type: integer
+                            usedBytes:
+                              description: UsedBytes is the used space on the volume
+                              format: int64
+                              type: integer
+                          required:
+                          - availableBytes
+                          - percentUsed
+                          - totalBytes
+                          - usedBytes
+                          type: object
+                        walHealth:
+                          description: WALHealth contains WAL-specific health information
+                          properties:
+                            archiveHealthy:
+                              description: ArchiveHealthy indicates WAL archiving
+                                is working
+                              type: boolean
+                            inactiveReplicationSlots:
+                              description: InactiveReplicationSlots lists slots that
+                                aren't being consumed
+                              items:
+                                type: string
+                              type: array
+                            pendingArchiveFiles:
+                              description: PendingArchiveFiles is the count of files
+                                awaiting archive
+                              type: integer
+                          required:
+                          - archiveHealthy
+                          - pendingArchiveFiles
+                          type: object
+                      required:
+                      - lastUpdated
+                      - podName
+                      type: object
+                    type: array
+                  lastAutoResize:
+                    description: LastAutoResize records the most recent auto-resize
+                      operation
+                    properties:
+                      newSize:
+                        description: NewSize after resize
+                        type: string
+                      oldSize:
+                        description: OldSize before resize
+                        type: string
+                      podName:
+                        description: PodName of the instance whose PVC was resized
+                        type: string
+                      pvcName:
+                        description: PVCName that was resized
+                        type: string
+                      reason:
+                        description: Reason for the resize
+                        type: string
+                      time:
+                        description: Time when the resize was initiated
+                        format: date-time
+                        type: string
+                      volumeType:
+                        description: VolumeType is the type of volume (data, wal,
+                          tablespace)
+                        type: string
+                    required:
+                    - newSize
+                    - oldSize
+                    - podName
+                    - pvcName
+                    - reason
+                    - time
+                    - volumeType
+                    type: object
+                type: object
               firstRecoverabilityPoint:
                 description: |-
                   The first recoverability point, stored as a date in RFC3339 format.

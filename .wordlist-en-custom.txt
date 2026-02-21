@@ -6,20 +6,28 @@ ARMv
 AUR
 AZ
 AZs
+AcknowledgeWALRisk
 AdditionalCommandArgs
 AdditionalPodAffinity
 AdditionalPodAntiAffinity
 AffinityConfiguration
+AlertOnResize
 AllNamespaces
 AntiAffinity
 AppArmor
 AppArmorProfile
+ArchiveHealthy
 Armando
+AtMaxSize
 AuthQuery
 AuthQuerySecret
+AutoResize
+AutoResizeConfiguration
+AutoResizeEvent
 Autoscaler
 AvailableArchitecture
 AvailableArchitectures
+AvailableBytes
 AzureCredentials
 AzurePVCUpdateEnabled
 Azurite
@@ -84,6 +92,7 @@ CloudNativePG
 CloudNativePG's
 ClusterCondition
 ClusterConditionType
+ClusterDiskStatus
 ClusterIP
 ClusterImageCatalog
 ClusterIsNotReady
@@ -105,6 +114,7 @@ ConnectionLimit
 ContainerID
 ContinuousArchiving
 ContinuousArchivingFailing
+CooldownPeriod
 Cron
 CronJobs
 CustomResourceDefinition
@@ -136,6 +146,7 @@ DevSecOps
 DigitalOcean
 DisablePassword
 DisabledDefaultServices
+DiskStatus
 DoD
 DockerHub
 Dockle
@@ -214,7 +225,9 @@ ImageInfo
 ImageVolume
 ImageVolumeSource
 ImportSource
+InactiveReplicationSlots
 InfoSec
+InstanceDiskStatus
 InstanceID
 InstanceReportedState
 IsolationCheckConfiguration
@@ -242,10 +255,12 @@ LLC
 LPV
 LSN
 LTS
+LastAutoResize
 LastBackupFailed
 LastBackupSucceeded
 LastFailedArchiveTime
 LastPromotionToken
+LastUpdated
 Lifecycle
 Linkerd
 Linode
@@ -262,6 +277,9 @@ ManagedRolesStatus
 ManagedService
 ManagedServices
 MaxItems
+MaxPendingWALFiles
+MaxSize
+MaxSlotRetentionBytes
 MetricDescription
 MetricName
 MetricType
@@ -285,6 +303,7 @@ Namespaces
 Nenciarini
 NetworkPolicies
 NetworkPolicy
+NewSize
 NodeAffinity
 NodeMaintenanceWindow
 NodeSelector
@@ -296,6 +315,7 @@ OLTP
 OOM
 OU
 ObjectMeta
+OldSize
 OnlineConfiguration
 OnlineUpdateEnabled
 OnlineUpgrading
@@ -320,11 +340,14 @@ PKI
 PODNAME
 PPROF
 PV
+PVCName
 PVCs
 PascalBourdier
 PasswordState
 PasswordStatus
 Patroni
+PendingArchiveFiles
+PercentUsed
 Percona
 PersistentVolumeClaim
 PersistentVolumeClaimSpec
@@ -411,6 +434,7 @@ ReplicaSet
 ReplicationSlotsConfiguration
 ReplicationSlotsHAConfiguration
 ReplicationTLSSecret
+RequireArchiveHealthy
 ResizingPVC
 ResourceRequirements
 ResourceVersion
@@ -525,6 +549,7 @@ TimelineId
 TopologyKey
 TopologySpreadConstraint
 TopologySpreadConstraints
+TotalBytes
 TypedLocalObjectReference
 UI
 UID
@@ -535,6 +560,7 @@ Unrealizable
 UpdateStrategy
 UsageSpec
 UsageSpecType
+UsedBytes
 VLDB
 VLDBs
 VM
@@ -542,14 +568,19 @@ VMs
 VOLNAME
 ValidationError
 VirtualBox
+VolumeDiskStatus
 VolumeSnapshot
 VolumeSnapshotClass
 VolumeSnapshotConfiguration
 VolumeSnapshots
+VolumeType
 WAL
 WALArchiver
 WALBackupConfiguration
 WALCapabilities
+WALHealth
+WALHealthInfo
+WALSafetyPolicy
 WALs
 WalBackupConfiguration
 WalClassName
@@ -610,6 +641,9 @@ authQuerySecret
 authn
 authz
 autocompletion
+autoresize
+autoresizeconfiguration
+autoresizeevent
 autoscaler
 autovacuum
 availableArchitectures
@@ -708,6 +742,7 @@ cloudnative
 cloudnativepg
 clusterBackup
 clusterName
+clusterdiskstatus
 clusterimagecatalog
 clusterimagecatalogs
 clusterlist
@@ -746,6 +781,7 @@ conninfo
 containerImage
 containerPort
 controldata
+cooldown
 coredump
 coreos
 corev
@@ -961,6 +997,8 @@ initDB
 initdb
 initialDelaySeconds
 initializingPVC
+inode
+inodes
 inplace
 installModes
 installplans
@@ -968,6 +1006,7 @@ instanceID
 instanceName
 instanceNames
 instanceRole
+instancediskstatus
 instanceid
 instancereportedstate
 instancesReportedState
@@ -1068,6 +1107,7 @@ matchLabels
 mateusoliveira
 maxClientConnections
 maxParallel
+maxSize
 maxStandbyNamesFromCluster
 maxSyncReplicas
 maximumLag
@@ -1089,6 +1129,7 @@ minSyncReplicas
 minikube
 minio
 misconfigurations
+misconfigured
 mmap
 monitoringconfiguration
 mountPath
@@ -1431,6 +1472,7 @@ standbyNumber
 startDelay
 startedAt
 stateful
+statfs
 statusDescriptors
 stderr
 stdout
@@ -1475,6 +1517,7 @@ synchronousreplicaconfiguration
 synchronousreplicaconfigurationmethod
 syncreplicaelectionconstraints
 sys
+syscalls
 syslog
 systemID
 systemd
@@ -1561,6 +1604,7 @@ volumeMode
 volumeMounts
 volumeSnapshot
 volumeSnapshots
+volumediskstatus
 volumesnapshot
 volumesnapshotconfiguration
 waitForArchive
@@ -1570,6 +1614,8 @@ walClassName
 walSegmentSize
 walStorage
 walbackupconfiguration
+walhealthinfo
+walsafetypolicy
 walsender
 webhook
 webhooks

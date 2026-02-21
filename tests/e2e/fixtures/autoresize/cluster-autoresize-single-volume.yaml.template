@@ -1,0 +1,31 @@
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: autoresize-single
+spec:
+  instances: 2
+
+  postgresql:
+    parameters:
+      log_checkpoints: "on"
+      log_lock_waits: "on"
+      log_statement: 'ddl'
+
+  bootstrap:
+    initdb:
+      database: app
+      owner: app
+
+  # Small storage with auto-resize enabled
+  storage:
+    storageClass: ${E2E_DEFAULT_STORAGE_CLASS}
+    size: 1Gi
+    autoResize:
+      enabled: true
+      threshold: 70
+      increase: "500Mi"
+      maxSize: "3Gi"
+      cooldownPeriod: "1m"
+      walSafetyPolicy:
+        acknowledgeWALRisk: true
+        requireArchiveHealthy: false

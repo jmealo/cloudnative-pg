@@ -1030,6 +1030,10 @@ type ClusterStatus struct {
 	// SystemID is the latest detected PostgreSQL SystemID
 	// +optional
 	SystemID string `json:"systemID,omitempty"`
+
+	// DiskStatus reports disk usage for all instances
+	// +optional
+	DiskStatus *ClusterDiskStatus `json:"diskStatus,omitempty"`
 }
 
 // ImageInfo contains the information about a PostgreSQL image
@@ -1056,6 +1060,97 @@ type InstanceReportedState struct {
 	TimeLineID int `json:"timeLineID,omitempty"`
 	// IP address of the instance
 	IP string `json:"ip,omitempty"`
+}
+
+// ClusterDiskStatus contains disk usage information for the cluster
+type ClusterDiskStatus struct {
+	// Instances contains per-instance disk status
+	Instances []InstanceDiskStatus `json:"instances,omitempty"`
+
+	// LastAutoResize records the most recent auto-resize operation
+	// +optional
+	LastAutoResize *AutoResizeEvent `json:"lastAutoResize,omitempty"`
+}
+
+// InstanceDiskStatus contains disk usage for a single instance
+type InstanceDiskStatus struct {
+	// PodName is the name of the pod
+	PodName string `json:"podName"`
+
+	// Data volume status
+	// +optional
+	Data *VolumeDiskStatus `json:"data,omitempty"`
+
+	// WAL volume status (nil if using single volume)
+	// +optional
+	WAL *VolumeDiskStatus `json:"wal,omitempty"`
+
+	// Tablespaces volume status (keyed by tablespace name)
+	// +optional
+	Tablespaces map[string]*VolumeDiskStatus `json:"tablespaces,omitempty"`
+
+	// WALHealth contains WAL-specific health information
+	// +optional
+	WALHealth *WALHealthInfo `json:"walHealth,omitempty"`
+
+	// LastUpdated is when this status was last refreshed
+	LastUpdated metav1.Time `json:"lastUpdated"`
+}
+
+// VolumeDiskStatus contains disk usage for a single volume
+type VolumeDiskStatus struct {
+	// TotalBytes is the total capacity of the volume
+	TotalBytes int64 `json:"totalBytes"`
+
+	// UsedBytes is the used space on the volume
+	UsedBytes int64 `json:"usedBytes"`
+
+	// AvailableBytes is the available space on the volume
+	AvailableBytes int64 `json:"availableBytes"`
+
+	// PercentUsed is the percentage of the volume that is used (0-100)
+	PercentUsed int `json:"percentUsed"`
+
+	// AtMaxSize indicates the volume has reached the configured maxSize
+	// +optional
+	AtMaxSize bool `json:"atMaxSize,omitempty"`
+}
+
+// WALHealthInfo contains WAL-specific health information
+type WALHealthInfo struct {
+	// ArchiveHealthy indicates WAL archiving is working
+	ArchiveHealthy bool `json:"archiveHealthy"`
+
+	// PendingArchiveFiles is the count of files awaiting archive
+	PendingArchiveFiles int `json:"pendingArchiveFiles"`
+
+	// InactiveReplicationSlots lists slots that aren't being consumed
+	// +optional
+	InactiveReplicationSlots []string `json:"inactiveReplicationSlots,omitempty"`
+}
+
+// AutoResizeEvent records details of an auto-resize operation
+type AutoResizeEvent struct {
+	// Time when the resize was initiated
+	Time metav1.Time `json:"time"`
+
+	// PodName of the instance whose PVC was resized
+	PodName string `json:"podName"`
+
+	// PVCName that was resized
+	PVCName string `json:"pvcName"`
+
+	// VolumeType is the type of volume (data, wal, tablespace)
+	VolumeType string `json:"volumeType"`
+
+	// OldSize before resize
+	OldSize string `json:"oldSize"`
+
+	// NewSize after resize
+	NewSize string `json:"newSize"`
+
+	// Reason for the resize
+	Reason string `json:"reason"`
 }
 
 // ClusterConditionType defines types of cluster conditions
@@ -2060,6 +2155,72 @@ type StorageConfiguration struct {
 	// Template to be used to generate the Persistent Volume Claim
 	// +optional
 	PersistentVolumeClaimTemplate *corev1.PersistentVolumeClaimSpec `json:"pvcTemplate,omitempty"`
+
+	// AutoResize configures automatic PVC expansion based on disk usage
+	// +optional
+	AutoResize *AutoResizeConfiguration `json:"autoResize,omitempty"`
+}
+
+// AutoResizeConfiguration controls automatic PVC expansion
+type AutoResizeConfiguration struct {
+	// Enabled activates automatic PVC resizing for this volume
+	// +kubebuilder:default:=false
+	Enabled bool `json:"enabled"`
+
+	// Threshold is the disk usage percentage that triggers a resize (1-99)
+	// When usage exceeds this threshold, the PVC will be expanded
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=99
+	// +kubebuilder:default:=80
+	Threshold int `json:"threshold,omitempty"`
+
+	// Increase specifies how much to grow the PVC when resizing
+	// Can be an absolute value (e.g., "10Gi") or percentage (e.g., "20%")
+	// +kubebuilder:default:="20%"
+	Increase string `json:"increase,omitempty"`
+
+	// MaxSize is the maximum size the PVC can grow to
+	// Prevents runaway growth; resize stops when this limit is reached
+	// +optional
+	MaxSize string `json:"maxSize,omitempty"`
+
+	// CooldownPeriod is the minimum time between resize operations
+	// Prevents rapid successive resizes
+	// +kubebuilder:default:="1h"
+	CooldownPeriod *metav1.Duration `json:"cooldownPeriod,omitempty"`
+
+	// WALSafetyPolicy controls WAL-related safety checks
+	// Required for single-volume clusters; optional but recommended for all
+	// +optional
+	WALSafetyPolicy *WALSafetyPolicy `json:"walSafetyPolicy,omitempty"`
+}
+
+// WALSafetyPolicy defines safety checks related to WAL before allowing resize
+type WALSafetyPolicy struct {
+	// AcknowledgeWALRisk must be true for single-volume clusters
+	// Acknowledges that WAL issues may trigger unnecessary resizes
+	// +optional
+	AcknowledgeWALRisk bool `json:"acknowledgeWALRisk,omitempty"`
+
+	// RequireArchiveHealthy blocks resize if WAL archiving is failing
+	// Prevents masking archive failures by growing storage
+	// +kubebuilder:default:=true
+	RequireArchiveHealthy *bool `json:"requireArchiveHealthy,omitempty"`
+
+	// MaxPendingWALFiles blocks resize if too many files await archiving
+	// Set to 0 to disable this check
+	// +kubebuilder:default:=100
+	MaxPendingWALFiles *int `json:"maxPendingWALFiles,omitempty"`
+
+	// MaxSlotRetentionBytes blocks resize if inactive slots retain too much WAL
+	// Set to 0 to disable this check
+	// +optional
+	MaxSlotRetentionBytes *int64 `json:"maxSlotRetentionBytes,omitempty"`
+
+	// AlertOnResize generates a warning event when resize occurs
+	// Useful for tracking WAL-related resizes that may need investigation
+	// +kubebuilder:default:=true
+	AlertOnResize *bool `json:"alertOnResize,omitempty"`
 }
 
 // TablespaceConfiguration is the configuration of a tablespace, and includes

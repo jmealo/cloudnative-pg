@@ -53,6 +53,51 @@ _Appears in:_
 | `additionalPodAffinity` _[PodAffinity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.34/#podaffinity-v1-core)_ | AdditionalPodAffinity allows to specify pod affinity terms to be passed to all the cluster's pods. |  |  |  |
 
 
+#### AutoResizeConfiguration
+
+
+
+AutoResizeConfiguration controls automatic PVC expansion
+
+
+
+_Appears in:_
+
+- [StorageConfiguration](#storageconfiguration)
+
+| Field | Description | Required | Default | Validation |
+| --- | --- | --- | --- | --- |
+| `enabled` _boolean_ | Enabled activates automatic PVC resizing for this volume | True | false |  |
+| `threshold` _integer_ | Threshold is the disk usage percentage that triggers a resize (1-99)<br />When usage exceeds this threshold, the PVC will be expanded | True | 80 | Maximum: 99 <br />Minimum: 1 <br /> |
+| `increase` _string_ | Increase specifies how much to grow the PVC when resizing<br />Can be an absolute value (e.g., "10Gi") or percentage (e.g., "20%") | True | 20% |  |
+| `maxSize` _string_ | MaxSize is the maximum size the PVC can grow to<br />Prevents runaway growth; resize stops when this limit is reached |  |  |  |
+| `cooldownPeriod` _[Duration](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.34/#duration-v1-meta)_ | CooldownPeriod is the minimum time between resize operations<br />Prevents rapid successive resizes | True | 1h |  |
+| `walSafetyPolicy` _[WALSafetyPolicy](#walsafetypolicy)_ | WALSafetyPolicy controls WAL-related safety checks<br />Required for single-volume clusters; optional but recommended for all |  |  |  |
+
+
+#### AutoResizeEvent
+
+
+
+AutoResizeEvent records details of an auto-resize operation
+
+
+
+_Appears in:_
+
+- [ClusterDiskStatus](#clusterdiskstatus)
+
+| Field | Description | Required | Default | Validation |
+| --- | --- | --- | --- | --- |
+| `time` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.34/#time-v1-meta)_ | Time when the resize was initiated | True |  |  |
+| `podName` _string_ | PodName of the instance whose PVC was resized | True |  |  |
+| `pvcName` _string_ | PVCName that was resized | True |  |  |
+| `volumeType` _string_ | VolumeType is the type of volume (data, wal, tablespace) | True |  |  |
+| `oldSize` _string_ | OldSize before resize | True |  |  |
+| `newSize` _string_ | NewSize after resize | True |  |  |
+| `reason` _string_ | Reason for the resize | True |  |  |
+
+
 #### AvailableArchitecture
 
 
@@ -513,6 +558,24 @@ managed by CloudNativePG.
 
 
 
+#### ClusterDiskStatus
+
+
+
+ClusterDiskStatus contains disk usage information for the cluster
+
+
+
+_Appears in:_
+
+- [ClusterStatus](#clusterstatus)
+
+| Field | Description | Required | Default | Validation |
+| --- | --- | --- | --- | --- |
+| `instances` _[InstanceDiskStatus](#instancediskstatus) array_ | Instances contains per-instance disk status | True |  |  |
+| `lastAutoResize` _[AutoResizeEvent](#autoresizeevent)_ | LastAutoResize records the most recent auto-resize operation |  |  |  |
+
+
 #### ClusterImageCatalog
 
 
@@ -680,6 +743,7 @@ _Appears in:_
 | `switchReplicaClusterStatus` _[SwitchReplicaClusterStatus](#switchreplicaclusterstatus)_ | SwitchReplicaClusterStatus is the status of the switch to replica cluster |  |  |  |
 | `demotionToken` _string_ | DemotionToken is a JSON token containing the information<br />from pg_controldata such as Database system identifier, Latest checkpoint's<br />TimeLineID, Latest checkpoint's REDO location, Latest checkpoint's REDO<br />WAL file, and Time of latest checkpoint |  |  |  |
 | `systemID` _string_ | SystemID is the latest detected PostgreSQL SystemID |  |  |  |
+| `diskStatus` _[ClusterDiskStatus](#clusterdiskstatus)_ | DiskStatus reports disk usage for all instances |  |  |  |
 
 
 
@@ -1221,6 +1285,28 @@ _Appears in:_
 | Field | Description | Required | Default | Validation |
 | --- | --- | --- | --- | --- |
 | `externalCluster` _string_ | The name of the externalCluster used for import | True |  |  |
+
+
+#### InstanceDiskStatus
+
+
+
+InstanceDiskStatus contains disk usage for a single instance
+
+
+
+_Appears in:_
+
+- [ClusterDiskStatus](#clusterdiskstatus)
+
+| Field | Description | Required | Default | Validation |
+| --- | --- | --- | --- | --- |
+| `podName` _string_ | PodName is the name of the pod | True |  |  |
+| `data` _[VolumeDiskStatus](#volumediskstatus)_ | Data volume status |  |  |  |
+| `wal` _[VolumeDiskStatus](#volumediskstatus)_ | WAL volume status (nil if using single volume) |  |  |  |
+| `tablespaces` _object (keys:string, values:[VolumeDiskStatus](#volumediskstatus))_ | Tablespaces volume status (keyed by tablespace name) |  |  |  |
+| `walHealth` _[WALHealthInfo](#walhealthinfo)_ | WALHealth contains WAL-specific health information |  |  |  |
+| `lastUpdated` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.34/#time-v1-meta)_ | LastUpdated is when this status was last refreshed | True |  |  |
 
 
 #### InstanceID
@@ -2674,6 +2760,7 @@ _Appears in:_
 | `size` _string_ | Size of the storage. Required if not already specified in the PVC template.<br />Changes to this field are automatically reapplied to the created PVCs.<br />Size cannot be decreased. |  |  |  |
 | `resizeInUseVolumes` _boolean_ | Resize existent PVCs, defaults to true |  | true |  |
 | `pvcTemplate` _[PersistentVolumeClaimSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.34/#persistentvolumeclaimspec-v1-core)_ | Template to be used to generate the Persistent Volume Claim |  |  |  |
+| `autoResize` _[AutoResizeConfiguration](#autoresizeconfiguration)_ | AutoResize configures automatic PVC expansion based on disk usage |  |  |  |
 
 
 #### Subscription
@@ -2972,6 +3059,27 @@ _Appears in:_
 | `revoke` | RevokeUsageSpecType indicates a revoke usage permission.<br /> |
 
 
+#### VolumeDiskStatus
+
+
+
+VolumeDiskStatus contains disk usage for a single volume
+
+
+
+_Appears in:_
+
+- [InstanceDiskStatus](#instancediskstatus)
+
+| Field | Description | Required | Default | Validation |
+| --- | --- | --- | --- | --- |
+| `totalBytes` _integer_ | TotalBytes is the total capacity of the volume | True |  |  |
+| `usedBytes` _integer_ | UsedBytes is the used space on the volume | True |  |  |
+| `availableBytes` _integer_ | AvailableBytes is the available space on the volume | True |  |  |
+| `percentUsed` _integer_ | PercentUsed is the percentage of the volume that is used (0-100) | True |  |  |
+| `atMaxSize` _boolean_ | AtMaxSize indicates the volume has reached the configured maxSize |  |  |  |
+
+
 #### VolumeSnapshotConfiguration
 
 
@@ -2994,6 +3102,46 @@ _Appears in:_
 | `snapshotOwnerReference` _[SnapshotOwnerReference](#snapshotownerreference)_ | SnapshotOwnerReference indicates the type of owner reference the snapshot should have |  | none | Enum: [none cluster backup] <br /> |
 | `online` _boolean_ | Whether the default type of backup with volume snapshots is<br />online/hot (`true`, default) or offline/cold (`false`) |  | true |  |
 | `onlineConfiguration` _[OnlineConfiguration](#onlineconfiguration)_ | Configuration parameters to control the online/hot backup with volume snapshots |  | \{ immediateCheckpoint:false waitForArchive:true \} |  |
+
+
+#### WALHealthInfo
+
+
+
+WALHealthInfo contains WAL-specific health information
+
+
+
+_Appears in:_
+
+- [InstanceDiskStatus](#instancediskstatus)
+
+| Field | Description | Required | Default | Validation |
+| --- | --- | --- | --- | --- |
+| `archiveHealthy` _boolean_ | ArchiveHealthy indicates WAL archiving is working | True |  |  |
+| `pendingArchiveFiles` _integer_ | PendingArchiveFiles is the count of files awaiting archive | True |  |  |
+| `inactiveReplicationSlots` _string array_ | InactiveReplicationSlots lists slots that aren't being consumed |  |  |  |
+
+
+#### WALSafetyPolicy
+
+
+
+WALSafetyPolicy defines safety checks related to WAL before allowing resize
+
+
+
+_Appears in:_
+
+- [AutoResizeConfiguration](#autoresizeconfiguration)
+
+| Field | Description | Required | Default | Validation |
+| --- | --- | --- | --- | --- |
+| `acknowledgeWALRisk` _boolean_ | AcknowledgeWALRisk must be true for single-volume clusters<br />Acknowledges that WAL issues may trigger unnecessary resizes |  |  |  |
+| `requireArchiveHealthy` _boolean_ | RequireArchiveHealthy blocks resize if WAL archiving is failing<br />Prevents masking archive failures by growing storage | True | true |  |
+| `maxPendingWALFiles` _integer_ | MaxPendingWALFiles blocks resize if too many files await archiving<br />Set to 0 to disable this check | True | 100 |  |
+| `maxSlotRetentionBytes` _integer_ | MaxSlotRetentionBytes blocks resize if inactive slots retain too much WAL<br />Set to 0 to disable this check |  |  |  |
+| `alertOnResize` _boolean_ | AlertOnResize generates a warning event when resize occurs<br />Useful for tracking WAL-related resizes that may need investigation | True | true |  |
 
 
 

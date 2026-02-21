@@ -101,6 +101,36 @@ type PostgresqlStatus struct {
 	//
 	// This field is never populated in the instance manager.
 	IsPodReady bool `json:"isPodReady"`
+
+	// DiskStatus contains disk usage information for auto-resize monitoring
+	DiskStatus *InstanceDiskStatus `json:"diskStatus,omitempty"`
+}
+
+// InstanceDiskStatus contains disk usage for a single instance
+type InstanceDiskStatus struct {
+	// Data volume status
+	Data *VolumeDiskStatus `json:"data,omitempty"`
+
+	// WAL volume status (nil if using single volume)
+	WAL *VolumeDiskStatus `json:"wal,omitempty"`
+
+	// Tablespaces volume status (keyed by tablespace name)
+	Tablespaces map[string]*VolumeDiskStatus `json:"tablespaces,omitempty"`
+}
+
+// VolumeDiskStatus contains disk usage for a single volume
+type VolumeDiskStatus struct {
+	// TotalBytes is the total capacity of the volume
+	TotalBytes int64 `json:"totalBytes"`
+
+	// UsedBytes is the used space on the volume
+	UsedBytes int64 `json:"usedBytes"`
+
+	// AvailableBytes is the available space on the volume
+	AvailableBytes int64 `json:"availableBytes"`
+
+	// PercentUsed is the percentage of the volume that is used
+	PercentUsed int `json:"percentUsed"`
 }
 
 // PgStatReplication contains the replications of replicas as reported by the primary instance

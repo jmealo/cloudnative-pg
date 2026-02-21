@@ -20,6 +20,7 @@ SPDX-License-Identifier: Apache-2.0
 package postgres
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -33,6 +34,7 @@ import (
 
 	apiv1 "github.com/cloudnative-pg/cloudnative-pg/api/v1"
 	"github.com/cloudnative-pg/cloudnative-pg/pkg/executablehash"
+	"github.com/cloudnative-pg/cloudnative-pg/pkg/management/postgres/disk"
 	"github.com/cloudnative-pg/cloudnative-pg/pkg/postgres"
 	"github.com/cloudnative-pg/cloudnative-pg/pkg/specs"
 	"github.com/cloudnative-pg/cloudnative-pg/pkg/versions"
@@ -124,7 +126,55 @@ func (instance *Instance) GetStatus() (result *postgres.PostgresqlStatus, err er
 	result.IsInstanceManagerUpgrading = instance.InstanceManagerIsUpgrading.Load()
 	result.SessionID = instance.SessionID
 
+	// Collect disk status for auto-resize monitoring
+	result.DiskStatus = instance.collectDiskStatus()
+
 	return result, nil
+}
+
+// collectDiskStatus collects disk usage statistics for all volumes
+func (instance *Instance) collectDiskStatus() *postgres.InstanceDiskStatus {
+	ctx := context.Background()
+	probe := disk.NewProbe()
+
+	status := &postgres.InstanceDiskStatus{}
+
+	// Get data volume stats
+	dataStats, err := probe.GetDataStats(ctx)
+	if err == nil && dataStats != nil {
+		status.Data = &postgres.VolumeDiskStatus{
+			TotalBytes:     int64(dataStats.TotalBytes),
+			UsedBytes:      int64(dataStats.UsedBytes),
+			AvailableBytes: int64(dataStats.AvailableBytes),
+			PercentUsed:    dataStats.PercentUsed,
+		}
+	}
+
+	// Get WAL volume stats if separate WAL volume is configured
+	// Check if the WAL path is a separate mount point
+	walStats, err := probe.GetWALStats(ctx, instance.hasSeparateWALVolume())
+	if err == nil && walStats != nil {
+		status.WAL = &postgres.VolumeDiskStatus{
+			TotalBytes:     int64(walStats.TotalBytes),
+			UsedBytes:      int64(walStats.UsedBytes),
+			AvailableBytes: int64(walStats.AvailableBytes),
+			PercentUsed:    walStats.PercentUsed,
+		}
+	}
+
+	return status
+}
+
+// hasSeparateWALVolume checks if the WAL directory is on a separate volume
+func (instance *Instance) hasSeparateWALVolume() bool {
+	// Check if pg_wal is a symlink pointing to a different volume
+	walPath := filepath.Join(instance.PgData, "pg_wal")
+	linkTarget, err := filepath.EvalSymlinks(walPath)
+	if err != nil {
+		return false
+	}
+	// If the symlink points outside PgData, it's a separate volume
+	return !strings.HasPrefix(linkTarget, instance.PgData)
 }
 
 // updateResultForDecrease updates the given postgres.PostgresqlStatus
