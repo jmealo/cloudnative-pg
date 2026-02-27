@@ -1,5 +1,7 @@
 AES
 API's
+Cooldowns
+cooldown
 APIGroup
 APIs
 ARMv
@@ -14,8 +16,11 @@ AllNamespaces
 AntiAffinity
 AppArmor
 AppArmorProfile
+ArgoCD
 Armando
 AuthQuery
+Autoresize
+autoresize
 AuthQuerySecret
 Autoscaler
 AvailableArchitecture
@@ -112,6 +117,7 @@ CustomResourceDefinitions
 Customizations
 DBA
 DBaaS
+DS
 DISA
 DNS
 DataBackupConfiguration
@@ -146,6 +152,9 @@ EOF
 EOL
 ESO
 EdwinaZhu
+effectiveSize
+EmergencyGrow
+EmergencyGrowConfig
 EmbeddedObjectMetadata
 EnablePDB
 Endevir
@@ -186,6 +195,7 @@ GUCs
 Gabriele
 GaugeVec
 GeoSpatial
+GiB
 Gi
 GitOps
 GoArch
@@ -197,12 +207,14 @@ GrantUsageSpecType
 HH
 HashiCorp
 HistoryTags
+Homoegeneity
 Homebrew
 Huß
 IAM
 INPLACE
 IOPS
 IPv
+Idempotency
 IRSA
 IaC
 Ibryam
@@ -219,6 +231,8 @@ InstanceID
 InstanceReportedState
 IsolationCheckConfiguration
 Isovalent
+Invariants
+invariants
 Istio
 Istio's
 JSON
@@ -256,12 +270,15 @@ LoadBalancer
 LocalObjectReference
 MAPPEDMETRIC
 MVCC
+MaintenanceWindow
+MaintenanceWindowConfig
 ManagedConfiguration
 ManagedRoles
 ManagedRolesStatus
 ManagedService
 ManagedServices
 MaxItems
+Mealo
 MetricDescription
 MetricName
 MetricType
@@ -282,6 +299,7 @@ NOCREATEDB
 NOCREATEROLE
 NOSUPERUSER
 Namespaces
+NeedsGrow
 Nenciarini
 NetworkPolicies
 NetworkPolicy
@@ -323,6 +341,7 @@ PV
 PVCs
 PascalBourdier
 PasswordState
+PendingGrowth
 PasswordStatus
 Patroni
 Percona
@@ -382,6 +401,7 @@ ProbeTerminationGracePeriod
 ProbeWithStrategy
 ProbesConfiguration
 ProjectedVolumeSource
+PrometheusRule
 Promotable
 PublicationReclaimDelete
 PublicationReclaimPolicy
@@ -417,6 +437,7 @@ ResourceVersion
 RestoreJobHook
 RestoreJobHookCapabilities
 RetentionPolicy
+retriable
 RevokeUsageSpecType
 RoleBinding
 RoleConfiguration
@@ -435,6 +456,7 @@ SDK
 SELinux
 SHA
 SLA
+SLO
 SLSA
 SPDX
 SPoF
@@ -449,6 +471,8 @@ ScheduledBackupList
 ScheduledBackupSpec
 ScheduledBackupStatus
 ScheduledBackups
+ScheduledGrow
+ScheduledShrink
 SchemaSpec
 Scorsolini
 Seccomp
@@ -492,6 +516,7 @@ StatefulSets
 StorageClass
 StorageConfiguration
 Storages
+Strawman
 SubscriptionReclaimDelete
 SubscriptionReclaimPolicy
 SubscriptionReclaimRetain
@@ -506,6 +531,7 @@ SynchronizeReplicasConfiguration
 SynchronousReplicaConfiguration
 SynchronousReplicaConfigurationMethod
 SystemID
+TBD
 TCP
 TLS
 TLSv
@@ -1066,8 +1092,10 @@ managedservices
 matchExpressions
 matchLabels
 mateusoliveira
+maxActionsPerDay
 maxClientConnections
 maxParallel
+maxStep
 maxStandbyNamesFromCluster
 maxSyncReplicas
 maximumLag
@@ -1085,6 +1113,7 @@ microservices
 microsoft
 minApplyDelay
 minKubeVersion
+minStep
 minSyncReplicas
 minikube
 minio
@@ -1245,6 +1274,7 @@ postgresqlcnpgiov
 ppc
 pprof
 pre
+preflight
 preferredDuringSchedulingIgnoredDuringExecution
 preload
 prepended
@@ -1326,7 +1356,9 @@ resourcerequirements
 restoreAdditionalCommandArgs
 restoreJobHookCapabilities
 resync
+resumable
 retentionPolicy
+reviewable
 retryable
 reusePVC
 ro
@@ -1398,6 +1430,7 @@ shmmax
 shusaan
 sig
 sigs
+sizeRange
 sigstore
 singlenamespace
 slotPrefix
@@ -1481,6 +1514,7 @@ systemd
 sysv
 tAc
 tableExpression
+targetBuffer
 tablesInSchema
 tablespace
 tablespaceClassName
@@ -1523,6 +1557,7 @@ toto
 transactionID
 transactional
 transactionid
+tunable
 tx
 ubi
 ui
@@ -1577,6 +1612,7 @@ webserver
 webtest
 wp
 writeService
+writeback
 wsl
 www
 xact

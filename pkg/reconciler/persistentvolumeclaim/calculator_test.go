@@ -71,6 +71,29 @@ var _ = Describe("pvc role test", func() {
 		Expect(role.GetSource(&storageSource)).To(BeEquivalentTo(&dataSource))
 	})
 
+	It("return effective size for pgData when dynamic storage is enabled", func() {
+		cluster := apiv1.Cluster{
+			Spec: apiv1.ClusterSpec{
+				StorageConfiguration: apiv1.StorageConfiguration{
+					Request: "10Gi",
+					Limit:   "100Gi",
+				},
+			},
+			Status: apiv1.ClusterStatus{
+				StorageSizing: &apiv1.StorageSizingStatus{
+					Data: &apiv1.VolumeSizingStatus{
+						EffectiveSize: "25Gi",
+					},
+				},
+			},
+		}
+
+		role := NewPgDataCalculator()
+		config, err := role.GetStorageConfiguration(&cluster)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(config.Size).To(Equal("25Gi"))
+	})
+
 	It("return expected value for pgWal", func() {
 		instanceName := "instance1"
 		backupName := "backup1"
@@ -169,5 +192,59 @@ var _ = Describe("pvc role test", func() {
 		Expect(role.GetSource(nil)).To(BeNil())
 		Expect(role.GetSource(&storageSource2)).Error().Should(HaveOccurred())
 		Expect(role.GetSource(&storageSource1)).To(BeEquivalentTo(&corev1.TypedLocalObjectReference{Name: "test"}))
+	})
+
+	It("return effective size for pgWal when dynamic storage is enabled", func() {
+		cluster := apiv1.Cluster{
+			Spec: apiv1.ClusterSpec{
+				WalStorage: &apiv1.StorageConfiguration{
+					Request: "10Gi",
+					Limit:   "100Gi",
+				},
+			},
+			Status: apiv1.ClusterStatus{
+				StorageSizing: &apiv1.StorageSizingStatus{
+					WAL: &apiv1.VolumeSizingStatus{
+						EffectiveSize: "25Gi",
+					},
+				},
+			},
+		}
+
+		role := NewPgWalCalculator()
+		config, err := role.GetStorageConfiguration(&cluster)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(config.Size).To(Equal("25Gi"))
+	})
+
+	It("return effective size for pgTablespace when dynamic storage is enabled", func() {
+		tbsName := "tbs1"
+		cluster := apiv1.Cluster{
+			Spec: apiv1.ClusterSpec{
+				Tablespaces: []apiv1.TablespaceConfiguration{
+					{
+						Name: tbsName,
+						Storage: apiv1.StorageConfiguration{
+							Request: "10Gi",
+							Limit:   "100Gi",
+						},
+					},
+				},
+			},
+			Status: apiv1.ClusterStatus{
+				StorageSizing: &apiv1.StorageSizingStatus{
+					Tablespaces: map[string]*apiv1.VolumeSizingStatus{
+						tbsName: {
+							EffectiveSize: "25Gi",
+						},
+					},
+				},
+			},
+		}
+
+		role := NewPgTablespaceCalculator(tbsName)
+		config, err := role.GetStorageConfiguration(&cluster)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(config.Size).To(Equal("25Gi"))
 	})
 })

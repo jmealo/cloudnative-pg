@@ -27,6 +27,7 @@ import (
 	"k8s.io/utils/ptr"
 
 	apiv1 "github.com/cloudnative-pg/cloudnative-pg/api/v1"
+	"github.com/cloudnative-pg/cloudnative-pg/pkg/reconciler/dynamicstorage"
 	"github.com/cloudnative-pg/cloudnative-pg/pkg/specs"
 	"github.com/cloudnative-pg/cloudnative-pg/pkg/utils"
 )
@@ -140,7 +141,9 @@ func (r pgDataCalculator) GetName(instanceName string) string {
 // GetStorageConfiguration will return the storage configuration to be used
 // for this PVC role and this cluster
 func (r pgDataCalculator) GetStorageConfiguration(cluster *apiv1.Cluster) (apiv1.StorageConfiguration, error) {
-	return cluster.Spec.StorageConfiguration, nil
+	config := cluster.Spec.StorageConfiguration
+	config.Size = dynamicstorage.GetEffectiveSizeForNewPVC(cluster, dynamicstorage.VolumeTypeData, "")
+	return config, nil
 }
 
 // GetSource gets the PVC source to be used when creating a new PVC
@@ -211,7 +214,12 @@ func (r pgWalCalculator) GetName(instanceName string) string {
 // GetStorageConfiguration will return the storage configuration to be used
 // for this PVC role and this cluster
 func (r pgWalCalculator) GetStorageConfiguration(cluster *apiv1.Cluster) (apiv1.StorageConfiguration, error) {
-	return *cluster.Spec.WalStorage, nil
+	if cluster.Spec.WalStorage == nil {
+		return apiv1.StorageConfiguration{}, nil
+	}
+	config := *cluster.Spec.WalStorage
+	config.Size = dynamicstorage.GetEffectiveSizeForNewPVC(cluster, dynamicstorage.VolumeTypeWAL, "")
+	return config, nil
 }
 
 // GetSource gets the PVC source to be used when creating a new PVC
@@ -294,7 +302,9 @@ func (r pgTablespaceCalculator) GetStorageConfiguration(cluster *apiv1.Cluster) 
 				r.tablespaceName,
 			)
 	}
-	return *storageConfiguration, nil
+	config := *storageConfiguration
+	config.Size = dynamicstorage.GetEffectiveSizeForNewPVC(cluster, dynamicstorage.VolumeTypeTablespace, r.tablespaceName)
+	return config, nil
 }
 
 // GetSource gets the PVC source to be used when creating a new PVC

@@ -1,0 +1,10 @@
+# github.com/cloudnative-pg/cloudnative-pg/pkg/reconciler/dynamicstorage.test
+ld: warning: search path '/opt/local/lib' not found
+ld: warning: search path '/opt/local/lib' not found
+=== RUN   TestDynamicStorage
+Running Suite: Dynamic Storage Suite - /Users/jmealo/repos/cloudnative-pg-gemini/pkg/reconciler/dynamicstorage
+==============================================================================================================
+Random Seed: [1m1770615833[0m
+
+Will run [1m50[0m of [1m50[0m specs
+[38;5;10m•[0m[38;5;10m•[0m[38;5;10m•[0m[38;5;10m•[0m[38;5;10m•[0m[38;5;10m•[0m[38;5;10m•[0m[38;5;10m•[0m[38;5;10m•[0m[38;5;10m•[0m[38;5;10m•[0m[38;5;10m•[0m[38;5;10m•[0m[38;5;10m•[0m[38;5;10m•[0m[38;5;10m•[0m[38;5;10m•[0m[38;5;10m•[0m[38;5;10m•[0m[38;5;10m•[0m[38;5;10m•[0m[38;5;10m•[0m[38;5;10m•[0m[38;5;10m•[0m[38;5;10m•[0m[38;5;10m•[0m[38;5;10m•[0m[38;5;10m•[0m

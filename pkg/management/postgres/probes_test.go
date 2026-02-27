@@ -33,6 +33,28 @@ import (
 )
 
 var _ = Describe("probes", func() {
+	It("GetStatus should return partial status with ErrorMessage when DB is down but disk is accessible", func() {
+		// Mock the PgData path
+		tmpDir := GinkgoT().TempDir()
+
+		// Create instance
+		instance := NewInstance()
+		instance.PgData = tmpDir
+
+		// We expect GetStatus to fail because the instance is not running/mocked DB connection fails
+		status, err := instance.GetStatus()
+		Expect(err).To(HaveOccurred())
+
+		// But we expect partial status to be returned
+		Expect(status).ToNot(BeNil())
+		Expect(status.ErrorMessage).ToNot(BeEmpty())
+		Expect(status.ErrorMessage).To(Equal(err.Error()))
+
+		// And specifically DiskStatus should be populated
+		Expect(status.DiskStatus).ToNot(BeNil())
+		Expect(status.DiskStatus.TotalBytes).To(BeNumerically(">", 0))
+	})
+
 	It("fillWalStatus should properly handle errors", func() {
 		instance := &Instance{}
 		status := &postgres.PostgresqlStatus{
